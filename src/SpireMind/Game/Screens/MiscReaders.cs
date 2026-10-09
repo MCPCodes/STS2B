@@ -1,14 +1,16 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json.Nodes;
+using MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereItems;
 
 // Same namespace as ScreenRouter, which refers to the readers unqualified.
 namespace SpireMind.Game;
 
 /// <summary>
 /// The end of a run (NGameOverScreen on the overlay stack): win, loss or abandon, where it
-/// ended, and the final build, so the bot can write its post-mortem before leaving. The only
-/// action is "continue", one click on the screen's continue or return-to-menu button once it
-/// is shown and enabled; it keeps the same id whichever of the two is up.
+/// ended, the score and the final build, so the bot can write its post-mortem before leaving.
+/// The only action is "continue", one click on whichever of the screen's buttons is shown and
+/// enabled: continue (to the run summary), then on a daily run the leaderboard button (also an
+/// NGameOverContinueButton), then return to the main menu. A disabled one is also hidden.
 /// </summary>
 internal sealed class GameOverReader : IScreen
 {
@@ -19,28 +21,14 @@ internal sealed class GameOverReader : IScreen
     /// <summary>The screen fades in over the last room; don't offer a click before it has.</summary>
     private static readonly TimeSpan Settle = TimeSpan.FromMilliseconds(800);
 
-    /// <summary>How often Capture may walk the screen's tree while the button or score is missing.</summary>
+    /// <summary>How often Capture may walk the screen's tree while no button is shown.</summary>
     private static readonly TimeSpan Rescan = TimeSpan.FromMilliseconds(500);
-
-    /// <summary>Stop looking for a score label after this long; it isn't on this screen.</summary>
-    private static readonly TimeSpan ScoreSearch = TimeSpan.FromSeconds(10);
 
     /// <summary>No continue button after this long gets logged once, with the buttons that are there.</summary>
     private static readonly TimeSpan NoButtonLog = TimeSpan.FromSeconds(8);
 
     /// <summary>Continuing can run the run's clean-up and a transition before the menu shows.</summary>
     private static readonly TimeSpan ContinueTimeout = TimeSpan.FromSeconds(10);
-
-    private const int MaxScoreChars = 120;
-
-    /// <summary>
-    /// Matched by class name, then by node name, so a rename hides the action instead of breaking the build.
-    /// VERIFY: the game over screen's buttons are classes NGameOverContinueButton / NReturnToMainMenuButton deriving from NClickableControl
-    /// </summary>
-    private static readonly string[] ContinueButtonTypes = ["NGameOverContinueButton", "NReturnToMainMenuButton"];
-
-    // VERIFY: node names of the game over screen's continue / main menu buttons contain one of these (fallback when the classes differ)
-    private static readonly string[] ContinueButtonNames = ["Continue", "MainMenu"];
 
     private GameOverReader() { }
 
@@ -50,7 +38,6 @@ internal sealed class GameOverReader : IScreen
     private static DateTime _firstSeen;
     private static DateTime _lastScan;
     private static NClickableControl? _button;
-    private static List<Godot.Control> _scoreLabels = new();
     private static bool _loggedNoButton;
 
     private static void Track(NGameOverScreen screen)
@@ -61,7 +48,6 @@ internal sealed class GameOverReader : IScreen
         _firstSeen = DateTime.UtcNow;
         _lastScan = DateTime.MinValue;
         _button = null;
-        _scoreLabels = new List<Godot.Control>();
         _loggedNoButton = false;
     }
 
@@ -93,7 +79,7 @@ internal sealed class GameOverReader : IScreen
             Screen = Name,
             AwaitingDecision = true,
             State = state,
-            Actions = [new LegalAction("continue", "Continue to the main menu")],
+            Actions = [new LegalAction("continue", _button is NReturnToMainMenuButton ? "Return to the main menu" : "Continue to the next page of the game over screen")],
         };
     }
 
@@ -154,10 +140,11 @@ internal sealed class GameOverReader : IScreen
             state["run"] = Describe.RunInfo(rs);
             if (rs.CurrentRoom is { } room)
                 state["room"] = room.RoomType.ToString();
-        }
 
-        var score = ScoreText();
-        if (score.Length > 0) state["score"] = score;
+            // The screen computes the same number from its saved copy of the run.
+            try { state["score"] = ScoreUtility.CalculateScore(rs, result == "victory"); }
+            catch { /* the score is a nicety; the rest of the snapshot still stands */ }
+        }
 
         if (ctx.Me is { } me)
             state["player"] = Describe.PlayerRun(me, includeDeck: true);
@@ -165,59 +152,26 @@ internal sealed class GameOverReader : IScreen
     }
 
     /// <summary>
-    /// Finds the continue button and the score labels with one walk of the screen, at most every
-    /// <see cref="Rescan"/>, and only while one of them is missing or the button was hidden (the
-    /// screen can swap its continue button for a main menu one). <paramref name="force"/> walks now.
+    /// Finds the button to click with one walk of the screen, at most every <see cref="Rescan"/>,
+    /// and only while none is shown (each stage hides its button and shows the next one's).
+    /// <paramref name="force"/> walks now.
     /// </summary>
     private static void Refresh(NGameOverScreen screen, DateTime now, bool force)
     {
-        var haveButton = _button is { } b && Nodes.Alive(b) && Nodes.IsShown(b);
-        var doneWithScore = _scoreLabels.Count > 0 || now - _firstSeen > ScoreSearch;
-        if (!force && haveButton && doneWithScore) return;
+        if (!force && _button is { } b && Nodes.Alive(b) && Nodes.IsShown(b)) return;
         if (!force && now - _lastScan < Rescan) return;
         _lastScan = now;
 
         NClickableControl? shown = null;
         NClickableControl? hidden = null;
-        var labels = new List<Godot.Control>();
-        foreach (var child in Nodes.FindAll<Node>(screen))
+        foreach (var button in Nodes.FindAll<NClickableControl>(screen))
         {
-            if (child is NClickableControl button)
-            {
-                if (!IsContinueButton(button)) continue;
-                if (Nodes.IsShown(button)) shown ??= button;
-                else hidden ??= button;
-            }
-            // VERIFY: the game over screen's score label has "Score" in its node name (Label or RichTextLabel, e.g. MegaLabel)
-            else if (child is Godot.Control label && label is Godot.Label or Godot.RichTextLabel
-                     && label.Name.ToString().Contains("Score", StringComparison.OrdinalIgnoreCase))
-            {
-                labels.Add(label);
-            }
+            if (button is not (NGameOverContinueButton or NReturnToMainMenuButton)) continue;
+            if (Nodes.IsShown(button)) shown ??= button;
+            else hidden ??= button;
         }
 
         _button = shown ?? hidden;
-        if (labels.Count > 0) _scoreLabels = labels;
-    }
-
-    private static bool IsContinueButton(NClickableControl button)
-    {
-        var type = button.GetType().Name;
-        if (ContinueButtonTypes.Contains(type, StringComparer.Ordinal)) return true;
-        var name = button.Name.ToString();
-        return ContinueButtonNames.Any(n => name.Contains(n, StringComparison.OrdinalIgnoreCase));
-    }
-
-    private static string ScoreText()
-    {
-        var parts = new List<string>();
-        foreach (var label in _scoreLabels)
-        {
-            if (!Nodes.Alive(label) || !label.IsVisibleInTree()) continue;
-            var text = Nodes.LabelText(label);
-            if (text.Length > 0 && !parts.Contains(text)) parts.Add(text);
-        }
-        return MiscUi.Cap(string.Join(" / ", parts), MaxScoreChars);
     }
 
     private static string NoButtonReason(NGameOverScreen screen, DateTime now)
@@ -240,10 +194,11 @@ internal sealed class GameOverReader : IScreen
 
 /// <summary>
 /// A popup in NModalContainer, which sits above every other screen. Tutorial (FTUE) popups
-/// get "dismiss", one click on their confirm button. Everything else (error popups, the
+/// get "dismiss", one click on their confirm button (the three-page combat rules tutorial has
+/// a next arrow instead, clicked once per page). Everything else (error popups, the
 /// mod-loading consent prompt whose Yes saves and quits the game, the abandon-run
-/// confirmation, anything unknown) is left for Mark: no actions, and a wait that names the
-/// popup's class.
+/// confirmation, the "enable tutorials?" choice, anything unknown) is left for Mark: no
+/// actions, and a wait that names the popup's class.
 /// </summary>
 internal sealed class ModalReader : IScreen
 {
@@ -267,20 +222,21 @@ internal sealed class ModalReader : IScreen
 
     private const int MaxTextChars = 300;
 
-    // VERIFY: the tutorial popups' classes live in MegaCrit.Sts2.Core.Nodes.Ftue (or have "Ftue" in their class name)
-    private const string FtueNamespace = "MegaCrit.Sts2.Core.Nodes.Ftue";
-
     /// <summary>
-    /// Matched by class name so a rename hides the action instead of breaking the build.
-    /// VERIFY: the tutorial popups' confirm button class is NFtueConfirmButton, deriving from NClickableControl
+    /// Node name of the tutorials' confirm button (each NFtue gets it by this name, typed only
+    /// as NButton, so the name backs up the NFtueConfirmButton class check).
     /// </summary>
-    private const string FtueConfirmType = "NFtueConfirmButton";
+    private const string FtueConfirmName = "FtueConfirmButton";
+
+    /// <summary>NCombatRulesFtue's next-page arrow; on the last page it closes the tutorial.</summary>
+    private const string RulesNextName = "RightArrow";
 
     /// <summary>
     /// Never clicked, whatever buttons they hold: matched against the popup's class name.
-    /// "ModLoading" is NConfirmModLoadingPopup, whose Yes saves and quits the game.
+    /// "ModLoading" is NConfirmModLoadingPopup, whose Yes saves and quits the game;
+    /// "AcceptTutorials" is the yes/no on turning tutorials off, a setting for Mark.
     /// </summary>
-    private static readonly string[] NeverTouch = ["ModLoading", "ModConsent", "Error", "Abandon", "Quit", "Disconnect"];
+    private static readonly string[] NeverTouch = ["ModLoading", "ModConsent", "Error", "Abandon", "Quit", "Disconnect", "AcceptTutorials"];
 
     private ModalReader() { }
 
@@ -427,30 +383,26 @@ internal sealed class ModalReader : IScreen
         return NeverTouch.Any(s => type.Contains(s, StringComparison.OrdinalIgnoreCase));
     }
 
-    private static bool IsFtuePopup(Node modal)
-    {
-        var type = modal.GetType();
-        return type.Namespace?.StartsWith(FtueNamespace, StringComparison.Ordinal) == true
-            || type.Name.Contains("Ftue", StringComparison.OrdinalIgnoreCase);
-    }
-
     /// <summary>A tutorial the bot may dismiss: an FTUE popup, or any popup holding an FTUE confirm button, and never one on the deny list.</summary>
     private static bool IsTutorial(Node modal) =>
-        !NeverClick(modal) && (IsFtuePopup(modal) || ConfirmButton(modal) is not null);
+        !NeverClick(modal) && (modal is NFtue || ConfirmButton(modal) is not null);
 
     /// <summary>
-    /// An NFtueConfirmButton anywhere in the popup, or an NConfirmButton when the popup itself is
-    /// a tutorial; a shown one first. Popups are small, so walking one per poll is cheap.
+    /// An NFtueConfirmButton anywhere in the popup, or in a tutorial the button by its confirm
+    /// (or, for the combat rules, next-page) node name; a shown one first. Popups are small, so
+    /// walking one per poll is cheap.
     /// </summary>
     private static NClickableControl? ConfirmButton(Node modal)
     {
         if (NeverClick(modal)) return null;
-        var ftue = IsFtuePopup(modal);
+        var ftue = modal is NFtue;
         NClickableControl? hidden = null;
         foreach (var button in Nodes.FindAll<NClickableControl>(modal))
         {
-            var match = button.GetType().Name == FtueConfirmType
-                || (ftue && button is NConfirmButton); // VERIFY: NConfirmButton derives from NClickableControl
+            var name = button.Name.ToString();
+            var match = button is NFtueConfirmButton
+                || (ftue && name == FtueConfirmName)
+                || (modal is NCombatRulesFtue && name == RulesNextName);
             if (!match) continue;
             if (Nodes.IsShown(button)) return button;
             hidden ??= button;
@@ -493,7 +445,8 @@ internal sealed class MenuReader : IScreen
         var waiting = node switch
         {
             NCharacterSelectScreen => "in character select; start the run and I'll take over",
-            _ when RunManager.Instance?.IsInProgress == true => "a run is starting",
+            // Also what a failed Continue leaves behind: it shows an error popup but never cleans the run up.
+            _ when RunManager.Instance?.IsInProgress == true => "a run is starting; if nothing happens, start or continue a run and I'll take over",
             _ => "on the main menu; start or continue a run and I'll take over",
         };
 
@@ -513,8 +466,12 @@ internal sealed class MenuReader : IScreen
 }
 
 /// <summary>
-/// The Crystal Sphere event's minigame (NCrystalSphereScreen). Version 1 doesn't play it:
-/// it is reported as a wait for Mark, and the rewards screen that follows is read as usual.
+/// The Crystal Sphere event's minigame (NCrystalSphereScreen), local and unsynced: an 11x11
+/// fog grid hiding items, and a few divinations. "cell:x,y" spends one on a hidden cell (the
+/// big tool, the default, clears the 3x3 around it; the small one just that cell), and
+/// "tool:big" / "tool:small" switch tools. Once the divinations run out, the items cleared
+/// completely come as a rewards screen pushed on top (RewardsReader), then "proceed" opens the
+/// map, leaving this screen under it until the next room.
 /// </summary>
 internal sealed class CrystalSphereReader : IScreen
 {
@@ -522,18 +479,258 @@ internal sealed class CrystalSphereReader : IScreen
 
     public string Name => "crystal_sphere";
 
+    /// <summary>The screen fades in for half a second before the items show.</summary>
+    private static readonly TimeSpan Settle = TimeSpan.FromSeconds(1);
+
+    /// <summary>Divinations closer together than this can overlap one still clearing its cells.</summary>
+    private static readonly TimeSpan ClickGap = TimeSpan.FromMilliseconds(500);
+
+    private static readonly TimeSpan DivineTimeout = TimeSpan.FromSeconds(4);
+
+    private static readonly TimeSpan ProceedTimeout = TimeSpan.FromSeconds(10);
+
+    private const string Legend = "grid rows run top to bottom and columns left to right, both from 0; # fog, . nothing, "
+        + "R relic, P potion, C card reward, G gold, X curse (a Doubt; bad). Letters are item parts already cleared; "
+        + "an item is yours once all its cells are clear";
+
     private CrystalSphereReader() { }
 
-    public GameSnapshot Capture(GameContext ctx, Node? node) => new()
-    {
-        Screen = Name,
-        AwaitingDecision = false,
-        Waiting = "Crystal Sphere minigame: please play it by hand",
-        State = new JsonObject { ["minigame"] = "crystal_sphere" },
-    };
+    // ---------- per-screen memory (reset when a different sphere shows up) ----------
 
-    public ActionResult Execute(GameContext ctx, Node? node, string actionId) =>
-        ActionResult.Fail("The Crystal Sphere minigame is played by hand for now.");
+    private static ulong _screenId;
+    private static DateTime _firstSeen;
+    private static bool _loggedNoGame;
+
+    private static void Track(NCrystalSphereScreen screen)
+    {
+        var id = screen.GetInstanceId();
+        if (id == _screenId) return;
+        _screenId = id;
+        _firstSeen = DateTime.UtcNow;
+        _loggedNoGame = false;
+    }
+
+    // ---------- IScreen ----------
+
+    public GameSnapshot Capture(GameContext ctx, Node? node)
+    {
+        if (node is not NCrystalSphereScreen screen || !Nodes.Alive(screen))
+            return GameSnapshot.Busy(Name, "crystal sphere closing");
+
+        Track(screen);
+        var game = Game(screen);
+        var state = game is null ? new JsonObject() : BuildState(game);
+        var proceed = Nodes.Get<NProceedButton>(screen, "%ProceedButton");
+
+        string? waiting = null;
+        var actions = new List<LegalAction>();
+        if (DateTime.UtcNow - _firstSeen < Settle)
+            waiting = "crystal sphere appearing";
+        else if (MiscUi.Usable(proceed))
+        {
+            if (Clicks.RecentlyClicked(proceed))
+                waiting = "leaving the crystal sphere";
+            else
+                actions.Add(new LegalAction("proceed", "Leave the Crystal Sphere for the map"));
+        }
+        else if (game is null)
+            waiting = "can't read the Crystal Sphere; please play it by hand";
+        else if (game.DivinationCount <= 0)
+            waiting = "the Crystal Sphere is handing out its rewards";
+        else
+        {
+            // Only fog: a click on a cleared cell still spends a divination.
+            foreach (var cell in Cells(screen).OrderBy(c => c.Entity.Y).ThenBy(c => c.Entity.X))
+            {
+                if (!cell.Entity.IsHidden || !Nodes.IsShown(cell)) continue;
+                var (x, y) = (cell.Entity.X, cell.Entity.Y);
+                actions.Add(new LegalAction($"cell:{x},{y}", $"Divine at column {x}, row {y}"));
+            }
+
+            var big = game.CrystalSphereTool == CrystalSphereMinigame.CrystalSphereToolType.Big;
+            if (actions.Count == 0)
+                waiting = "no fog left to divine";
+            else if (MiscUi.Usable(ToolButton(screen, small: big)))
+                actions.Add(big
+                    ? new LegalAction("tool:small", "Switch to the small tool (clears one cell)")
+                    : new LegalAction("tool:big", "Switch to the big tool (clears the 3x3 around a cell)"));
+        }
+
+        if (waiting is not null)
+            return new GameSnapshot { Screen = Name, AwaitingDecision = false, Waiting = waiting, State = state };
+
+        return new GameSnapshot { Screen = Name, AwaitingDecision = true, State = state, Actions = actions };
+    }
+
+    public ActionResult Execute(GameContext ctx, Node? node, string actionId)
+    {
+        if (node is not NCrystalSphereScreen screen || !Nodes.Alive(screen))
+            return ActionResult.Fail("The Crystal Sphere is gone.");
+
+        Track(screen);
+        if (DateTime.UtcNow - _firstSeen < Settle)
+            return ActionResult.Fail("The Crystal Sphere is still appearing.");
+
+        if (actionId == "proceed")
+            return Proceed(screen);
+
+        if (Game(screen) is not { } game)
+            return ActionResult.Fail("Can't read the Crystal Sphere.");
+
+        if (actionId is "tool:big" or "tool:small")
+        {
+            var small = actionId == "tool:small";
+            if (ToolButton(screen, small) is not { } button || !MiscUi.Usable(button))
+                return ActionResult.Fail("That tool's button is not available.");
+            // SetTool runs inside the button's handler, so nothing to wait for.
+            return Clicks.Once(button, () => button.ForceClick(), small ? "the small tool button" : "the big tool button");
+        }
+
+        if (actionId.StartsWith("cell:", StringComparison.Ordinal) && TryParseCell(actionId.AsSpan(5), out var x, out var y))
+            return Divine(screen, game, x, y);
+
+        return ActionResult.Fail($"Unknown Crystal Sphere action '{actionId}'.");
+    }
+
+    // ---------- actions ----------
+
+    private static ActionResult Divine(NCrystalSphereScreen screen, CrystalSphereMinigame game, int x, int y)
+    {
+        if (game.DivinationCount <= 0)
+            return ActionResult.Fail("No divinations left.");
+        if (Cells(screen).FirstOrDefault(c => c.Entity.X == x && c.Entity.Y == y) is not { } cell)
+            return ActionResult.Fail($"There is no cell at column {x}, row {y}.");
+        if (!cell.Entity.IsHidden)
+            return ActionResult.Fail("That cell is already clear; divining it would waste a divination.");
+
+        var before = game.DivinationCount;
+        var area = Area(game, x, y);
+        var click = Clicks.Once(cell, () => cell.ForceClick(), $"the cell at column {x}, row {y}");
+        if (!click.Ok)
+            return click;
+
+        // Done once the divination is spent and its cells are clear (a revealed curse is added
+        // to the deck before the rest of the 3x3 clears). The minimum wait spaces the clicks.
+        var id = screen.GetInstanceId();
+        ActionTracker.Begin(
+            $"divining at column {x}, row {y}",
+            _ => !Nodes.Alive(screen)
+                || !Nodes.IsTopOverlay(id)
+                || (game.DivinationCount < before && area.All(c => !c.IsHidden)),
+            DivineTimeout,
+            ClickGap);
+        return ActionResult.Success;
+    }
+
+    private static ActionResult Proceed(NCrystalSphereScreen screen)
+    {
+        if (Nodes.Get<NProceedButton>(screen, "%ProceedButton") is not { } button || !MiscUi.Usable(button))
+            return ActionResult.Fail("The proceed button is not enabled yet.");
+
+        var click = Clicks.Once(button, () => button.ForceClick(), "the proceed button");
+        if (!click.Ok)
+            return click;
+
+        // Proceed opens the map over this screen, which stays on the overlay stack.
+        var id = screen.GetInstanceId();
+        ActionTracker.Begin(
+            "leaving the crystal sphere",
+            _ => !Nodes.Alive(screen) || !Nodes.IsTopOverlay(id) || NMapScreen.Instance?.IsOpen == true,
+            ProceedTimeout);
+        return ActionResult.Success;
+    }
+
+    // ---------- reading ----------
+
+    /// <summary>The minigame behind the screen, a private field: the only way to its divinations and tool.</summary>
+    private static CrystalSphereMinigame? Game(NCrystalSphereScreen screen)
+    {
+        if (Nodes.TryGetPrivate(screen, "_entity") is CrystalSphereMinigame game)
+            return game;
+        if (!_loggedNoGame)
+        {
+            _loggedNoGame = true;
+            ModEntry.LogError("crystal sphere: NCrystalSphereScreen._entity is missing; leaving the minigame to Mark");
+        }
+        return null;
+    }
+
+    private static List<NCrystalSphereCell> Cells(NCrystalSphereScreen screen) =>
+        Nodes.FindAll<NCrystalSphereCell>(Nodes.Get<Node>(screen, "%Cells"));
+
+    private static NDivinationButton? ToolButton(NCrystalSphereScreen screen, bool small) =>
+        Nodes.Get<NDivinationButton>(screen, small ? "%SmallDivinationButton" : "%BigDivinationButton");
+
+    /// <summary>The cells a divination at (x, y) clears with the current tool, clipped to the grid.</summary>
+    private static List<CrystalSphereCell> Area(CrystalSphereMinigame game, int x, int y)
+    {
+        var size = game.GridSize;
+        var r = game.CrystalSphereTool == CrystalSphereMinigame.CrystalSphereToolType.Big ? 1 : 0;
+        var area = new List<CrystalSphereCell>();
+        for (var cx = Math.Max(0, x - r); cx <= Math.Min(size.X - 1, x + r); cx++)
+            for (var cy = Math.Max(0, y - r); cy <= Math.Min(size.Y - 1, y + r); cy++)
+                area.Add(game.cells[cx, cy]);
+        return area;
+    }
+
+    private static bool TryParseCell(ReadOnlySpan<char> text, out int x, out int y)
+    {
+        x = y = -1;
+        var comma = text.IndexOf(',');
+        return comma > 0 && int.TryParse(text[..comma], out x) && int.TryParse(text[(comma + 1)..], out y);
+    }
+
+    /// <summary>What a human sees: the fog, cleared cells, and the parts of items showing through.</summary>
+    private static JsonObject BuildState(CrystalSphereMinigame game)
+    {
+        var size = game.GridSize;
+        var rows = new JsonArray();
+        for (var y = 0; y < size.Y; y++)
+        {
+            var row = new char[size.X];
+            for (var x = 0; x < size.X; x++)
+            {
+                var cell = game.cells[x, y];
+                row[x] = cell.IsHidden ? '#' : cell.Item is { } item ? Kind(item).Letter : '.';
+            }
+            rows.Add(new string(row));
+        }
+
+        var uncovered = new JsonArray();
+        foreach (var item in game.Items)
+            if (IsCleared(game, item))
+                uncovered.Add(Kind(item).Name);
+
+        return new JsonObject
+        {
+            ["divinations_left"] = game.DivinationCount,
+            ["tool"] = game.CrystalSphereTool == CrystalSphereMinigame.CrystalSphereToolType.Big
+                ? "big: clears the 3x3 around the chosen cell"
+                : "small: clears just the chosen cell",
+            ["grid"] = rows,
+            ["legend"] = Legend,
+            ["uncovered"] = uncovered,
+        };
+    }
+
+    private static bool IsCleared(CrystalSphereMinigame game, CrystalSphereItem item)
+    {
+        for (var i = 0; i < item.Size.X; i++)
+            for (var j = 0; j < item.Size.Y; j++)
+                if (game.cells[item.Position.X + i, item.Position.Y + j].IsHidden)
+                    return false;
+        return true;
+    }
+
+    private static (char Letter, string Name) Kind(CrystalSphereItem item) => item switch
+    {
+        CrystalSphereRelic => ('R', "relic"),
+        CrystalSpherePotion => ('P', "potion"),
+        CrystalSphereCardReward => ('C', "card reward"),
+        CrystalSphereGold => ('G', "gold"),
+        CrystalSphereCurse => ('X', "curse"),
+        _ => ('?', item.GetType().Name),
+    };
 }
 
 /// <summary>Node checks and label reading shared by the readers in this file.</summary>
@@ -541,7 +738,7 @@ file static class MiscUi
 {
     /// <summary>Clickable by a human right now: alive, drawn and enabled (ForceClick checks none of it).</summary>
     public static bool Usable([NotNullWhen(true)] NClickableControl? button) =>
-        Nodes.Alive(button) && Nodes.IsShown(button) && button.IsEnabled; // VERIFY: NClickableControl has bool IsEnabled and ForceClick() (docs name only btn.ForceClick/IsEnabled generically)
+        Nodes.Alive(button) && Nodes.IsShown(button) && button.IsEnabled;
 
     /// <summary>Every visible label under <paramref name="root"/>, in tree order, without repeats.</summary>
     public static string VisibleText(Node root)

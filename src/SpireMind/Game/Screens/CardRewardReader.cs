@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
+using MegaCrit.Sts2.Core.Entities.CardRewardAlternatives;
 
 // Same namespace as ScreenRouter, which refers to the readers unqualified.
 namespace SpireMind.Game;
@@ -30,9 +31,6 @@ internal sealed class CardRewardReader : IScreen
     /// again rather than wait forever.
     /// </summary>
     private static readonly TimeSpan ChoiceHold = TimeSpan.FromSeconds(8);
-
-    /// <summary>Child order of the alternative buttons, used when neither node name nor label identifies one.</summary>
-    private static readonly string[] AlternativeOrder = ["skip", "reroll", "sacrifice"];
 
     private sealed record Option(NGridCardHolder Holder, CardModel Card);
 
@@ -149,34 +147,35 @@ internal sealed class CardRewardReader : IScreen
     private static ActionResult UseAlternative(NCardRewardSelectionScreen screen, List<Option> options, Alternative alt)
     {
         var button = alt.Button;
-        if (!Nodes.IsShown(button) || !button.IsEnabled) // VERIFY: NCardRewardAlternativeButton has IsEnabled (NButton-style, like the other clickables)
+        if (!Nodes.IsShown(button) || !button.IsEnabled)
             return ActionResult.Fail($"The {alt.Id} button is not available right now.");
         if (alt.Id == "sacrifice" && _sacrificed)
             return ActionResult.Fail("Already sacrificed on this card reward.");
 
+        // Skip and Sacrifice end the selection (the screen's TaskCompletionSource is spent, so a
+        // card press now would throw); Reroll swaps the cards in place and the screen stays.
+        var ends = alt.Id != "reroll";
         var screenId = screen.GetInstanceId();
         var before = CardsKey(options);
         var click = Clicks.Once(button, () =>
         {
-            if (alt.Id == "skip") _choseAt = DateTime.UtcNow;
-            else if (alt.Id == "sacrifice") _sacrificed = true;
+            if (ends) _choseAt = DateTime.UtcNow;
+            if (alt.Id == "sacrifice") _sacrificed = true;
             button.ForceClick();
         }, $"{alt.Id} button");
         if (!click.Ok)
             return click;
 
-        if (alt.Id == "skip")
+        if (ends)
         {
-            ActionTracker.Begin("skipping the card reward", _ => !Nodes.IsTopOverlay(screenId), CloseTimeout);
+            ActionTracker.Begin(
+                alt.Id == "skip" ? "skipping the card reward" : "sacrificing the card reward",
+                _ => !Nodes.IsTopOverlay(screenId),
+                CloseTimeout);
         }
         else
         {
-            // Reroll swaps the cards in place. What Sacrifice leaves behind isn't documented,
-            // so accept either outcome for it too.
-            ActionTracker.Begin(
-                alt.Id == "reroll" ? "rerolling the cards" : "sacrificing the card reward",
-                _ => !Nodes.IsTopOverlay(screenId) || CardsChanged(screen, before),
-                RerollTimeout);
+            ActionTracker.Begin("rerolling the cards", _ => !Nodes.IsTopOverlay(screenId) || CardsChanged(screen, before), RerollTimeout);
         }
         return ActionResult.Success;
     }
@@ -199,7 +198,7 @@ internal sealed class CardRewardReader : IScreen
         foreach (var holder in Nodes.FindAll<NGridCardHolder>(Nodes.Get<Node>(screen, "UI/CardRow")))
         {
             if (Nodes.Gone(holder)) continue;
-            if (holder.CardModel is { } card) // VERIFY: NGridCardHolder exposes CardModel (inherited from NCardHolder, as the hand holders do)
+            if (holder.CardModel is { } card)
                 options.Add(new Option(holder, card));
         }
         return options;
@@ -212,18 +211,16 @@ internal sealed class CardRewardReader : IScreen
             .ToList();
 
         var texts = buttons.Select(b => Nodes.FirstLabelText(b)).ToList();
+
+        // RefreshOptions builds one button per entry of the private _extraOptions, in order, and
+        // each entry's OptionId ("Skip", "REROLL", "SACRIFICE") names it in any language. The
+        // label is only a fallback for when that list doesn't line up with the live buttons.
+        var extra = Nodes.TryGetPrivate(screen, "_extraOptions") as IReadOnlyList<CardRewardAlternative>;
         var ids = new string?[buttons.Count];
         for (var i = 0; i < buttons.Count; i++)
-            ids[i] = IdFrom(buttons[i].Name.ToString()) ?? IdFrom(texts[i]);
-
-        // The documented child order is Skip, Reroll, Sacrifice. Positions are only trusted
-        // when all three are there; otherwise just the first slot is taken to be Skip.
-        for (var i = 0; i < buttons.Count; i++)
-        {
-            if (ids[i] is not null) continue;
-            var guess = buttons.Count == AlternativeOrder.Length ? AlternativeOrder[i] : i == 0 ? "skip" : null;
-            if (guess is not null && !ids.Contains(guess)) ids[i] = guess;
-        }
+            ids[i] = extra?.Count == buttons.Count
+                ? extra[i].OptionId.ToLowerInvariant()
+                : IdFrom(buttons[i].Name.ToString()) ?? IdFrom(texts[i]);
 
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var list = new List<Alternative>();

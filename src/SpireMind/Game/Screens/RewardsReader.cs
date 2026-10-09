@@ -28,7 +28,7 @@ internal sealed class RewardsReader : IScreen
     /// <summary>How long a disabled reward button counts as "still appearing" after the screen opens.</summary>
     private static readonly TimeSpan AppearGrace = TimeSpan.FromSeconds(3);
 
-    /// <summary>The same, after one of our claims (the list re-lays out, co-op claims round-trip).</summary>
+    /// <summary>The same, after one of our claims (the list re-lays out).</summary>
     private static readonly TimeSpan ClaimGrace = TimeSpan.FromSeconds(2);
 
     /// <summary>A potion claim that never disables its button and is still enabled after this long has bounced.</summary>
@@ -60,8 +60,8 @@ internal sealed class RewardsReader : IScreen
     private static readonly Dictionary<ulong, int> Tried = new();
 
     /// <summary>
-    /// Set once we press proceed on a boss room's rewards. That press may be the act vote even
-    /// when <see cref="LeavesAct"/> can't tell (two-boss rows), and a second vote skips an act.
+    /// Set once we press proceed on a boss room's rewards. Backstop for the act latch: the game
+    /// re-enables that button after the vote, and a second vote can skip an act.
     /// </summary>
     private static bool _bossProceedPressed;
 
@@ -89,7 +89,7 @@ internal sealed class RewardsReader : IScreen
 
         Track(screen);
         var rewards = ReadRewards(screen, me);
-        var leavesAct = LeavesAct(rs);
+        var leavesAct = LeavesAct(rs, screen);
         var state = BuildState(ctx, rs, me, rewards, leavesAct);
 
         var waiting = WaitingReason(ctx, rs, rewards, leavesAct);
@@ -205,7 +205,7 @@ internal sealed class RewardsReader : IScreen
             return ActionResult.Fail("The proceed button is not enabled yet.");
 
         var act = rs.CurrentActIndex;
-        var leavesAct = LeavesAct(rs);
+        var leavesAct = LeavesAct(rs, screen);
         if (leavesAct && Latches.ActVoteCastFor == act)
             return ActionResult.Fail("Already voted to go on to the next act.");
         var bossRoom = rs.CurrentRoom?.RoomType == RoomType.Boss;
@@ -259,8 +259,8 @@ internal sealed class RewardsReader : IScreen
         if (now - _firstSeen < Settle)
             return "rewards appearing";
 
-        // A disabled button right after opening or after a claim is usually mid-animation;
-        // offering proceed then could skip a reward that is about to become clickable.
+        // The game disables a reward button while its claim is in flight and re-enables it when
+        // the claim bounces; offering proceed then could skip a reward that is about to come back.
         if (rewards.Any(r => !r.Enabled) && (now - _firstSeen < AppearGrace || now - _lastClaim < ClaimGrace))
             return "rewards appearing";
 
@@ -280,7 +280,8 @@ internal sealed class RewardsReader : IScreen
         {
             if (Nodes.Gone(button)) continue;
             var enabled = button.IsEnabled;
-            // One we clicked that is now disabled is being claimed or playing its exit animation.
+            // One we clicked that is now disabled is still being claimed. A claimed row is then
+            // removed at once; a card reward or removal bounces only as its own screen closes.
             if (Tried.ContainsKey(button.GetInstanceId()) && !enabled) continue;
             views.Add(View(button, views.Count, enabled, open));
         }
@@ -302,7 +303,7 @@ internal sealed class RewardsReader : IScreen
             case GoldReward gold:
                 kind = Kind.Gold;
                 json["kind"] = "gold";
-                json["amount"] = gold.Amount; // VERIFY: GoldReward.Amount is an int (or another JSON-convertible number)
+                json["amount"] = gold.Amount;
                 label = $"Take {gold.Amount} gold";
                 what = $"the {gold.Amount} gold reward";
                 break;
@@ -335,12 +336,12 @@ internal sealed class RewardsReader : IScreen
                 break;
             }
 
-            // Ahead of CardReward in case it derives from it.
             case SpecialCardReward special:
             {
                 kind = Kind.SpecialCard;
                 json["kind"] = "special_card";
-                if (Nodes.TryGetPrivate(special, "Card") is CardModel card) // VERIFY: SpecialCardReward exposes its card as a member named Card
+                // The card is only in the private _card field (Description just embeds its title).
+                if (Nodes.TryGetPrivate(special, "_card") is CardModel card)
                 {
                     var name = Describe.CardName(card);
                     Merge(json, Describe.CardOffer(card));
@@ -388,8 +389,8 @@ internal sealed class RewardsReader : IScreen
                 json["kind"] = typeName;
                 // What the button itself says is what a human would read.
                 var text = Nodes.FirstLabelText(button);
-                if (text.Length == 0 && reward is not null)
-                    text = Describe.Text(Nodes.TryGetPrivate(reward, "Description") ?? Nodes.TryGetPrivate(reward, "Title")); // VERIFY: reward base type has a Description or Title (LocString) for rewards we don't special-case
+                if (text.Length == 0)
+                    text = Describe.SafeText(() => button.Reward?.Description);
                 if (text.Length > 0) json["text"] = text;
                 label = text.Length > 0 ? $"Take {text}" : $"Take the {typeName} reward";
                 what = $"the {typeName} reward";
@@ -435,15 +436,17 @@ internal sealed class RewardsReader : IScreen
     }
 
     /// <summary>
-    /// True when proceeding leaves the act: the rewards of the act's last boss. With a second
-    /// boss, the first one's rewards lead back to the map instead.
+    /// True when proceeding casts the act-change vote. Same test as the game's
+    /// NRewardsScreen.OnProceedButtonPressed: a terminal screen (the room-end rewards) in a boss
+    /// or victory room, except at the first of two bosses, whose rewards lead back to the map.
+    /// A non-terminal screen in a boss room (a relic pickup's rewards) just closes.
     /// </summary>
-    private static bool LeavesAct(RunState rs)
+    private static bool LeavesAct(RunState rs, NRewardsScreen screen)
     {
-        if (rs.CurrentRoom?.RoomType != RoomType.Boss) return false;
-        if (rs.Map?.SecondBossMapPoint is not { } second) return true;
-        MapCoord? at = rs.CurrentMapCoord;
-        return at is { } c && c.row == second.coord.row; // VERIFY: MapCoord exposes lowercase row (same assumption as MapReader.Key)
+        if (rs.CurrentRoom is not { } room || (room.RoomType != RoomType.Boss && !room.IsVictoryRoom)) return false;
+        // Private bool set by ShowScreen; no public member says whether a screen is terminal.
+        if (Nodes.TryGetPrivate(screen, "_isTerminal") is false) return false;
+        return !(rs.Map?.SecondBossMapPoint is not null && rs.CurrentMapCoord == rs.Map.BossMapPoint.coord);
     }
 
     private static NProceedButton? ProceedButton(NRewardsScreen screen) =>
@@ -462,19 +465,7 @@ internal sealed class RewardsReader : IScreen
         return open;
     }
 
-    private static List<CardModel> CardsOf(CardReward reward)
-    {
-        var list = new List<CardModel>();
-        if (reward.Cards is not { } cards) return list;
-        foreach (var item in cards)
-        {
-            // VERIFY: CardReward.Cards elements are CardModel; a creation-result wrapper with .Card is handled too
-            object? entry = item;
-            if ((entry as CardModel ?? (entry is null ? null : Nodes.TryGetPrivate(entry, "Card") as CardModel)) is { } card)
-                list.Add(card);
-        }
-        return list;
-    }
+    private static List<CardModel> CardsOf(CardReward reward) => reward.Cards.ToList();
 
     private static void Merge(JsonObject into, JsonObject from)
     {

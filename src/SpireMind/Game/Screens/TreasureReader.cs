@@ -1,5 +1,4 @@
 using System.Diagnostics.CodeAnalysis;
-using System.Reflection;
 using System.Text.Json.Nodes;
 
 // Same namespace as ScreenRouter, which refers to the readers unqualified.
@@ -7,12 +6,12 @@ namespace SpireMind.Game;
 
 /// <summary>
 /// A treasure room (NTreasureRoom, a room rather than an overlay): open the chest, take a
-/// relic, leave. The chest is the room's "Chest" node, clicked once; its relics sit in
+/// relic, leave. The chest is the room's "Chest" button, clicked once; its relics sit in
 /// NTreasureRoomRelicHolders, and clicking one calls TreasureRoomRelicSynchronizer.PickRelicLocally,
-/// which is a vote in co-op (docs/game-api.md section e). Leaving before the game's
+/// which is a vote in co-op (docs/game-api.md section e). Leaving before the relic collection's
 /// RelicPickingFinished() Task completes loses the relic, so "proceed" waits for that Task,
 /// which is polled and never awaited. A rewards screen the chest pushes is routed to
-/// RewardsReader before this reader is asked.
+/// RewardsReader before this reader is asked; the holders are bound only after it closes.
 ///
 /// Actions: "open", "relic:&lt;n&gt;" for state.relics[n] while we haven't picked, "proceed",
 /// and the out-of-combat potion actions alongside any of them. The relics are listed only once
@@ -27,7 +26,7 @@ internal sealed class TreasureReader : IScreen
     /// <summary>The room fades in on arrival; give the chest a moment before offering it.</summary>
     private static readonly TimeSpan Settle = TimeSpan.FromMilliseconds(400);
 
-    /// <summary>The relics rise out of the chest; a pick before voting opens throws in the game.</summary>
+    /// <summary>The relics rise out of the chest for up to a second; give them a moment, as a human would.</summary>
     private static readonly TimeSpan RelicSettle = TimeSpan.FromMilliseconds(500);
 
     private static readonly TimeSpan OpenTimeout = TimeSpan.FromSeconds(6);
@@ -64,14 +63,6 @@ internal sealed class TreasureReader : IScreen
     /// <summary>Singleplayer only, when RelicPickingFinished() can't be used: how long after the pick, with no relic left pickable, leaving counts as safe.</summary>
     private static readonly TimeSpan FallbackAwardWait = TimeSpan.FromSeconds(12);
 
-    private const string PickingFinishedMethod = "RelicPickingFinished";
-
-    /// <summary>
-    /// Members tried, in order, for a holder's relic: a RelicModel, or a relic node whose Model is one.
-    /// VERIFY: how NTreasureRoomRelicHolder exposes its relic (the member name, and whether it holds the RelicModel or an NRelic node with .Model).
-    /// </summary>
-    private static readonly string[] HolderRelicMembers = ["Relic", "RelicModel", "Model", "_relic", "_relicModel"];
-
     private TreasureReader() { }
 
     /// <summary>One relic on offer as read just now; <see cref="N"/> is its place among the visible holders.</summary>
@@ -84,7 +75,7 @@ internal sealed class TreasureReader : IScreen
     private static DateTime _firstSeen;
     private static DateTime _lastCaptured;
     private static DateTime _onScreenSince;
-    private static Node? _chest;
+    private static NClickableControl? _chest;
     private static int _chestClicks;
     private static DateTime _chestClickedAt;
     private static DateTime? _relicsSince;
@@ -158,21 +149,21 @@ internal sealed class TreasureReader : IScreen
             if (CanOpen(chest, chestOpen))
                 actions.Add(new LegalAction("open", "Open the chest"));
 
-            if (CanPick(now))
+            if (CanPick(me, now))
             {
                 foreach (var r in relics)
                     if (r.Enabled && !Clicks.RecentlyClicked(r.Holder))
                         actions.Add(new LegalAction($"relic:{r.N}", ctx.IsMultiplayer ? $"Pick relic {r.Name} (co-op vote)" : $"Take relic {r.Name}"));
             }
 
-            if (CanClick(room.ProceedButton) && ProceedSafe(ctx, me, chest, relics, now)) // VERIFY: NTreasureRoom exposes ProceedButton (an NProceedButton), like the merchant and rest site rooms
+            if (CanClick(room.ProceedButton) && ProceedSafe(ctx, me, chest, relics, now))
                 actions.Add(new LegalAction("proceed", _picked is null && relics.Count == 0 ? "Leave the treasure room (no relic on offer)" : "Leave the treasure room"));
 
             // Potion actions alone are not a treasure room decision; they ride along with the real ones.
             if (actions.Count > 0)
                 actions.AddRange(PotionActions.Legal(ctx, false));
             else
-                waiting = IdleReason(ctx, chest, chestOpen, relics, now);
+                waiting = IdleReason(ctx, me, chest, chestOpen, relics, now);
         }
 
         if (waiting is not null)
@@ -210,7 +201,7 @@ internal sealed class TreasureReader : IScreen
 
     // ---------- acting ----------
 
-    private static ActionResult Open(NTreasureRoom room, Node? found)
+    private static ActionResult Open(NTreasureRoom room, NClickableControl? found)
     {
         if (found is not { } chest)
             return ActionResult.Fail("Can't find the chest.");
@@ -221,14 +212,14 @@ internal sealed class TreasureReader : IScreen
         {
             _chestClicks++;
             _chestClickedAt = DateTime.UtcNow;
-            Press(chest);
+            chest.ForceClick();
         }, "the chest");
         if (!click.Ok)
             return click;
 
         ActionTracker.Begin(
             "opening the chest",
-            _ => !Nodes.Alive(room) || ReadRelics(room, chest).Count > 0 || Nodes.TopOverlay() is not null || Nodes.ModalOpen(),
+            _ => !Nodes.Alive(room) || ReadRelics(room, chest).Count > 0 || _pickingDone?.IsCompleted == true || Nodes.TopOverlay() is not null || Nodes.ModalOpen(),
             OpenTimeout);
         return ActionResult.Success;
     }
@@ -237,7 +228,11 @@ internal sealed class TreasureReader : IScreen
     {
         if (_picked is { } already)
             return ActionResult.Fail($"Already picked {already}.");
-        if (!CanPick(DateTime.UtcNow))
+        if (!VotingOpen())
+            return ActionResult.Fail("The game isn't taking relic votes right now.");
+        if (MyVoteIn(me))
+            return ActionResult.Fail("A relic vote is already in for this player.");
+        if (!CanPick(me, DateTime.UtcNow))
             return ActionResult.Fail("The relics are still appearing.");
         var r = relics.FirstOrDefault(v => v.N == n);
         if (r is null)
@@ -258,12 +253,13 @@ internal sealed class TreasureReader : IScreen
                 _picked = r.Name;
                 _pickedAt = DateTime.UtcNow;
                 _relicCountAtPick = countBefore;
-                Press(holder);
+                holder.ForceClick();
             }, $"relic {r.Name}");
         }
         catch (Exception ex)
         {
-            // PickRelicLocally throws when voting isn't open (still revealing, or already over).
+            // Our own failure around the press. PickRelicLocally's throw when voting is closed
+            // happens inside the Released signal, where Godot logs it; VotingOpen() above prevents it.
             _picked = null;
             ModEntry.LogError($"picking {r.Name}: {ex.GetBaseException().Message}");
             return ActionResult.Fail($"The game refused the pick: {ex.GetBaseException().Message}");
@@ -286,7 +282,7 @@ internal sealed class TreasureReader : IScreen
         return ActionResult.Success;
     }
 
-    private static ActionResult Proceed(GameContext ctx, RunState rs, Player me, NTreasureRoom room, Node? chest, List<RelicView> relics)
+    private static ActionResult Proceed(GameContext ctx, RunState rs, Player me, NTreasureRoom room, NClickableControl? chest, List<RelicView> relics)
     {
         if (!ProceedSafe(ctx, me, chest, relics, DateTime.UtcNow))
             return ActionResult.Fail("The relic hasn't been awarded yet; leaving now would lose it.");
@@ -296,6 +292,8 @@ internal sealed class TreasureReader : IScreen
             return ActionResult.Fail("There is no proceed button.");
         if (!proceed.IsEnabled)
             return ActionResult.Fail("The proceed button is not enabled yet.");
+        if (proceed.IsSkip)
+            return ActionResult.Fail("The button still says Skip; pressing it would give up the relic.");
 
         var roomModel = rs.CurrentRoom;
         var click = Clicks.Once(proceed, () =>
@@ -315,14 +313,12 @@ internal sealed class TreasureReader : IScreen
 
     // ---------- the picking Task ----------
 
-    /// <summary>Per-room bookkeeping once relics show: when they appeared, and the game's picking Task.</summary>
+    /// <summary>Per-room bookkeeping: the game's picking Task, and when the relics appeared.</summary>
     private static void Observe(NTreasureRoom room, List<RelicView> relics)
     {
+        LookUpPickingTask(room);
         if (relics.Count > 0)
-        {
             _relicsSince ??= DateTime.UtcNow;
-            LookUpPickingTask(room, relics);
-        }
 
         if (_pickingDone is { IsFaulted: true } faulted && !_loggedPickingFault)
         {
@@ -332,59 +328,32 @@ internal sealed class TreasureReader : IScreen
     }
 
     /// <summary>
-    /// Fetch the game's RelicPickingFinished() Task once per room. Looked up by name on the
-    /// holders' ancestors, then the room, then the synchronizer, so we don't depend on which
-    /// of them declares it.
+    /// Fetch the relic collection's RelicPickingFinished() Task once per room. Each room node has
+    /// its own collection, whose Task completes once: after the award animation has called
+    /// RelicCmd.Obtain for every relic, or about a second after an empty chest opens. So a
+    /// completed Task always means this room's picking is over.
     /// </summary>
-    private static void LookUpPickingTask(NTreasureRoom room, List<RelicView> relics)
+    private static void LookUpPickingTask(NTreasureRoom room)
     {
         if (_pickingLookedUp) return;
         _pickingLookedUp = true;
 
-        // VERIFY: which object declares RelicPickingFinished() (expected the relic collection node that parents the holders), that calling it once the relics show is harmless, and that its Task completes only after our relic is awarded
-        var owners = new List<object>();
-        for (Node? n = relics[0].Holder.GetParent(); n is not null && !ReferenceEquals(n, room); n = n.GetParent())
-            owners.Add(n);
-        owners.Add(room);
-        if (RunManager.Instance?.TreasureRoomRelicSynchronizer is { } sync)
-            owners.Add(sync);
-
-        // Public only: it is meant to be awaited by callers, and a private handler of the same name must not be invoked.
-        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public;
-        foreach (var owner in owners)
+        var collection = Nodes.Get<NTreasureRoomRelicCollection>(room, "%RelicCollection")
+            ?? Nodes.FindFirst<NTreasureRoomRelicCollection>(room);
+        if (collection is null)
         {
-            var method = owner.GetType().GetMethod(PickingFinishedMethod, flags, null, Type.EmptyTypes, null);
-            if (method is null || !typeof(Task).IsAssignableFrom(method.ReturnType)) continue;
-            Task? task = null;
-            try
-            {
-                task = method.Invoke(owner, null) as Task;
-            }
-            catch (Exception ex)
-            {
-                ModEntry.LogError($"treasure room: {owner.GetType().Name}.{PickingFinishedMethod}() threw: {ex.GetBaseException().Message}");
-            }
-            if (task is null) continue;
-
-            // This runs when the relics first show, before we can pick. A Task that is already
-            // done belongs to an earlier picking (or doesn't track this one); trusting it would
-            // offer "proceed" the moment we pick, before the relic is ours.
-            if (task.IsCompleted)
-            {
-                ModEntry.LogError($"treasure room: {owner.GetType().Name}.{PickingFinishedMethod}() was already complete before our pick; ignoring it");
-                continue;
-            }
-            _pickingDone = task;
+            ModEntry.LogError("treasure room: no NTreasureRoomRelicCollection; watching our relics instead");
             return;
         }
-        ModEntry.LogError($"treasure room: no usable {PickingFinishedMethod}() found; watching our relics instead");
+        _pickingDone = collection.RelicPickingFinished();
     }
 
     /// <summary>
-    /// True when leaving can't cost us the relic: the game says picking is finished; or, if its
-    /// Task can't be had, our relic count went up; or no relic was ever offered (empty chest).
+    /// True when leaving can't cost us the relic: the game says picking is finished (an empty
+    /// chest included); or, if its Task can't be had, our relic count went up or no relic was
+    /// ever offered (empty chest).
     /// </summary>
-    private static bool ProceedSafe(GameContext ctx, Player me, Node? chest, List<RelicView> relics, DateTime now)
+    private static bool ProceedSafe(GameContext ctx, Player me, NClickableControl? chest, List<RelicView> relics, DateTime now)
     {
         // Relics still on offer that we never picked: whatever the Task says, leaving forfeits one.
         if (_picked is null && relics.Count > 0) return false;
@@ -418,6 +387,9 @@ internal sealed class TreasureReader : IScreen
         if (_picked is not { } picked || ctx.IsMultiplayer || now - _pickedAt < PickStall) return;
         if (_pickingDone?.IsCompleted == true || me.Relics.Count() > _relicCountAtPick) return;
         if (!relics.Any(r => r.Enabled)) return;
+        // The holders stay enabled through the award animation, so ask the game: only a vote that
+        // is still open and holds no vote of ours means the press never arrived.
+        if (!VotingOpen() || MyVoteIn(me)) return;
 
         ModEntry.Log($"treasure room: picking {picked} had no effect after {PickStall.TotalSeconds:0} s; offering the relics again");
         _picked = null;
@@ -425,7 +397,7 @@ internal sealed class TreasureReader : IScreen
 
     // ---------- reading ----------
 
-    private static string IdleReason(GameContext ctx, Node? chest, bool chestOpen, List<RelicView> relics, DateTime now)
+    private static string IdleReason(GameContext ctx, Player me, NClickableControl? chest, bool chestOpen, List<RelicView> relics, DateTime now)
     {
         if (_left)
             return ctx.IsMultiplayer ? "left the treasure room; waiting for teammates" : "leaving the treasure room";
@@ -448,16 +420,18 @@ internal sealed class TreasureReader : IScreen
 
         if (relics.Count == 0)
             return "opening the chest";
+        if (MyVoteIn(me))
+            return ctx.IsMultiplayer ? "a relic vote the bot didn't make is in; waiting for teammates" : "a relic pick or skip the bot didn't make is in";
         return relics.Any(r => r.Enabled) ? "relics appearing" : "relics not pickable yet";
     }
 
-    private static bool ChestOpen(Node? chest, List<RelicView> relics) =>
+    private static bool ChestOpen(NClickableControl? chest, List<RelicView> relics) =>
         relics.Count > 0
         || _pickingDone?.IsCompleted == true
         || (_chestClicks > 0 && (chest is null || !ChestClickable(chest)));
 
     /// <summary>One click per room, ever: the recipe is "ForceClick the Chest once".</summary>
-    private static bool CanOpen([NotNullWhen(true)] Node? chest, bool chestOpen) =>
+    private static bool CanOpen([NotNullWhen(true)] NClickableControl? chest, bool chestOpen) =>
         chest is not null
         && !chestOpen
         && !_left
@@ -465,14 +439,31 @@ internal sealed class TreasureReader : IScreen
         && ChestClickable(chest)
         && !Clicks.RecentlyClicked(chest);
 
-    private static bool CanPick(DateTime now) =>
-        _picked is null && !_left && _relicsSince is { } since && now - since >= RelicSettle;
+    private static bool CanPick(Player me, DateTime now) =>
+        _picked is null && !_left && _relicsSince is { } since && now - since >= RelicSettle && VotingOpen() && !MyVoteIn(me);
+
+    /// <summary>The game is taking relic votes: from room entry until every vote is in. PickRelicLocally throws outside it.</summary>
+    private static bool VotingOpen() =>
+        RunManager.Instance?.TreasureRoomRelicSynchronizer?.CurrentRelics is not null;
+
+    /// <summary>
+    /// While voting is open, a vote is already in for us: the human clicked a relic or (singleplayer)
+    /// Skip. The bot then never votes, since a co-op re-vote would overwrite the human's choice.
+    /// </summary>
+    private static bool MyVoteIn(Player me)
+    {
+        if (RunManager.Instance?.TreasureRoomRelicSynchronizer is not { CurrentRelics: not null } sync) return false;
+        try { return sync.GetPlayerVote(me).voteReceived; }
+        catch (ArgumentOutOfRangeException) { return false; } // the vote list is per player at BeginRelicPicking
+    }
 
     /// <summary>
     /// The holders that are drawn, in tree order. Holders are only read once the chest has been
-    /// opened (or can't be clicked any more), so nothing set up inside a closed chest leaks.
+    /// opened (or can't be clicked any more), so nothing set up inside a closed chest leaks. The
+    /// relic collection stays hidden until InitializeRelics has bound the holders, so a drawn
+    /// holder is always bound to a relic and safe to vote with.
     /// </summary>
-    private static List<RelicView> ReadRelics(NTreasureRoom room, Node? chest)
+    private static List<RelicView> ReadRelics(NTreasureRoom room, NClickableControl? chest)
     {
         var views = new List<RelicView>();
         if (chest is not null && _chestClicks == 0 && ChestClickable(chest)) return views;
@@ -500,22 +491,18 @@ internal sealed class TreasureReader : IScreen
                 json = new JsonObject { ["n"] = n, ["name"] = "(unreadable relic)" };
             }
 
-            var enabled = Enabled(holder);
+            var enabled = holder.IsEnabled;
             if (!enabled) json["available"] = false;
             views.Add(new RelicView(n, holder, name, enabled, json));
         }
         return views;
     }
 
-    private static RelicModel? RelicOf(Node holder)
+    /// <summary>The holder's relic: its NRelic node's Model, which throws until the holder is bound.</summary>
+    private static RelicModel? RelicOf(NTreasureRoomRelicHolder holder)
     {
-        foreach (var member in HolderRelicMembers)
-        {
-            var value = Nodes.TryGetPrivate(holder, member);
-            if (value is RelicModel model) return model;
-            if (value is not null && Nodes.TryGetPrivate(value, "Model") is RelicModel inner) return inner;
-        }
-        return null;
+        try { return holder.Relic?.Model; }
+        catch (InvalidOperationException) { return null; }
     }
 
     private static JsonObject BuildState(GameContext ctx, RunState rs, Player me, List<RelicView> relics, bool chestOpen)
@@ -552,14 +539,13 @@ internal sealed class TreasureReader : IScreen
 
     // ---------- the chest ----------
 
-    /// <summary>The room's "Chest" node, found once per room (a direct child, a unique name, or anywhere below).</summary>
-    private static Node? Chest(NTreasureRoom room)
+    /// <summary>The room's "Chest" button (an NButton the room binds as %Chest), found once per room.</summary>
+    private static NClickableControl? Chest(NTreasureRoom room)
     {
         if (_chest is { } cached && Nodes.Alive(cached)) return cached;
 
-        _chest = Nodes.Get<Node>(room, "Chest")
-            ?? Nodes.Get<Node>(room, "%Chest")
-            ?? room.FindChild("Chest", true, false);
+        _chest = Nodes.Get<NClickableControl>(room, "%Chest")
+            ?? Nodes.Get<NClickableControl>(room, "Chest");
 
         if (_chest is null && !_loggedNoChest && DateTime.UtcNow - _firstSeen > Settle)
         {
@@ -569,39 +555,12 @@ internal sealed class TreasureReader : IScreen
         return _chest;
     }
 
-    // VERIFY: the "Chest" node stops reporting IsEnabled once opened (by us or, in co-op, by a teammate); while it reports enabled the bot treats it as closed (no relic read before our click, no proceed)
-    private static bool ChestClickable(Node chest) =>
-        Nodes.Alive(chest) && Nodes.IsShown(chest) && Enabled(chest);
+    // The room disables the chest in its click handler and nothing re-enables it. Each co-op
+    // player has their own chest, so only our click (or the human's) closes it.
+    private static bool ChestClickable(NClickableControl chest) =>
+        Nodes.Alive(chest) && Nodes.IsShown(chest) && chest.IsEnabled;
 
     // ---------- helpers ----------
-
-    /// <summary>
-    /// Enabled the way the game's buttons report it. Taking a plain Node keeps this independent
-    /// of which button class the chest and the relic holders derive from.
-    /// VERIFY: the "Chest" node and NTreasureRoomRelicHolder derive from NClickableControl (IsEnabled, ForceClick)
-    /// </summary>
-    private static bool Enabled(Node node) => node switch
-    {
-        NClickableControl c => c.IsEnabled,
-        Godot.BaseButton b => !b.Disabled,
-        _ => Nodes.TryGetPrivate(node, "IsEnabled") is not false,
-    };
-
-    private static void Press(Node node)
-    {
-        switch (node)
-        {
-            case NClickableControl c:
-                c.ForceClick();
-                break;
-            case Godot.BaseButton b:
-                b.EmitSignal(Godot.BaseButton.SignalName.Pressed);
-                break;
-            default:
-                Nodes.CallPrivate(node, "ForceClick");
-                break;
-        }
-    }
 
     private static NTreasureRoom? Room(Node? node)
     {
@@ -609,6 +568,10 @@ internal sealed class TreasureReader : IScreen
         return room is not null && Nodes.Alive(room) ? room : null;
     }
 
+    /// <summary>
+    /// In singleplayer the button reads Skip (SkipRelicLocally, forfeiting the relic) from 2.5 s
+    /// after the chest opens until picking finishes; the bot never skips.
+    /// </summary>
     private static bool CanClick([NotNullWhen(true)] NProceedButton? button) =>
-        button is not null && Nodes.Alive(button) && Nodes.IsShown(button) && button.IsEnabled && !Clicks.RecentlyClicked(button);
+        button is not null && Nodes.Alive(button) && Nodes.IsShown(button) && button.IsEnabled && !button.IsSkip && !Clicks.RecentlyClicked(button);
 }

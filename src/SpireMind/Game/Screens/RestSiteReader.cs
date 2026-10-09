@@ -1,6 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json.Nodes;
-using System.Text.RegularExpressions;
 
 // Same namespace as ScreenRouter, which refers to the readers unqualified.
 namespace SpireMind.Game;
@@ -13,7 +12,8 @@ namespace SpireMind.Game;
 /// screen that CardSelectReader drives; backing out of it brings the options back here.
 ///
 /// Actions: "option:&lt;n&gt;" for an available state.options[n] (n is the option's index in the
-/// game's list), "proceed" once the game enables it, and the out-of-combat potion actions
+/// game's list), "proceed" once the game enables it (after an option succeeds, or when none
+/// are left), and the out-of-combat potion actions
 /// alongside either. Mend heals a teammate picked with the game's targeting arrow
 /// (NTargetManager), which the bot can't drive reliably yet, so it is listed in the state as
 /// unsupported and never offered.
@@ -24,7 +24,11 @@ internal sealed class RestSiteReader : IScreen
 
     public string Name => "rest";
 
-    /// <summary>The options fade in on arrival; give their buttons a moment before offering anything.</summary>
+    /// <summary>
+    /// The options fade in on arrival; give their buttons a moment before offering anything. On
+    /// the first visit ever they stay hidden for 0.5 s and then the rest site FTUE opens as a
+    /// modal, which ModalReader dismisses.
+    /// </summary>
     private static readonly TimeSpan Settle = TimeSpan.FromMilliseconds(400);
 
     /// <summary>Resting plays a fade and a heal animation; Smith and Cook open a deck screen.</summary>
@@ -34,16 +38,11 @@ internal sealed class RestSiteReader : IScreen
 
     private const string MendNote = "heals a teammate chosen with the targeting arrow, which the bot can't do yet";
 
-    /// <summary>A plain amount ("Heal 24 HP", "(24)"), not part of a percentage or a decimal.</summary>
-    private static readonly Regex Amount = new(@"(?<![\d.])(\d+)(?![\d.]|\s*%)", RegexOptions.CultureInvariant);
-
-    private static readonly Regex Percent = new(@"(\d+)\s*%", RegexOptions.CultureInvariant);
-
     private RestSiteReader() { }
 
     /// <summary>One rest site option as read just now. <see cref="N"/> is its index in the room's Options.</summary>
     private sealed record OptionView(
-        int N, string Id, string Title, string Text, NClickableControl? Button, bool Available, bool Supported, JsonObject Json);
+        int N, string Id, string Title, string Text, NRestSiteButton? Button, bool Available, bool Supported, JsonObject Json);
 
     // ---------- per-room memory (reset when a different rest site shows up) ----------
 
@@ -83,8 +82,9 @@ internal sealed class RestSiteReader : IScreen
         Track(room, rs.CurrentRoom);
         var options = ReadOptions(room);
 
-        // An option we chose that is offered again was backed out of (Smith or Cook cancelled).
-        Chosen.RemoveAll(title => options.Any(o => o.Title == title && o.Available && !Clicks.RecentlyClicked(o.Button!)));
+        // An option we chose that is clickable again was backed out of (Smith or Cook cancelled):
+        // the click disables every option button at once, and a success removes the option.
+        Chosen.RemoveAll(title => options.Any(o => o.Title == title && o.Available));
 
         var state = BuildState(ctx, rs, me, options);
 
@@ -99,14 +99,14 @@ internal sealed class RestSiteReader : IScreen
             foreach (var o in options)
                 if (Offered(o)) actions.Add(new LegalAction($"option:{o.N}", Label(o, me)));
 
-            if (CanClick(room.ProceedButton))
+            if (!OptionRunning(options) && CanClick(room.ProceedButton))
                 actions.Add(new LegalAction("proceed", ProceedLabel(options)));
 
             // Potion actions alone are not a rest site decision; they ride along with the real ones.
             if (actions.Count > 0)
                 actions.AddRange(PotionActions.Legal(ctx, false));
             else
-                waiting = IdleReason(ctx, options);
+                waiting = IdleReason(options);
         }
 
         if (waiting is not null)
@@ -161,8 +161,9 @@ internal sealed class RestSiteReader : IScreen
         if (!click.Ok)
             return click;
 
-        // Resting disables the options and plays out; Smith and Cook push a deck screen. Until
-        // one of those shows, the other options must not be offered (one choice per click).
+        // The click disables every option button at once (DisableOptions), and Smith and Cook
+        // push their deck screen inside it, so this mostly catches a click the button ignored.
+        // After that OptionRunning keeps proceed back until the option has played out.
         ActionTracker.Begin(
             $"choosing {option.Title}",
             c => !Nodes.Alive(room)
@@ -177,11 +178,14 @@ internal sealed class RestSiteReader : IScreen
 
     private static ActionResult Proceed(RunState rs, NRestSiteRoom room)
     {
-        var proceed = room.ProceedButton; // VERIFY: NRestSiteRoom.ProceedButton is an NProceedButton (IsEnabled, ForceClick)
+        var proceed = room.ProceedButton;
         if (proceed is null || !Nodes.IsShown(proceed))
             return ActionResult.Fail("There is no proceed button.");
+        // A disabled proceed still opens the map when force-clicked, but with travel left off.
         if (!proceed.IsEnabled)
             return ActionResult.Fail("The proceed button is not enabled yet.");
+        if (OptionRunning(ReadOptions(room)))
+            return ActionResult.Fail("A rest site option is still playing out.");
 
         var roomModel = rs.CurrentRoom;
         var click = Clicks.Once(proceed, () =>
@@ -201,19 +205,18 @@ internal sealed class RestSiteReader : IScreen
 
     // ---------- reading ----------
 
-    private static string IdleReason(GameContext ctx, List<OptionView> options)
+    // v0.107.1 syncs nothing at the rest site beyond each choice: no waiting on teammates
+    // before proceed or on leaving (only the map vote waits for everyone).
+    private static string IdleReason(List<OptionView> options)
     {
         if (_left)
-            return ctx.IsMultiplayer ? "left the rest site; waiting for teammates" : "leaving the rest site";
+            return "leaving the rest site";
 
         if (options.Any(o => o.Available && !o.Supported))
             return "only Mend is available, which the bot can't target; a human has to choose it";
 
         if (Chosen.Count > 0)
-        {
-            var last = Chosen[^1];
-            return ctx.IsMultiplayer ? $"chose {last}; waiting for teammates" : $"{last} in progress";
-        }
+            return $"{Chosen[^1]} in progress";
 
         return options.Count == 0 ? "rest site options appearing" : "no rest site option is clickable yet";
     }
@@ -241,28 +244,22 @@ internal sealed class RestSiteReader : IScreen
         return views;
     }
 
-    private static OptionView View(NRestSiteRoom room, RestSiteOption option, int n) // VERIFY: the element type of NRestSiteRoom.Options is named RestSiteOption
+    private static OptionView View(NRestSiteRoom room, RestSiteOption option, int n)
     {
-        // VERIFY: RestSiteOption.OptionId values (expected "HEAL", "SMITH", "MEND", ...); interpolation copes with a string or an enum.
-        var id = $"{option.OptionId}";
+        // HEAL, SMITH, MEND (co-op), or a relic's COOK, DIG, LIFT, KINDLE, CLONE, HATCH.
+        var id = option.OptionId;
         var title = Describe.Text(option.Title);
         if (title.Length == 0) title = Capitalize(id.ToLowerInvariant());
         var text = Describe.SafeText(() => option.Description);
 
-        NClickableControl? button = null;
-        try
-        {
-            // VERIFY: GetButtonForOption returns a button deriving from NClickableControl (IsEnabled, ForceClick), null or throwing when the option has none
-            button = room.GetButtonForOption(option);
-        }
-        catch
-        {
-            // No button for this option yet (still laying out).
-        }
+        // Null while the room rebuilds its buttons after a choice; the old ones are queued for deletion.
+        var button = room.GetButtonForOption(option);
         if (button is not null && !Nodes.Alive(button)) button = null;
 
+        // The button ignores a click when its option was disabled at creation (no card to upgrade,
+        // too few to cook), and IsEnabled is off on every button while any option runs.
         var available = option.IsEnabled && button is not null && Nodes.IsShown(button) && button.IsEnabled;
-        var supported = !IsMend(id, title);
+        var supported = !IsMend(id);
 
         var json = new JsonObject { ["n"] = n, ["id"] = id, ["name"] = title };
         if (text.Length > 0) json["text"] = text;
@@ -277,6 +274,14 @@ internal sealed class RestSiteReader : IScreen
 
     private static bool Offered(OptionView o) =>
         o.Available && o.Supported && o.Button is { } b && !Clicks.RecentlyClicked(b);
+
+    /// <summary>
+    /// An option is playing out: the room disables every option button for it (DisableOptions,
+    /// then the hide tween) and only re-enables or rebuilds them once it is over. With Miniature
+    /// Tent proceed is already on by then, and leaving now would cut the option short.
+    /// </summary>
+    private static bool OptionRunning(List<OptionView> options) =>
+        options.Any(o => o.Button is { IsEnabled: false });
 
     private static JsonObject BuildState(GameContext ctx, RunState rs, Player me, List<OptionView> options)
     {
@@ -295,7 +300,7 @@ internal sealed class RestSiteReader : IScreen
         // What the next boss is decides between resting and which card to upgrade.
         if (rs.Act is { } act)
         {
-            var boss = Describe.SafeText(() => act.BossEncounter?.Title); // VERIFY: EncounterModel has a Title (LocString), as MapReader assumes
+            var boss = Describe.SafeText(() => act.BossEncounter?.Title);
             if (boss.Length > 0) state["boss"] = boss;
             var second = Describe.SafeText(() => act.SecondBossEncounter?.Title);
             if (second.Length > 0) state["second_boss"] = second;
@@ -323,36 +328,26 @@ internal sealed class RestSiteReader : IScreen
 
     private static string Label(OptionView o, Player me)
     {
-        if (IsHeal(o.Id)) return $"{o.Title} ({HealHint(o.Text, me)})";
-        if (o.Id.Contains("SMITH", StringComparison.OrdinalIgnoreCase)) return $"{o.Title} (upgrade a card)";
+        if (o.Id == "HEAL") return $"{o.Title} ({HealHint(me)})";
+        if (o.Id == "SMITH") return $"{o.Title} (upgrade a card)";
         return o.Text.Length > 0 ? $"{o.Title} ({Short(o.Text)})" : o.Title;
     }
 
-    /// <summary>"heal 24" from the option's own text, or an estimate when it only gives a percentage.</summary>
-    private static string HealHint(string text, Player me)
+    /// <summary>"heal 24": 30% of max HP after relics, the number the option's text shows (HP rounds down).</summary>
+    private static string HealHint(Player me)
     {
-        if (Amount.Match(text) is { Success: true } amount)
-            return $"heal {amount.Groups[1].Value}";
-        if (Percent.Match(text) is { Success: true } percent && int.TryParse(percent.Groups[1].Value, out var pct))
-            return $"heal about {me.Creature.MaxHp * pct / 100}";
-        return "heal";
+        try { return $"heal {(int)HealRestSiteOption.GetHealAmount(me)}"; }
+        catch { return "heal"; }
     }
 
-    private static string ProceedLabel(List<OptionView> options)
-    {
-        if (!options.Any(o => o.Available && o.Supported)) return "Proceed";
-        return Chosen.Count == 0
-            ? "Leave the rest site without using it"
-            : "Proceed (leave the remaining options unused)";
-    }
+    // Proceed only turns on after an option succeeded or when none are left, so options still
+    // on offer beside it are extras a relic allows (Miniature Tent).
+    private static string ProceedLabel(List<OptionView> options) =>
+        options.Any(o => o.Available && o.Supported) ? "Proceed (leave the remaining options unused)" : "Proceed";
 
     // ---------- helpers ----------
 
-    private static bool IsHeal(string id) =>
-        id.Equals("HEAL", StringComparison.OrdinalIgnoreCase) || id.Equals("REST", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsMend(string id, string title) =>
-        id.Contains("MEND", StringComparison.OrdinalIgnoreCase) || title.Equals("Mend", StringComparison.OrdinalIgnoreCase);
+    private static bool IsMend(string id) => id == "MEND";
 
     private static NRestSiteRoom? Room(Node? node)
     {

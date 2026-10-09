@@ -8,8 +8,8 @@ namespace SpireMind.Game;
 /// <summary>
 /// Using and discarding potions, shared by every screen that offers them: combat passes
 /// inCombat=true, map, rewards, shop and the like pass false. Ids are "potion:&lt;slot&gt;",
-/// "potion:&lt;slot&gt;&gt;e&lt;j&gt;" or "&gt;p&lt;j&gt;" (j indexes the combat's Enemies or
-/// Players, as the combat snapshot lists them) and "discard_potion:&lt;slot&gt;".
+/// "potion:&lt;slot&gt;&gt;e&lt;j&gt;" or "&gt;p&lt;j&gt;" (j is the "i" of an enemy or player
+/// as the combat snapshot lists them) and "discard_potion:&lt;slot&gt;".
 ///
 /// Uses go through PotionModel.EnqueueManualUse and discards through a
 /// DiscardPotionGameAction, both on the synced action queue for the local player. Neither
@@ -81,7 +81,7 @@ internal static class PotionActions
         if (ctx.InCombat && !CombatReader.MayAct(ctx, out _)) return options;
 
         var combat = inCombat && ctx.InCombat ? ctx.Combat : null;
-        var enemies = combat?.Enemies.ToList() ?? new List<Creature>();
+        var enemies = combat is null ? new List<Creature>() : CombatReader.EnemyRoster(combat);
         var players = combat?.Players.ToList() ?? new List<Player>();
 
         for (var slot = 0; slot < me.MaxPotionCount; slot++)
@@ -106,13 +106,13 @@ internal static class PotionActions
 
     private static void AddUses(List<Option> options, int slot, PotionModel potion, string name, Player me, ICombatState? combat, List<Creature> enemies, List<Player> players)
     {
-        // VERIFY: the enum behind PotionModel.Usage is named PotionUsage.
-        if (potion.Usage == PotionUsage.Automatic) return;
+        // Same rules as the potion popup's use button. None is never used by a real potion.
+        if (potion.Usage is PotionUsage.Automatic or PotionUsage.None) return;
         if (potion.Usage == PotionUsage.CombatOnly && combat is null) return;
-        if (!potion.PassesCustomUsabilityCheck) return; // VERIFY: a property (the doc lists no parentheses), not a method.
+        if (!potion.PassesCustomUsabilityCheck) return;
 
         var id = $"potion:{slot}";
-        // VERIFY: PotionModel.TargetType uses the card TargetType enum (with TargetedNoCreature and RandomEnemy).
+        // Read at decision time: FoulPotion is TargetedNoCreature (the merchant) out of combat and AllEnemies in it.
         switch (potion.TargetType)
         {
             case TargetType.AnyEnemy:
@@ -120,7 +120,7 @@ internal static class PotionActions
                 for (var j = 0; j < enemies.Count; j++)
                 {
                     var enemy = enemies[j];
-                    if (CombatReader.IsTargetableEnemy(combat, enemy) && potion.IsValidTarget(enemy)) // VERIFY: IsValidTarget(Creature?) signature.
+                    if (CombatReader.IsTargetableEnemy(combat, enemy) && potion.IsValidTarget(enemy))
                         options.Add(new Option($"{id}>e{j}", $"Use {name} on {CombatReader.EnemyLabel(enemies, j)}", slot, potion, false, enemy));
                 }
                 return;
@@ -140,14 +140,17 @@ internal static class PotionActions
                 return;
 
             case TargetType.AnyPlayer when combat is null && CanThrow(potion):
-                // Section c wants a player creature when it can be thrown; out of combat no
-                // other player is indexed, so it goes to us.
+                // CanThrowAtAlly is only true mid-fight; a non-combat screen asking then
+                // indexes no players, so it goes to us.
                 options.Add(new Option(id, $"Use {name}", slot, potion, false, me.Creature));
                 return;
         }
 
-        // Self, AnyPlayer without a throw, AllEnemies, TargetedNoCreature...: the game picks.
-        options.Add(new Option(id, $"Use {name}", slot, potion, false, null));
+        // No target: EnqueueManualUse swaps in our own creature when that is valid (Self, AnyPlayer
+        // without a throw); AllEnemies, RandomEnemy and TargetedNoCreature take none. Anything
+        // else (no potion is AnyAlly in this build) would only be cancelled when it runs.
+        if (potion.IsValidTarget(null) || potion.IsValidTarget(me.Creature))
+            options.Add(new Option(id, $"Use {name}", slot, potion, false, null));
     }
 
     /// <summary>CanThrowAtAlly out of combat; if it can't answer there, fall back to the null target.</summary>
@@ -191,8 +194,9 @@ internal static class PotionActions
         // The game action wants the real combat flag, whichever screen asked.
         sync.RequestEnqueue(new DiscardPotionGameAction(me, (uint)slot, ctx.InCombat));
 
+        var fight = ctx.InCombat;
         ActionTracker.Begin($"discarding {Describer.Text(potion.Title)}",
-            _ => !ReferenceEquals(me.GetPotionAtSlotIndex(slot), potion) && ActionTracker.GameLooksIdle(),
+            _ => (fight && CombatReader.FightOver()) || (!ReferenceEquals(me.GetPotionAtSlotIndex(slot), potion) && ActionTracker.GameLooksIdle()),
             DiscardTimeout);
         return ActionResult.Success;
     }

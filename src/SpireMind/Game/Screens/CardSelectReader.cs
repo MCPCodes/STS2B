@@ -1,4 +1,3 @@
-using System.Collections;
 using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using System.Text.Json.Nodes;
@@ -44,11 +43,8 @@ internal sealed class CardSelectReader : IScreen
     /// <summary>How long after a pick we expect its preview to show before offering the grid again.</summary>
     private static readonly TimeSpan PreviewExpect = TimeSpan.FromSeconds(1.5);
 
-    /// <summary>A preview whose confirm never enables is more likely a misread panel than a real one; stop waiting on it.</summary>
+    /// <summary>A preview whose confirm never enables is stuck; stop waiting on it (the maximum still guards the grid).</summary>
     private static readonly TimeSpan PreviewStuck = TimeSpan.FromSeconds(4);
-
-    /// <summary>How long to keep looking for a screen's selector prefs before deciding it has none.</summary>
-    private static readonly TimeSpan PrefsPatience = TimeSpan.FromSeconds(2);
 
     /// <summary>After a final click we stop offering that screen's actions; if it is still up this much later, the click didn't land.</summary>
     private static readonly TimeSpan RetryAfter = TimeSpan.FromSeconds(10);
@@ -106,6 +102,9 @@ internal sealed class CardSelectReader : IScreen
         /// <summary>The CardSelectCmd factory that opened this screen, when ChoicePrompt saw it.</summary>
         public string? PromptSource { get; set; }
         public string? Prompt { get; set; }
+
+        /// <summary>The loc key of the screen's own prompt, which tells a removal from other deck picks.</summary>
+        public string? PromptKey { get; set; }
         public int? Min { get; set; }
         public int? Max { get; set; }
         public bool PrefsDone { get; set; }
@@ -196,27 +195,31 @@ internal sealed class CardSelectReader : IScreen
     // ---------- grid screens (deck, simple, combat pile) ----------
 
     /// <summary>
-    /// Where a grid screen keeps its confirm step. Deck screens show the pick in a preview
-    /// with its own Confirm; the simple and combat-pile grids confirm from the screen itself.
+    /// Where a grid screen keeps its confirm steps. Deck screens show the pick in a preview
+    /// container with its own confirm and back buttons, looked up from the container as the
+    /// screens do; their screen-level confirm (only when min and max differ) opens that preview
+    /// early. The simple and combat-pile grids confirm from the screen itself.
     /// </summary>
-    private sealed record GridLayout(string[] PreviewContainers, string? PreviewConfirm, string? PreviewBack, bool ConfirmIsFinal)
+    private sealed record GridLayout(string[] PreviewContainers, string PreviewConfirm, string PreviewBack, string? Confirm, bool ConfirmIsFinal)
     {
-        public bool HasPreview => PreviewContainers.Length > 0 || PreviewConfirm is not null;
+        public bool HasPreview => PreviewContainers.Length > 0;
     }
 
-    private static readonly GridLayout DeckLayout = new([], "%PreviewConfirm", "%PreviewCancel", ConfirmIsFinal: false); // VERIFY: NDeckCardSelectScreen's preview back button is "%PreviewCancel" (only offered when found)
+    private static readonly GridLayout DeckLayout = new(["%PreviewContainer"], "%PreviewConfirm", "%PreviewCancel", "%Confirm", ConfirmIsFinal: false);
 
+    // One pick uses the single container, several the multi one (shown at exactly the maximum); no screen-level confirm.
     private static readonly GridLayout UpgradeLayout = new(
-        ["%UpgradeSinglePreviewContainer", "%UpgradeMultiPreviewContainer"], null, null, ConfirmIsFinal: false); // VERIFY: a multi-card upgrade uses "%UpgradeMultiPreviewContainer" (by analogy with enchant)
+        ["%UpgradeSinglePreviewContainer", "%UpgradeMultiPreviewContainer"], "Confirm", "Cancel", null, ConfirmIsFinal: false);
 
-    private static readonly GridLayout TransformLayout = new(["%PreviewContainer"], null, null, ConfirmIsFinal: false);
+    // The transform and enchant screens' own confirm is the direct child "Confirm", not a unique name.
+    private static readonly GridLayout TransformLayout = new(["%PreviewContainer"], "Confirm", "Cancel", "Confirm", ConfirmIsFinal: false);
 
     private static readonly GridLayout EnchantLayout = new(
-        ["%EnchantSinglePreviewContainer", "%EnchantMultiPreviewContainer"], null, null, ConfirmIsFinal: false);
+        ["%EnchantSinglePreviewContainer", "%EnchantMultiPreviewContainer"], "Confirm", "Cancel", "Confirm", ConfirmIsFinal: false);
 
-    private static readonly GridLayout PlainLayout = new([], null, null, ConfirmIsFinal: true);
+    private static readonly GridLayout PlainLayout = new([], "Confirm", "Cancel", "%Confirm", ConfirmIsFinal: true);
 
-    // Derived screen types first, in case the deck screens share NDeckCardSelectScreen as a base.
+    // Every grid screen derives from NCardGridSelectionScreen directly, so the order doesn't matter.
     private static GridLayout LayoutFor(Node screen) => screen switch
     {
         NDeckUpgradeSelectScreen => UpgradeLayout,
@@ -237,15 +240,18 @@ internal sealed class CardSelectReader : IScreen
     };
 
     /// <summary>
-    /// The generic deck screen is a removal when FromDeckForRemoval opened it; without a factory
-    /// record, when it is in the shop or its prompt says so.
+    /// The generic deck screen is a removal when its prompt is a removal prompt: every
+    /// FromDeckForRemoval caller passes TO_REMOVE, except the combat reward's own key. The factory
+    /// record can't tell, since FromDeckForRemoval runs through FromDeckGeneric, which records last.
+    /// Without the key, fall back to the shop or the prompt text.
     /// </summary>
-    private static bool IsRemoval(GameContext ctx, Memo memo) => memo.PromptSource switch
+    private static bool IsRemoval(GameContext ctx, Memo memo) => memo.PromptKey switch
     {
-        "FromDeckForRemoval" => true,
-        "FromDeckGeneric" => false,
-        _ => ctx.Run?.CurrentRoom?.RoomType == RoomType.Shop
-             || memo.Prompt?.Contains("remov", StringComparison.OrdinalIgnoreCase) == true,
+        "TO_REMOVE" or "COMBAT_REWARD_CARD_REMOVAL.selectionScreenPrompt" => true,
+        not null => false,
+        null => memo.PromptSource == "FromDeckForRemoval"
+                || ctx.Run?.CurrentRoom?.RoomType == RoomType.Shop
+                || memo.Prompt?.Contains("remov", StringComparison.OrdinalIgnoreCase) == true,
     };
 
     private sealed record Preview(Node? Container, NClickableControl Confirm, NClickableControl? Back);
@@ -321,7 +327,7 @@ internal sealed class CardSelectReader : IScreen
 
                 case PreviewPhase.Ready:
                     actions.Add(new LegalAction("confirm", ConfirmLabel(view, memo)));
-                    if (Usable(view.Preview?.Back))
+                    if (PreviewBack(view) is not null)
                         actions.Add(new LegalAction("cancel", "Back to the cards (pick a different one)"));
                     else if (Usable(view.Close))
                         actions.Add(new LegalAction("cancel", CloseLabel(view.Kind)));
@@ -334,12 +340,13 @@ internal sealed class CardSelectReader : IScreen
                         break;
                     }
 
-                    var confirmReady = Usable(view.Confirm);
+                    var confirmReady = ConfirmReady(view);
                     var atMax = AtMax(view, memo, now);
                     if (atMax && !confirmReady)
                     {
-                        // Simple and combat-pile grids finish by themselves once the maximum is picked.
-                        waiting = "selection complete; screen closing";
+                        // Simple and combat-pile grids finish by themselves once the maximum is picked;
+                        // deck screens open their preview instead.
+                        waiting = view.Layout.HasPreview ? "selection complete; waiting for the preview" : "selection complete; screen closing";
                         break;
                     }
 
@@ -380,7 +387,7 @@ internal sealed class CardSelectReader : IScreen
         var button = phase switch
         {
             PreviewPhase.Ready => view.Preview?.Confirm,
-            PreviewPhase.Closed => view.Confirm,
+            PreviewPhase.Closed when ConfirmReady(view) => view.Confirm,
             _ => null,
         };
         if (!Usable(button))
@@ -399,7 +406,7 @@ internal sealed class CardSelectReader : IScreen
 
     private static ActionResult CancelGrid(Node screen, Memo memo, GridView view, PreviewPhase phase)
     {
-        if (phase != PreviewPhase.Closed && view.Preview?.Back is { } back && Usable(back))
+        if (phase != PreviewPhase.Closed && PreviewBack(view) is { } back)
         {
             var before = Signature(screen, view.Layout);
             var clicked = Click(back, "the preview's back button");
@@ -447,6 +454,10 @@ internal sealed class CardSelectReader : IScreen
             if (view.Layout.HasPreview && (view.Max is null or 1 || view.Selected.Count + 1 >= view.Max))
                 memo.PreviewExpectedUntil = now + PreviewExpect;
         }
+        else if (memo.Picked == name)
+        {
+            memo.Picked = null;
+        }
 
         return Track(pressed, screen, view.Layout, before, selected ? $"deselecting {name}" : $"picking {name}", PressTimeout);
     }
@@ -460,7 +471,7 @@ internal sealed class CardSelectReader : IScreen
         NCardHolder? holder = null;
         try
         {
-            holder = grid?.GetCardHolder(card) as NCardHolder; // VERIFY: NCardGrid.GetCardHolder(CardModel) returns the holder (NCardHolder or a subclass), null when scrolled out of view
+            holder = grid?.GetCardHolder(card); // null when the card's row isn't allocated
         }
         catch (Exception ex)
         {
@@ -496,8 +507,7 @@ internal sealed class CardSelectReader : IScreen
 
     private static GridView ReadGrid(GameContext ctx, Node screen, Memo memo)
     {
-        var now = DateTime.UtcNow;
-        FillFromPrefs(screen, memo, now);
+        FillFromPrefs(screen, memo);
         if (screen is NDeckEnchantSelectScreen && memo.Enchantment is null)
             memo.Enchantment = ReadEnchantment(screen);
 
@@ -512,7 +522,7 @@ internal sealed class CardSelectReader : IScreen
         }
         if (cards.Any(InDrawPile)) HideDrawOrder(cards, descs);
 
-        var selected = SelectedCards(screen) ?? SelectedCards(grid)
+        var selected = SelectedCards(screen)
             ?? memo.Toggled.Where(t => cards.Any(c => ReferenceEquals(c, t))).ToList();
 
         var layout = LayoutFor(screen);
@@ -526,8 +536,8 @@ internal sealed class CardSelectReader : IScreen
             Partial = partial,
             Selected = selected,
             Preview = FindPreview(screen, layout),
-            Confirm = Nodes.Get<NClickableControl>(screen, "%Confirm"), // VERIFY: deck screens with several picks confirm from "%Confirm" too (documented only for the simple/combat-pile grids)
-            Close = Nodes.Get<NClickableControl>(screen, "%Close"), // VERIFY: "%Close" is an NClickableControl (NBackButton-style) on the deck screens
+            Confirm = ScreenConfirm(screen, layout),
+            Close = Nodes.Get<NClickableControl>(screen, "%Close"), // an NBackButton on the deck screens, enabled only when cancelable
             Min = memo.Min,
             Max = memo.Max,
         };
@@ -535,14 +545,15 @@ internal sealed class CardSelectReader : IScreen
 
     /// <summary>
     /// The grid's full card list. Prefer the grid's own list (display order); fall back to the
-    /// screen's; as a last resort take whatever holders exist, which for a virtualized grid is
-    /// only the part in view.
+    /// screen's (empty on the combat-pile screen); as a last resort take whatever holders exist,
+    /// which for a virtualized grid is only the part in view.
     /// </summary>
     private static List<CardModel> ReadCards(Node screen, NCardGrid? grid, out bool partial)
     {
         partial = false;
-        if (grid is not null && CardsIn(grid, AllCardsField(grid.GetType())) is { Count: > 0 } shown) return shown;
-        if (CardsIn(screen, AllCardsField(screen.GetType())) is { Count: > 0 } source) return source;
+        // NCardGrid and NCardGridSelectionScreen both keep their list in a protected "_cards".
+        if (grid is not null && CardsIn(grid, "_cards") is { Count: > 0 } shown) return shown;
+        if (CardsIn(screen, "_cards") is { Count: > 0 } source) return source;
 
         partial = grid is not null;
         var cards = new List<CardModel>();
@@ -554,55 +565,56 @@ internal sealed class CardSelectReader : IScreen
         return cards;
     }
 
-    // VERIFY: NCardGrid (or else the screen) keeps every card it shows in an IEnumerable<CardModel> field, ideally "_cards"
-    private static FieldInfo? AllCardsField(Type type) =>
-        FindField(type, "cards",
-            f => IsCardList(f.FieldType) && !NameHas(f, "selected", "chosen", "picked", "preview", "visible", "hover"),
-            "_cards", "_allCards", "<Cards>k__BackingField", "_cardModels");
-
-    // VERIFY: the grid screens keep the picked-so-far cards (or holders) in a field whose name contains "selected", e.g. "_selectedCards"
+    /// <summary>The picks so far: every grid screen keeps them in a private HashSet "_selectedCards".</summary>
     private static List<CardModel>? SelectedCards(Node? owner)
     {
         if (owner is null || !GodotObject.IsInstanceValid(owner)) return null;
-        var field = FindField(owner.GetType(), "selected",
-            f => (IsCardList(f.FieldType) || IsHolderList(f.FieldType)) && NameHas(f, "selected", "chosen", "picked"),
-            "_selectedCards", "_selected", "<SelectedCards>k__BackingField");
-
-        return field?.GetValue(owner) switch
-        {
-            IEnumerable<CardModel> cards => cards.Where(c => c is not null).ToList(),
-            IEnumerable<NCardHolder> holders => holders.Where(h => GodotObject.IsInstanceValid(h)).Select(h => h.CardModel).OfType<CardModel>().ToList(),
-            _ => null,
-        };
+        return CardsIn(owner, "_selectedCards");
     }
+
+    /// <summary>The screen-level confirm, if the layout has one.</summary>
+    private static NClickableControl? ScreenConfirm(Node screen, GridLayout layout) =>
+        layout.Confirm is { } path ? Nodes.Get<NClickableControl>(screen, path) : null;
+
+    /// <summary>
+    /// Whether the screen-level confirm may be pressed now. The enchant screen's opens a preview
+    /// of the selection that can't work without a pick (with one allowed it throws reading the
+    /// first card, with several its Confirm does nothing), so there it waits for a card.
+    /// </summary>
+    private static bool ConfirmReady(GridView view) =>
+        Usable(view.Confirm) && (view.Kind != "enchant" || view.Selected.Count > 0);
+
+    /// <summary>
+    /// The open preview's back button, when pressing it is safe. The deck and transform screens'
+    /// back handlers refocus the last pick and throw on an empty "choose none" preview, so that
+    /// one can only be confirmed.
+    /// </summary>
+    private static NClickableControl? PreviewBack(GridView view) =>
+        view.Preview?.Back is { } back && Usable(back) && view.Selected.Count > 0 ? back : null;
 
     private static Preview? FindPreview(Node screen, GridLayout layout)
     {
         foreach (var path in layout.PreviewContainers)
         {
+            // The screens show a preview by making its container visible (the previewed cards sit under it).
             if (Nodes.Get<Node>(screen, path) is not { } box || !Visible(box)) continue;
-            // A container can stay visible while empty; it counts as open only with its Confirm showing.
-            if (ButtonIn(box, "Confirm") is { } confirm && Visible(confirm))
-                return new Preview(box, confirm, ButtonIn(box, "Cancel")); // VERIFY: the preview containers' back button is named "Cancel" (only offered when found)
-        }
-
-        if (layout.PreviewConfirm is { } confirmPath && Nodes.Get<NClickableControl>(screen, confirmPath) is { } direct && Visible(direct))
-        {
-            var back = layout.PreviewBack is { } backPath ? Nodes.Get<NClickableControl>(screen, backPath) : null;
-            return new Preview(Nodes.Get<Node>(screen, "%PreviewContainer"), direct, back); // VERIFY: NDeckCardSelectScreen's previewed card sits under "%PreviewContainer" (only used to describe it)
+            if (Nodes.Get<NClickableControl>(box, layout.PreviewConfirm) is { } confirm && Visible(confirm))
+                return new Preview(box, confirm, Nodes.Get<NClickableControl>(box, layout.PreviewBack));
         }
         return null;
     }
 
     private static PreviewPhase ResolvePreview(GridView view, Memo memo, DateTime now)
     {
-        // A preview only follows a pick; a panel that looks open with nothing picked is a misread.
-        if (view.Preview is not { } preview || (view.Selected.Count == 0 && memo.Picked is null))
+        // The container is the screen's own preview flag; it can open with nothing picked (a
+        // screen-level confirm when the minimum is 0), which is a real "choose none" preview.
+        if (view.Preview is not { } preview)
         {
             if (memo.PreviewSince is not null)
             {
                 // Backing out of a preview drops the pick, so our own record of presses is stale.
                 memo.PreviewSince = null;
+                memo.Picked = null;
                 memo.Toggled.Clear();
             }
             return PreviewPhase.Closed;
@@ -615,13 +627,15 @@ internal sealed class CardSelectReader : IScreen
     }
 
     /// <summary>
-    /// Whether the known maximum stops further picks. With an enabled confirm it always does.
-    /// Without one the grid should close by itself; if it is still up after <see cref="FullGrace"/>
-    /// the maximum came from somewhere wrong, so stop trusting it rather than wait forever.
+    /// Whether the known maximum stops further picks. With an enabled confirm it always does, and
+    /// on deck screens too: they open their preview at the maximum and keep taking presses past
+    /// it (a second card on a single upgrade gets upgraded as well). Otherwise the grid should
+    /// close by itself; if it is still up after <see cref="FullGrace"/> the maximum came from
+    /// somewhere wrong, so stop trusting it rather than wait forever.
     /// </summary>
     private static bool AtMax(GridView view, Memo memo, DateTime now)
     {
-        if (!view.Full || Usable(view.Confirm))
+        if (!view.Full || Usable(view.Confirm) || view.Layout.HasPreview)
         {
             memo.FullSince = null;
             return view.Full;
@@ -641,8 +655,8 @@ internal sealed class CardSelectReader : IScreen
     {
         if (!GodotObject.IsInstanceValid(screen)) return "gone";
         var preview = FindPreview(screen, layout);
-        var selected = (SelectedCards(screen) ?? SelectedCards(Nodes.Get<NCardGrid>(screen, "%CardGrid")))?.Count ?? -1;
-        var confirm = Usable(Nodes.Get<NClickableControl>(screen, "%Confirm"));
+        var selected = SelectedCards(screen)?.Count ?? -1;
+        var confirm = Usable(ScreenConfirm(screen, layout));
         return $"{preview is not null}/{Usable(preview?.Confirm)}/{selected}/{confirm}";
     }
 
@@ -704,46 +718,54 @@ internal sealed class CardSelectReader : IScreen
         var what = string.Join(", ", names);
         return view.Kind switch
         {
-            "remove" or "upgrade" or "transform" or "enchant" => what.Length > 0 ? $"Confirm: {view.Kind} {what}" : $"Confirm the {view.Kind}",
-            _ => what.Length > 0 ? $"Confirm selection: {what}" : "Confirm selection",
+            "remove" or "upgrade" or "transform" or "enchant" => what.Length > 0 ? $"Confirm: {view.Kind} {what}" : $"Confirm without choosing a card to {view.Kind}",
+            _ => what.Length > 0 ? $"Confirm selection: {what}" : "Confirm with nothing selected",
         };
     }
 
     private static string CloseLabel(string kind) =>
         kind == "remove" ? "Close without removing a card" : "Close without choosing";
 
-    private static void FillFromPrefs(Node screen, Memo memo, DateTime now)
+    /// <summary>
+    /// The grid screens keep the CardSelectorPrefs they were opened with in a private "_prefs"
+    /// (set before the screen is pushed); the choose and bundle screens have none.
+    /// </summary>
+    private static void FillFromPrefs(Node screen, Memo memo)
     {
         if (memo.PrefsDone) return;
-
-        // VERIFY: the selection screens keep their CardSelectorPrefs in a field (type name contains "Prefs") with Prompt, MinSelect and MaxSelect
-        var field = FindField(screen.GetType(), "prefs", f => Underlying(f.FieldType).Name.Contains("Prefs", StringComparison.Ordinal));
-        var prefs = field?.GetValue(screen);
-        if (prefs is null)
-        {
-            // The field may only be filled once the screen is set up; give it a moment.
-            if (field is null || now - memo.FirstSeen > PrefsPatience) memo.PrefsDone = true;
-            return;
-        }
-
         memo.PrefsDone = true;
-        memo.Prompt ??= ReadText(prefs, "Prompt", "Title", "Header");
-        memo.Min ??= ReadInt(prefs, "MinSelect", "MinCount", "Min");
-        memo.Max ??= ReadInt(prefs, "MaxSelect", "MaxCount", "Max");
+        if (FindField(screen.GetType(), "_prefs")?.GetValue(screen) is not CardSelectorPrefs prefs) return;
+
+        memo.PromptKey = prefs.Prompt?.LocEntryKey;
+        // The screen's own limits win over the factory record matched by timing.
+        memo.Min = prefs.MinSelect;
+        memo.Max = prefs.MaxSelect;
+        try
+        {
+            if (memo.Prompt is null && Describe.Text(prefs.Prompt) is { Length: > 0 } prompt) memo.Prompt = prompt;
+        }
+        catch
+        {
+            // A prompt needing variables we can't supply; the cards still show.
+        }
     }
 
-    // VERIFY: NDeckEnchantSelectScreen holds the enchantment it applies in a field whose type name contains "Enchantment", with Title and Description
+    /// <summary>
+    /// NDeckEnchantSelectScreen keeps the canonical enchantment and its amount privately. Describe a
+    /// mutable copy with the amount applied, as the screen's own panel does.
+    /// </summary>
     private static JsonObject? ReadEnchantment(Node screen)
     {
         try
         {
-            var field = FindField(screen.GetType(), "enchantment",
-                f => Underlying(f.FieldType).Name.Contains("Enchantment", StringComparison.Ordinal) && !typeof(IEnumerable).IsAssignableFrom(f.FieldType));
-            if (field?.GetValue(screen) is not { } enchantment) return null;
+            if (Nodes.GetPrivate(screen, "_enchantment") is not EnchantmentModel canonical) return null;
+            var shown = canonical.ToMutable();
+            if (Nodes.GetPrivate(screen, "_enchantmentAmount") is int amount) shown.Amount = amount;
+            shown.RecalculateValues();
 
-            var json = new JsonObject { ["name"] = Describe.Text(Nodes.GetPrivate(enchantment, "Title")) };
-            var text = ReadText(enchantment, "Description");
-            if (text is { Length: > 0 }) json["text"] = text;
+            var json = new JsonObject { ["name"] = Describe.Text(shown.Title) };
+            var text = Describe.Text(shown.DynamicDescription);
+            if (text.Length > 0) json["text"] = text;
             return json;
         }
         catch
@@ -811,7 +833,7 @@ internal sealed class CardSelectReader : IScreen
         var options = new List<ChooseOption>();
         foreach (var holder in Nodes.FindAll<NGridCardHolder>(Nodes.Get<Node>(screen, "CardRow")))
         {
-            if (GodotObject.IsInstanceValid(holder) && holder.CardModel is { } card) // VERIFY: NGridCardHolder exposes CardModel (inherited from NCardHolder)
+            if (GodotObject.IsInstanceValid(holder) && holder.CardModel is { } card)
                 options.Add(new ChooseOption(card, holder));
         }
         descs = options.Select(o => CardJson(ctx, o.Card)).ToList();
@@ -821,21 +843,21 @@ internal sealed class CardSelectReader : IScreen
 
     private static NClickableControl? SkipButton(NChooseACardSelectionScreen screen)
     {
-        if (Nodes.GetPrivate(screen, "_canSkip") is false) return null; // VERIFY: the screen's canSkip flag is a bool field named _canSkip (the visible, enabled button is checked regardless)
-        var button = Nodes.Get<NClickableControl>(screen, "SkipButton"); // VERIFY: "SkipButton" derives from NClickableControl
+        // FromChooseACardScreen's canSkip, kept in a private bool; without it the button is hidden and disabled anyway.
+        if (Nodes.GetPrivate(screen, "_canSkip") is false) return null;
+        var button = Nodes.Get<NChoiceSelectionSkipButton>(screen, "SkipButton");
         return Usable(button) ? button : null;
     }
 
     // ---------- choose a bundle ----------
 
-    private sealed record Bundle(Node Node, NClickableControl Hitbox, List<CardModel> Cards);
+    private sealed record Bundle(NCardBundle Node, NClickableControl Hitbox, IReadOnlyList<CardModel> Cards);
 
     private static GameSnapshot CaptureBundles(GameContext ctx, NChooseABundleSelectionScreen screen, Memo memo)
     {
         var now = DateTime.UtcNow;
-        FillFromPrefs(screen, memo, now);
         var bundles = FindBundles(screen);
-        var phase = BundlePhase(screen, memo, now);
+        var phase = BundlePhase(screen, bundles, memo, now);
 
         var state = new JsonObject { ["kind"] = "bundle" };
         AddPrompt(state, memo);
@@ -886,8 +908,8 @@ internal sealed class CardSelectReader : IScreen
             return ActionResult.Fail($"Cannot choose now ({why}).");
 
         var now = DateTime.UtcNow;
-        var phase = BundlePhase(screen, memo, now);
         var bundles = FindBundles(screen);
+        var phase = BundlePhase(screen, bundles, memo, now);
 
         if (actionId == "confirm")
         {
@@ -935,13 +957,22 @@ internal sealed class CardSelectReader : IScreen
 
     private static NClickableControl? BundleCancel(NChooseABundleSelectionScreen screen)
     {
-        var button = Nodes.Get<NClickableControl>(screen, "%Cancel"); // VERIFY: the bundle screen's back-out button is "%Cancel" (only offered when found)
+        var button = Nodes.Get<NClickableControl>(screen, "%Cancel"); // enabled only while a bundle is previewed
         return Usable(button) ? button : null;
     }
 
-    /// <summary>Ready once our pick has enabled the confirm button and the preview has settled.</summary>
-    private static PreviewPhase BundlePhase(NChooseABundleSelectionScreen screen, Memo memo, DateTime now)
+    /// <summary>
+    /// Ready once a pick has enabled the confirm button and the preview has settled. The pick is
+    /// the one the screen has open (its private "_selectedBundle", whoever clicked it), so the
+    /// confirm label names what will actually be taken; our own click stands in if that can't be read.
+    /// </summary>
+    private static PreviewPhase BundlePhase(NChooseABundleSelectionScreen screen, List<Bundle> bundles, Memo memo, DateTime now)
     {
+        if (Nodes.TryGetPrivate(screen, "_selectedBundle") is NCardBundle open)
+        {
+            var shown = bundles.FindIndex(b => ReferenceEquals(b.Node, open));
+            if (shown >= 0) memo.PickedBundle = shown;
+        }
         if (memo.PickedBundle is null || !Usable(BundleConfirm(screen)))
         {
             memo.PreviewSince = null;
@@ -952,45 +983,19 @@ internal sealed class CardSelectReader : IScreen
     }
 
     /// <summary>
-    /// The bundles in display order: from the screen's own list when it has one, else every
-    /// node in the tree that looks like a bundle (has "Bundle" in its type name and a Hitbox),
-    /// outer ones only and none inside a preview, which may show a copy of the picked bundle.
+    /// The bundles in display order: the NCardBundle children of "%BundleRow", one per offered
+    /// bundle in the factory's order. Their card list stays put while a picked bundle's card
+    /// nodes move to the preview.
     /// </summary>
     private static List<Bundle> FindBundles(NChooseABundleSelectionScreen screen)
     {
-        IEnumerable<Node> candidates;
-        // VERIFY: bundle nodes have "Bundle" in their type name and expose Hitbox as an NClickableControl
-        var listField = FindField(screen.GetType(), "bundles",
-            f => ElementType(f.FieldType) is { } e && typeof(Node).IsAssignableFrom(e) && e.Name.Contains("Bundle", StringComparison.Ordinal));
-        if (listField?.GetValue(screen) is IEnumerable fromField)
-            candidates = fromField.OfType<Node>().ToList();
-        else
-            candidates = Nodes.FindAll<Node>(screen).Where(n => n.GetType().Name.Contains("Bundle", StringComparison.Ordinal) && !InsidePreview(n, screen));
-
         var found = new List<Bundle>();
-        foreach (var node in candidates)
+        foreach (var node in Nodes.FindAll<NCardBundle>(Nodes.Get<Node>(screen, "%BundleRow")))
         {
-            if (!GodotObject.IsInstanceValid(node) || found.Any(b => b.Node.IsAncestorOf(node))) continue;
-            if (Nodes.GetPrivate(node, "Hitbox") is not NClickableControl hitbox || !GodotObject.IsInstanceValid(hitbox)) continue;
-            found.Add(new Bundle(node, hitbox, BundleCards(node)));
+            if (GodotObject.IsInstanceValid(node) && node.Hitbox is { } hitbox && GodotObject.IsInstanceValid(hitbox))
+                found.Add(new Bundle(node, hitbox, node.Bundle));
         }
         return found;
-    }
-
-    private static List<CardModel> BundleCards(Node bundle)
-    {
-        var field = FindField(bundle.GetType(), "bundle_cards", f => IsCardList(f.FieldType), "_cards", "<Cards>k__BackingField");
-        if (CardsIn(bundle, field) is { Count: > 0 } cards) return cards;
-        return CardsUnder(bundle);
-    }
-
-    private static bool InsidePreview(Node node, Node screen)
-    {
-        for (var n = node.GetParent(); n is not null && !ReferenceEquals(n, screen); n = n.GetParent())
-        {
-            if (n.Name.ToString().Contains("Preview", StringComparison.OrdinalIgnoreCase)) return true;
-        }
-        return false;
     }
 
     private static string BundleNames(Bundle bundle) =>
@@ -1089,7 +1094,7 @@ internal sealed class CardSelectReader : IScreen
         return arr;
     }
 
-    private static bool InDrawPile(CardModel card) => card.Pile?.Type == PileType.Draw; // VERIFY: the draw pile's PileType member is named Draw
+    private static bool InDrawPile(CardModel card) => card.Pile?.Type == PileType.Draw;
 
     /// <summary>
     /// Draw order is hidden from human players, so any list holding draw-pile cards is sorted
@@ -1109,22 +1114,29 @@ internal sealed class CardSelectReader : IScreen
 
     /// <summary>
     /// Card models drawn under a node: holders' CardModel, then bare NCards' Model. Only what is
-    /// actually shown counts; a hidden node may hold something the player can't see (a pre-rolled
-    /// transform result, a stale card).
+    /// actually shown counts; a hidden node may hold something the player can't see (a stale card).
+    /// A random transform's result is shown as a holder cycling through the possible cards, with
+    /// its hitbox set to ignore the mouse (the only preview that does); that is no outcome, so skip it.
     /// </summary>
     private static List<CardModel> CardsUnder(Node? root)
     {
         var cards = new List<CardModel>();
         if (root is null || !GodotObject.IsInstanceValid(root)) return cards;
 
+        var cycling = new HashSet<NCard>(ReferenceEqualityComparer.Instance);
         foreach (var holder in Nodes.FindAll<NCardHolder>(root))
         {
+            if (holder.Hitbox is { } hitbox && GodotObject.IsInstanceValid(hitbox) && hitbox.MouseFilter == Control.MouseFilterEnum.Ignore)
+            {
+                if (holder.CardNode is { } stand) cycling.Add(stand);
+                continue;
+            }
             if (Visible(holder) && holder.CardModel is { } held && !cards.Any(c => ReferenceEquals(c, held)))
                 cards.Add(held);
         }
         foreach (var view in Nodes.FindAll<NCard>(root))
         {
-            if (Visible(view) && view.Model is { } drawn && !cards.Any(c => ReferenceEquals(c, drawn))) // VERIFY: NCard exposes its CardModel as Model
+            if (!cycling.Contains(view) && Visible(view) && view.Model is { } drawn && !cards.Any(c => ReferenceEquals(c, drawn)))
                 cards.Add(drawn);
         }
         return cards;
@@ -1135,7 +1147,7 @@ internal sealed class CardSelectReader : IScreen
     private static bool OnTop(Node screen) =>
         GodotObject.IsInstanceValid(screen) && ReferenceEquals(Nodes.TopOverlay(), screen);
 
-    // VERIFY: the screens' buttons and hitboxes derive from NClickableControl (IsEnabled, ForceClick), like the other clickables
+    // ForceClick skips the enabled check; callers test Usable (or IsEnabled) first.
     private static ActionResult Click(NClickableControl button, string what) =>
         Clicks.Once(button, () => button.ForceClick(), what);
 
@@ -1170,20 +1182,6 @@ internal sealed class CardSelectReader : IScreen
     private static bool Usable([NotNullWhen(true)] NClickableControl? button) =>
         button is not null && Visible(button) && button.IsEnabled;
 
-    /// <summary>A button inside a preview container: the direct child first, else a descendant by name.</summary>
-    private static NClickableControl? ButtonIn(Node box, string name)
-    {
-        if (box.GetNodeOrNull(name) is NClickableControl direct) return direct;
-        NClickableControl? loose = null;
-        foreach (var button in Nodes.FindAll<NClickableControl>(box))
-        {
-            var own = button.Name.ToString();
-            if (own == name) return button;
-            if (loose is null && own.Contains(name, StringComparison.OrdinalIgnoreCase)) loose = button;
-        }
-        return loose;
-    }
-
     private static bool TryIndex(string actionId, string prefix, out int n)
     {
         n = -1;
@@ -1192,84 +1190,25 @@ internal sealed class CardSelectReader : IScreen
 
     // ---------- reflection over the screens' private state ----------
 
-    // The screens don't publish their card lists, selections or prefs, so find them by field
-    // type (and a name hint) once per type. Everything here degrades to "unknown" when a guess
-    // misses rather than failing the snapshot.
+    // The screens don't publish their card lists, selections or prefs; read the non-public
+    // fields by their exact v0.107.1 names, looked up once per type. A name that goes missing
+    // after a game update degrades to "unknown" rather than failing the snapshot.
 
-    private static readonly Dictionary<(Type Type, string Role), FieldInfo?> FieldCache = new();
+    private static readonly Dictionary<(Type Type, string Name), FieldInfo?> FieldCache = new();
 
-    private static FieldInfo? FindField(Type type, string role, Func<FieldInfo, bool> match, params string[] preferred)
+    private static FieldInfo? FindField(Type type, string name)
     {
-        if (FieldCache.TryGetValue((type, role), out var cached)) return cached;
+        if (FieldCache.TryGetValue((type, name), out var cached)) return cached;
 
         const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
-        var candidates = new List<FieldInfo>();
-        // Godot's own classes hold none of this; stop at them.
-        for (var t = type; t is not null && t.Assembly != typeof(Node).Assembly; t = t.BaseType)
-            candidates.AddRange(t.GetFields(flags).Where(match));
+        FieldInfo? found = null;
+        for (var t = type; t is not null && found is null; t = t.BaseType)
+            found = t.GetField(name, flags);
 
-        FieldInfo? pick = null;
-        foreach (var name in preferred)
-        {
-            pick = candidates.FirstOrDefault(f => f.Name == name);
-            if (pick is not null) break;
-        }
-        pick ??= candidates.FirstOrDefault();
-
-        FieldCache[(type, role)] = pick;
-        return pick;
+        FieldCache[(type, name)] = found;
+        return found;
     }
 
-    private static List<CardModel>? CardsIn(object owner, FieldInfo? field) =>
-        field?.GetValue(owner) is IEnumerable<CardModel> cards ? cards.Where(c => c is not null).ToList() : null;
-
-    private static bool IsCardList(Type t) => t != typeof(string) && typeof(IEnumerable<CardModel>).IsAssignableFrom(t);
-
-    private static bool IsHolderList(Type t) => typeof(IEnumerable<NCardHolder>).IsAssignableFrom(t);
-
-    private static bool NameHas(FieldInfo f, params string[] parts) =>
-        parts.Any(p => f.Name.Contains(p, StringComparison.OrdinalIgnoreCase));
-
-    private static Type Underlying(Type t) => Nullable.GetUnderlyingType(t) ?? t;
-
-    private static Type? ElementType(Type t)
-    {
-        if (t == typeof(string)) return null;
-        if (t.IsArray) return t.GetElementType();
-        if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(IEnumerable<>)) return t.GetGenericArguments()[0];
-        return t.GetInterfaces()
-            .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>))
-            ?.GetGenericArguments()[0];
-    }
-
-    private static string? ReadText(object owner, params string[] members)
-    {
-        foreach (var member in members)
-        {
-            try
-            {
-                var text = Nodes.GetPrivate(owner, member) switch
-                {
-                    LocString loc => Describe.Text(loc),
-                    string s => Describe.Text(s),
-                    _ => "",
-                };
-                if (text.Length > 0) return text;
-            }
-            catch
-            {
-                // Some LocStrings need variables we can't supply; try the next member.
-            }
-        }
-        return null;
-    }
-
-    private static int? ReadInt(object owner, params string[] members)
-    {
-        foreach (var member in members)
-        {
-            if (Nodes.GetPrivate(owner, member) is int value) return value;
-        }
-        return null;
-    }
+    private static List<CardModel>? CardsIn(object owner, string field) =>
+        FindField(owner.GetType(), field)?.GetValue(owner) is IEnumerable<CardModel> cards ? cards.Where(c => c is not null).ToList() : null;
 }

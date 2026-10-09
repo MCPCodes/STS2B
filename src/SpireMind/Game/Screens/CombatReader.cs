@@ -1,4 +1,3 @@
-using System.Reflection;
 using System.Text.Json.Nodes;
 using SpireMind.Patches;
 
@@ -31,6 +30,10 @@ internal sealed class CombatReader : IScreen
 
     /// <summary>When we last sent EndPlayerTurnAction; only read while the latch names the current turn.</summary>
     private static DateTime _endTurnRequestedAt;
+
+    /// <summary>Every enemy of <see cref="_rosterCombat"/> in order of arrival; see <see cref="EnemyRoster"/>.</summary>
+    private static readonly List<Creature> Roster = new();
+    private static ICombatState? _rosterCombat;
 
     /// <summary>Everything one capture or execute reads, fetched once.</summary>
     private sealed record Board(RunState Run, Player Me, ICombatState Cs, PlayerCombatState Pcs, List<Creature> Enemies, List<Player> Players);
@@ -140,6 +143,8 @@ internal sealed class CombatReader : IScreen
         if (pcs.Phase != PlayerTurnPhase.Play) return $"turn phase {pcs.Phase}";
         if (RunManager.Instance?.ActionQueueSynchronizer?.CombatState != ActionSynchronizerCombatState.PlayPhase) return "turn changing";
         if (cm.PlayerActionsDisabled) return "resolving";
+        // Singleplayer pauses the fight while the map or a deck view is open.
+        if (cm.IsPaused) return "combat paused";
 
         if (LiveHand() is not { } hand) return "hand not ready";
         if (hand.IsInCardSelection) return "choosing cards from hand";
@@ -161,16 +166,15 @@ internal sealed class CombatReader : IScreen
             return null;
         }
 
-        // Section f.3: the combat room counts only in its live-fight mode. Compared by name so
-        // the enum's type name doesn't matter.
-        // VERIFY: NCombatRoom.Mode exists and its live-fight value is named ActiveCombat.
-        if (node is NCombatRoom room && GodotObject.IsInstanceValid(room) && room.Mode.ToString() != "ActiveCombat")
+        // Section f.3: the combat room counts only in its live-fight mode (an event's fight
+        // starts VisualOnly and switches over; a reloaded finished fight is FinishedCombat).
+        if (node is NCombatRoom room && GodotObject.IsInstanceValid(room) && room.Mode != CombatRoomMode.ActiveCombat)
         {
             why = $"combat room in {room.Mode} mode";
             return null;
         }
 
-        return new Board(run, me, cs, pcs, cs.Enemies.ToList(), cs.Players.ToList());
+        return new Board(run, me, cs, pcs, EnemyRoster(cs), cs.Players.ToList());
     }
 
     // ---------- playing cards ----------
@@ -188,7 +192,6 @@ internal sealed class CombatReader : IScreen
             }
 
             var name = Describe.CardName(card);
-            // VERIFY: the enum behind CardModel.TargetType is named TargetType.
             switch (card.TargetType)
             {
                 case TargetType.AnyEnemy:
@@ -201,11 +204,12 @@ internal sealed class CombatReader : IScreen
                     break;
 
                 case TargetType.AnyAlly:
-                    // VERIFY: section c says "a living PlayerCreature other than me"; if that includes pets (Osty), they are not offered here.
+                    // Other living players only, as the UI offers: pets like Osty are not player creatures.
                     for (var j = 0; j < b.Players.Count; j++)
                     {
                         var ally = b.Players[j];
-                        if (!LocalContext.IsMe(ally) && ally.Creature.IsAlive && card.CanPlayTargeting(ally.Creature))
+                        if (!LocalContext.IsMe(ally) && ally.Creature.IsAlive && Hook.ShouldAllowTargeting(b.Cs, ally.Creature, out _)
+                            && card.CanPlayTargeting(ally.Creature))
                             options.Add(new PlayOption($"play:{i}>p{j}", $"Play {name} on {PlayerLabel(b.Players, j)}", card, ally.Creature));
                     }
                     break;
@@ -246,19 +250,26 @@ internal sealed class CombatReader : IScreen
         var card = option.Card;
         var name = Describe.CardName(card);
         var overlayBefore = Nodes.TopOverlay();
+        var pcs = b.Pcs;
+        var turn = pcs.TurnNumber;
+        var energyBefore = pcs.Energy;
+        var starsBefore = pcs.Stars;
 
         if (!card.TryManualPlay(option.Target))
             return ActionResult.Fail($"The game refused to play {name}.");
 
         // CanPlay keeps counting a queued card as in hand with its energy unspent, so stay busy
-        // until the card has left the hand and the queue has drained. That keeps a second play
-        // from being offered off stale numbers.
-        var leftHand = false;
-        ActionTracker.Begin(name, _ =>
+        // until the play has run (the card left the hand, or its cost was paid, which also
+        // covers a card that comes straight back) and the queue has drained. That keeps a second
+        // play from being offered off stale numbers. A play cancelled before it ran leaves
+        // everything as it was; the turn moving on or the timeout ends that wait.
+        var played = false;
+        ActionTracker.Begin(name, c =>
         {
             if (FightOver() || HandSelectOpen() || !ReferenceEquals(Nodes.TopOverlay(), overlayBefore)) return true;
-            leftHand |= card.Pile?.Type != PileType.Hand;
-            return leftHand && ActionTracker.GameLooksIdle();
+            if (c.MyCombat?.TurnNumber != turn || c.Combat?.CurrentSide != CombatSide.Player) return true;
+            played |= card.Pile?.Type != PileType.Hand || pcs.Energy != energyBefore || pcs.Stars != starsBefore;
+            return played && ActionTracker.GameLooksIdle();
         }, PlayTimeout);
         return ActionResult.Success;
     }
@@ -404,21 +415,28 @@ internal sealed class CombatReader : IScreen
         if (ctx.Me?.Creature.IsAlive != true) return "you are dead";
         if (ActionTracker.Pending is { } pending) return $"resolving {pending}";
         if (NOverlayStack.Instance?.ScreenCount > 0) return "a screen is open";
+        // Presses only wiggle the peek button, and confirm stays disabled, while peeking.
+        if (LiveHand()?.PeekButton?.IsPeeking == true) return "peeking at the board";
         return null;
     }
 
     private static HandSelection ReadSelection(NPlayerHand hand)
     {
+        var mode = hand.CurrentMode == NPlayerHand.Mode.UpgradeSelect ? "upgrade" : "select";
+        // The hand's private _prefs belong to this very selection and never age out, so a slow
+        // decision keeps its prompt and limits; the CardSelectCmd capture is the fallback.
+        if (Nodes.TryGetPrivate(hand, "_prefs") is CardSelectorPrefs { Prompt: not null } prefs)
+            return new HandSelection(mode, Describe.Text(prefs.Prompt), prefs.MinSelect, prefs.MaxSelect, SelectedCards(hand), SelectionFilter(hand));
+
         // Only a hand factory's prompt can describe this; an older grid prompt would mislead.
         var prompt = ChoicePrompt.Recent(PromptMaxAge) is { } p && p.Source.StartsWith("FromHand", StringComparison.Ordinal) ? p : null;
-        var mode = hand.CurrentMode == NPlayerHand.Mode.UpgradeSelect ? "upgrade" : "select";
         return new HandSelection(mode, prompt?.Prompt, prompt?.Min, prompt?.Max, SelectedCards(hand), SelectionFilter(hand));
     }
 
     /// <summary>
-    /// Cards we can press now. The filter and picked-so-far list come from guessed private
-    /// members; if they rule out everything while confirm is still disabled, they are probably
-    /// wrong, so offer every card rather than stall (pressing an ineligible card does nothing).
+    /// Cards we can press now. The filter and picked-so-far list come from the hand's private
+    /// state; if they rule out everything while confirm is still disabled, something is off,
+    /// so offer every shown card rather than stall (the hand hides cards the filter rejects).
     /// </summary>
     private static List<SelectOption> Choosable(Board b, NPlayerHand hand, HandSelection sel)
     {
@@ -433,7 +451,7 @@ internal sealed class CombatReader : IScreen
         var options = new List<SelectOption>();
         if (strict && sel.Full) return options;
 
-        // VERIFY: NPlayerHand.ActiveHolders elements derive from NCardHolder and expose CardModel.
+        // Visible holders only: picked cards move to another container and filtered ones are hidden.
         var holders = hand.ActiveHolders.ToList();
         var cards = b.Pcs.Hand.Cards;
         for (var i = 0; i < cards.Count; i++)
@@ -485,46 +503,13 @@ internal sealed class CombatReader : IScreen
 
     // The hand doesn't publish what is picked so far or which cards qualify; read its private
     // state when it can be found and fall back to "unknown" (everything offered) otherwise.
+    // Both are private fields of NPlayerHand, set in SelectCards and cleared when it ends.
 
-    // VERIFY: name of NPlayerHand's member holding the cards picked so far in select mode.
-    private static readonly string[] SelectedMembers = ["_selectedCards", "SelectedCards", "_selectedHolders", "_selectedCardHolders"];
+    private static List<CardModel>? SelectedCards(NPlayerHand hand) =>
+        Nodes.TryGetPrivate(hand, "_selectedCards") is IEnumerable<CardModel> cards ? cards.ToList() : null;
 
-    private static FieldInfo? _filterField;
-    private static bool _filterSearched;
-
-    private static List<CardModel>? SelectedCards(NPlayerHand hand)
-    {
-        foreach (var member in SelectedMembers)
-        {
-            switch (Nodes.GetPrivate(hand, member))
-            {
-                case IEnumerable<CardModel> cards:
-                    return cards.ToList();
-                case IEnumerable<NCardHolder> holders:
-                    return holders.Where(h => GodotObject.IsInstanceValid(h)).Select(h => h.CardModel).OfType<CardModel>().ToList();
-            }
-        }
-        return null;
-    }
-
-    // VERIFY: NPlayerHand keeps the CardSelectCmd filter as a Func<CardModel, bool> (or Predicate) field in select mode.
-    private static Func<CardModel, bool>? SelectionFilter(NPlayerHand hand)
-    {
-        if (!_filterSearched)
-        {
-            _filterSearched = true;
-            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
-            for (var t = hand.GetType(); t is not null && _filterField is null; t = t.BaseType)
-                _filterField = t.GetFields(flags).FirstOrDefault(f => f.FieldType == typeof(Func<CardModel, bool>) || f.FieldType == typeof(Predicate<CardModel>));
-        }
-
-        return _filterField?.GetValue(hand) switch
-        {
-            Func<CardModel, bool> f => f,
-            Predicate<CardModel> p => new Func<CardModel, bool>(p),
-            _ => null,
-        };
-    }
+    private static Func<CardModel, bool>? SelectionFilter(NPlayerHand hand) =>
+        Nodes.TryGetPrivate(hand, "_currentSelectionFilter") as Func<CardModel, bool>;
 
     // ---------- state ----------
 
@@ -592,14 +577,14 @@ internal sealed class CombatReader : IScreen
     private static JsonArray Enemies(Board b)
     {
         var arr = new JsonArray();
-        var living = b.Enemies.Where(e => e.IsAlive).ToList();
+        var living = b.Enemies.Where(e => InFight(b.Cs, e)).ToList();
         // "primary" only says something when some living enemies are and some aren't.
         var mixed = living.Any(e => e.IsPrimaryEnemy) && living.Any(e => !e.IsPrimaryEnemy);
 
         for (var j = 0; j < b.Enemies.Count; j++)
         {
             var enemy = b.Enemies[j];
-            if (!enemy.IsAlive) continue;
+            if (!InFight(b.Cs, enemy)) continue;
             var json = Describe.Lead("i", j, Describe.Creature(enemy));
             json["intents"] = Intents(enemy, b.Cs);
             if (mixed && enemy.IsPrimaryEnemy) json["primary"] = true;
@@ -632,11 +617,11 @@ internal sealed class CombatReader : IScreen
             var total = 0;
             foreach (var enemy in b.Enemies)
             {
-                if (!enemy.IsAlive || enemy.Monster?.NextMove is not { } move || move.Id == "STUNNED") continue;
+                if (!InFight(b.Cs, enemy) || enemy.Monster?.NextMove is not { } move || move.Id == "STUNNED") continue;
                 foreach (var intent in move.Intents)
                 {
-                    // VERIFY: AttackIntent.GetTotalDamage returns a number castable to int.
-                    if (intent is AttackIntent attack) total += (int)attack.GetTotalDamage(targets, enemy);
+                    // "is AttackIntent", not IntentType.Attack: death blows report their own type.
+                    if (intent is AttackIntent attack) total += attack.GetTotalDamage(targets, enemy);
                 }
             }
             return total;
@@ -677,7 +662,7 @@ internal sealed class CombatReader : IScreen
             var orbs = new JsonArray();
             foreach (var orb in queue.Orbs)
             {
-                // VERIFY: orb models expose Id.Entry, and PassiveVal/EvokeVal are numbers castable to int.
+                // PassiveVal and EvokeVal are decimals with Focus already applied.
                 orbs.Add(new JsonObject
                 {
                     ["id"] = orb.Id.Entry,
@@ -699,8 +684,8 @@ internal sealed class CombatReader : IScreen
         try
         {
             var arr = new JsonArray();
-            // VERIFY: PlayerCombatState.Pets enumerates Creature (Necrobinder's Osty).
-            foreach (Creature pet in pcs.Pets) arr.Add(Describe.Creature(pet));
+            // Necrobinder's Osty.
+            foreach (var pet in pcs.Pets) arr.Add(Describe.Creature(pet));
             return arr.Count > 0 ? arr : null;
         }
         catch
@@ -709,7 +694,6 @@ internal sealed class CombatReader : IScreen
         }
     }
 
-    // VERIFY: the Regent's character model class is named Regent.
     private static bool UsesStars(Board b) => b.Pcs.Stars != 0 || b.Me.Character is Regent;
 
     private static JsonObject Pile(CardPile pile) => new()
@@ -728,10 +712,30 @@ internal sealed class CombatReader : IScreen
     internal static bool FightOver() =>
         CombatManager.Instance is not { IsInProgress: true, IsOverOrEnding: false };
 
+    /// <summary>
+    /// The fight's enemies for e&lt;j&gt; ids, each at the index it first got. The game drops dead
+    /// and fled enemies from cs.Enemies, which would shift later ids while the model decides
+    /// (a teammate's kill in co-op); here they stay as gaps that <see cref="InFight"/> skips.
+    /// </summary>
+    internal static List<Creature> EnemyRoster(ICombatState cs)
+    {
+        if (!ReferenceEquals(_rosterCombat, cs))
+        {
+            _rosterCombat = cs;
+            Roster.Clear();
+        }
+        foreach (var enemy in cs.Enemies)
+            if (!Roster.Contains(enemy)) Roster.Add(enemy);
+        return Roster.ToList();
+    }
+
+    /// <summary>A living enemy still in the fight (fled ones are alive but gone).</summary>
+    internal static bool InFight(ICombatState cs, Creature enemy) => enemy.IsAlive && cs.Enemies.Contains(enemy);
+
     /// <summary>Docs section c: a living, hittable enemy the targeting hooks allow.</summary>
     internal static bool IsTargetableEnemy(ICombatState cs, Creature enemy) =>
-        enemy.IsAlive && enemy.IsHittable
-        && Hook.ShouldAllowTargeting(cs, enemy, out _); // VERIFY: takes ICombatState (or needs the concrete CombatState).
+        InFight(cs, enemy) && enemy.IsHittable
+        && Hook.ShouldAllowTargeting(cs, enemy, out _);
 
     /// <summary>Enemy name for labels, with its id when another living enemy shares the name.</summary>
     internal static string EnemyLabel(IReadOnlyList<Creature> enemies, int j)

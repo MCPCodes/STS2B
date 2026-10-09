@@ -3,7 +3,8 @@ namespace SpireMind.Game;
 /// <summary>
 /// Decides which screen is up and whether the game is in a state where reading it is
 /// meaningful. Mirrors the game's own layering (docs/game-api.md section f): busy gates
-/// first, then modals, then the map, then the overlay stack, then the room.
+/// first, then screens a human opened and modals, then the map, then the overlay stack, then
+/// the room.
 /// </summary>
 internal static class ScreenRouter
 {
@@ -57,7 +58,9 @@ internal static class ScreenRouter
         {
             if (rm.IsCleaningUp) return "run cleaning up";
             if (rm.IsInProgress && rm.NetService?.IsGameLoading == true) return "loading";
-            if (rm.IsInProgress && NRun.Instance?.GlobalUi is null) return "run loading";
+            // Only while the run scene exists: a run set up from the main menu (or left behind by
+            // a failed Continue) counts as in progress with no NRun, and Route sends that to the menu.
+            if (rm.IsInProgress && NRun.Instance is { GlobalUi: null }) return "run loading";
         }
 
         if (NMapScreen.Instance?.IsTraveling == true)
@@ -76,7 +79,15 @@ internal static class ScreenRouter
         try { current = ActiveScreenContext.Instance?.GetCurrentScreen(); }
         catch (Exception ex) { ModEntry.LogError($"GetCurrentScreen: {ex.Message}"); }
 
-        // Modals sit above everything (FTUE tips, error popups, the mod consent prompt).
+        // The feedback screen outranks modals and the inspect screens outrank everything below
+        // them; a human opened all three, so let them close them.
+        if (current is NSendFeedbackScreen or NInspectCardScreen or NInspectRelicScreen)
+        {
+            why = "an inspect or feedback screen is open; close it to continue";
+            return null;
+        }
+
+        // Modals sit above everything else (FTUE tips, error popups, the mod consent prompt).
         if (NModalContainer.Instance?.OpenModal is Node modal && GodotObject.IsInstanceValid(modal))
             return new ActiveScreen(ModalReader.Instance, modal);
 
@@ -86,7 +97,9 @@ internal static class ScreenRouter
             return null; // a human opened it, let them close it.
         }
 
-        if (!ctx.InRun)
+        // The main menu wins over RunManager, as in GetCurrentScreen: a run being set up from it
+        // already counts as in progress.
+        if (!ctx.InRun || NGame.Instance?.MainMenu is not null)
         {
             // The run can stop counting as in progress while its game over screen is still up.
             if (NOverlayStack.Instance?.Peek() is NGameOverScreen over && GodotObject.IsInstanceValid(over))
@@ -99,7 +112,9 @@ internal static class ScreenRouter
         if (NMapScreen.Instance is { IsOpen: true } map)
             return new ActiveScreen(MapReader.Instance, map);
 
-        // VERIFY: a rewards screen in a treasure room, shop (Orrery, Cauldron) or event leaves the stack once its proceed is pressed; one that stays would hide the room under it
+        // Only a fight's rewards screen is terminal and stays on the stack, under the map (checked
+        // above), as does the Crystal Sphere after its proceed. Every other rewards screen
+        // (treasure, shop relics like Orrery, events) removes itself on proceed or once emptied.
         if (NOverlayStack.Instance?.Peek() is Node top && GodotObject.IsInstanceValid(top))
         {
             IScreen? reader = top switch
@@ -124,14 +139,14 @@ internal static class ScreenRouter
 
         // A fight comes first whatever the screen context reports: one an event starts runs
         // inside the event's room. Hand selection (the "hand_select" snapshot) lives in the
-        // combat reader too.
-        if (ctx.InCombat) // VERIFY: CombatManager.IsInProgress turns false once a fight is over, so an event's page after its fight reads as the event
+        // combat reader too. IsInProgress turns false when the fight ends, so an event page
+        // shown again afterwards routes to the event.
+        if (ctx.InCombat)
             return new ActiveScreen(CombatReader.Instance, current as NCombatRoom ?? NRun.Instance?.CombatRoom);
 
         // Room layer. Prefer the concrete node the screen context reports; fall back to the
         // logical room type when the context is something we don't special-case (the merchant's
-        // inventory, for one, reports itself rather than the room).
-        // VERIFY: the merchant inventory is not an NOverlayStack screen (else the overlay switch above needs a case for it)
+        // inventory, a plain screen context rather than an overlay, reports itself while open).
         switch (current)
         {
             case NCombatRoom combatRoom:

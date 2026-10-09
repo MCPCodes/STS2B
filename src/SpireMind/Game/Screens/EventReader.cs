@@ -12,12 +12,16 @@ namespace SpireMind.Game;
 /// option's NEventOptionButton, which the game sends through EventSynchronizer.ChooseLocalOption,
 /// so a shared co-op event becomes a vote (docs/game-api.md section e).
 ///
-/// Actions: "option:&lt;n&gt;" for state.options[n] while it is unlocked and its button is
-/// enabled, plus the out-of-combat potion actions. The plain proceed option reads "Leave" and
-/// is offered only once the event is finished; other proceed options, like the Trial's
-/// DOUBLE_DOWN that opens the abandon-run popup, are never offered. An Ancient's options
-/// (relic picks) are listed only once its dialogue is over. A fight the event starts belongs
-/// to the combat reader; when it pops back to the event, the room node is fetched again
+/// Actions: "option:&lt;n&gt;" for state.options[n] while it is unlocked, won't kill us and its
+/// button is enabled, plus the out-of-combat potion actions. The plain proceed option (IsProceed
+/// with TextKey PROCEED) reads "Leave": the room adds it once the event is finished, and it is an
+/// Ancient's only option when a modifier skips the Ancient. Other proceed options, like the
+/// Trial's DOUBLE_DOWN that opens the abandon-run popup, are never offered. TheArchitect's last
+/// option (keyed PROCEED but not IsProceed) marks us ready to end the run and is clicked once
+/// per event. An Ancient's options are offered while it is still talking; choosing one clicks
+/// through the rest of the dialogue first. A custom-layout event (FakeMerchant) has no option
+/// buttons; the bot can only leave it through its own proceed button. A fight the event starts
+/// belongs to the combat reader; when it pops back to the event, the room node is fetched again
 /// rather than trusting the one the router saw before the fight.
 /// </summary>
 internal sealed class EventReader : IScreen
@@ -40,33 +44,29 @@ internal sealed class EventReader : IScreen
     /// <summary>Give a co-op vote time to go out before "idle" can mean "registered".</summary>
     private static readonly TimeSpan VoteSettle = TimeSpan.FromMilliseconds(500);
 
-    /// <summary>Leaving normally opens the map within a second or two; past this the event is offered again (co-op waits <see cref="VoteHold"/>).</summary>
+    /// <summary>Leaving opens the map at once (locally, co-op too); past this the event is offered again.</summary>
     private static readonly TimeSpan LeaveHold = TimeSpan.FromSeconds(10);
-
-    /// <summary>
-    /// A shared-event vote with the page unchanged for this long is taken to be lost and the
-    /// options are offered again. Voting twice is harmless; waiting forever is not.
-    /// </summary>
-    private static readonly TimeSpan VoteHold = TimeSpan.FromMinutes(2);
-
-    /// <summary>An Ancient still talking after this long is logged once; the reader keeps waiting.</summary>
-    private static readonly TimeSpan TalkWarn = TimeSpan.FromSeconds(30);
 
     /// <summary>Cards from one option's hover tips listed in the state, at most.</summary>
     private const int MaxTipCards = 3;
+
+    /// <summary>Clicks on an Ancient's dialogue hitbox before choosing, at most; dialogues are a few lines.</summary>
+    private const int MaxDialogueClicks = 20;
+
+    /// <summary>TextKey of the plain proceed option, and of TheArchitect's last option.</summary>
+    private const string ProceedKey = "PROCEED";
 
     private EventReader() { }
 
     /// <summary>
     /// The model side of the current page, read fresh on every call. <see cref="Key"/> changes
-    /// whenever the page does; <see cref="StableOptions"/> says whether the game hands out the
-    /// same option objects on every read, so they can identify the page and its buttons.
+    /// whenever the page does: the model hands out the same option objects until the page changes.
     /// </summary>
-    private sealed record Page(List<EventOption> Options, bool Finished, string Body, string Key, bool StableOptions);
+    private sealed record Page(List<EventOption> Options, bool Finished, string Body, string Key);
 
     /// <summary>One option as read just now. <see cref="Refusal"/> is null when it can be chosen right now.</summary>
     private sealed record OptionView(
-        int N, EventOption Option, NEventOptionButton? Button, string Title, bool Locked, bool Leave, bool Special, string Label, string? Refusal, JsonObject Json)
+        int N, EventOption? Option, NClickableControl? Button, string Title, bool Locked, bool Leave, bool Special, bool Kills, bool EndsRun, string Label, string? Refusal, JsonObject Json)
     {
         public bool Offered => Refusal is null;
     }
@@ -84,15 +84,15 @@ internal sealed class EventReader : IScreen
     private static string _pageKey = "";
     private static DateTime _pageSince;
     private static bool _loggedUnmatched;
-    private static bool _loggedTalking;
 
     /// <summary>When we chose Leave on the current page.</summary>
     private static DateTime? _leftAt;
 
-    /// <summary>Our vote on the current page of a shared co-op event.</summary>
-    private sealed record Vote(string Title, DateTime At);
-
-    private static Vote? _vote;
+    /// <summary>
+    /// The TheArchitect event we clicked the last option of. That click is an act-change vote
+    /// with no stale guard, and its page never changes, so it is latched per event, not per page.
+    /// </summary>
+    private static EventModel? _runEndVoteFor;
 
     /// <summary>Extras per option index on the current page.</summary>
     private static readonly Dictionary<int, Extras> ExtrasByIndex = new();
@@ -112,13 +112,11 @@ internal sealed class EventReader : IScreen
             return;
         }
 
-        // A new room, event or page: whatever we chose or voted for before has played out.
+        // A new room, event or page: whatever we chose before has played out.
         _pageKey = page.Key;
         _pageSince = now;
         _leftAt = null;
-        _vote = null;
         _loggedUnmatched = false;
-        _loggedTalking = false;
         ExtrasByIndex.Clear();
     }
 
@@ -200,9 +198,9 @@ internal sealed class EventReader : IScreen
         var button = o.Button!;
         var ev = view.Event;
         var room = view.Room;
-        var vote = IsVote(ctx, ev);
         var leaving = o.Leave;
-        var multiplayer = ctx.IsMultiplayer;
+        // Proceed options run locally even in a shared event (NEventRoom.OptionButtonClicked); only the rest are votes.
+        var vote = !leaving && IsVote(ctx, ev);
 
         // Any of these changing means the game has acted on the choice.
         var pageBefore = view.Page.Key;
@@ -213,17 +211,18 @@ internal sealed class EventReader : IScreen
 
         var click = Clicks.Once(button, () =>
         {
+            if (view.Ancient && !view.DialogueDone && room.Layout is NAncientEventLayout talker)
+                SkipDialogue(talker);
             button.ForceClick();
             // Latched after the click, so a click that throws leaves nothing to wait on.
-            var now = DateTime.UtcNow;
-            if (leaving) _leftAt = now;
-            if (vote) _vote = new Vote(leaving ? "Leave" : o.Title, now);
+            if (leaving) _leftAt = DateTime.UtcNow;
+            if (o.EndsRun) _runEndVoteFor = ev;
         }, $"the {o.Title} option");
         if (!click.Ok)
             return click;
 
-        // A vote, or leaving in co-op, changes nothing here until teammates act; Capture reports that wait.
-        var waitsOnTeam = vote || (leaving && multiplayer);
+        // A vote changes nothing here until teammates vote; Capture reports that wait from the game's own vote record.
+        var waitsOnTeam = vote;
         ActionTracker.Begin(
             leaving ? "leaving the event" : vote ? $"voting for {o.Title}" : $"choosing {o.Title}",
             c =>
@@ -250,36 +249,23 @@ internal sealed class EventReader : IScreen
         if (ActionTracker.Pending is { } pending)
             return $"resolving {pending}";
 
+        if (ReferenceEquals(_runEndVoteFor, view.Event))
+            return ctx.IsMultiplayer ? "ready to end the run; waiting for teammates" : "ending the run";
+
         var now = DateTime.UtcNow;
-        // Teammates can take minutes over their own choices; re-offering Leave every few seconds would only re-click it.
-        var leaveHold = ctx.IsMultiplayer ? VoteHold : LeaveHold;
-        if (_leftAt is { } left && now - left < leaveHold)
-            return ctx.IsMultiplayer ? "left the event; waiting for teammates" : "leaving the event";
-
-        if (_vote is { } vote)
+        if (_leftAt is { } left)
         {
-            if (now - vote.At < VoteHold)
-                return $"voted for {vote.Title}; waiting for teammates' votes";
-            ModEntry.Log($"event vote for {vote.Title} changed nothing in {VoteHold.TotalSeconds:0} s; offering the options again");
-            _vote = null;
-        }
-
-        if (_leftAt is not null)
-        {
-            ModEntry.Log($"still at event {view.Title} {leaveHold.TotalSeconds:0} s after choosing Leave; offering it again");
+            if (now - left < LeaveHold)
+                return "leaving the event";
+            ModEntry.Log($"still at event {view.Title} {LeaveHold.TotalSeconds:0} s after choosing Leave; offering it again");
             _leftAt = null;
         }
 
-        if (view.Ancient && !view.DialogueDone)
-        {
-            // There is no action to move the dialogue on, so a dialogue that waits for clicks would stall here.
-            if (!_loggedTalking && now - _pageSince > TalkWarn)
-            {
-                _loggedTalking = true;
-                ModEntry.Log($"Ancient {view.Title} still talking after {TalkWarn.TotalSeconds:0} s (DefaultFocusedControl still null); does its dialogue need clicks?");
-            }
-            return "Ancient is talking";
-        }
+        // The game keeps our vote until the host picks for everyone, however long teammates take;
+        // clicking again would only send it again.
+        if (VotedFor(ctx, view) is { } voted)
+            return $"voted for {voted}; waiting for teammates' votes";
+
         if (now - _firstSeen < Settle)
             return "event appearing";
         if (now - _pageSince < PageSettle)
@@ -293,13 +279,16 @@ internal sealed class EventReader : IScreen
         var options = view.Options;
         if (options.Count == 0)
             return view.Page.Finished ? "event finished; waiting for the leave option" : "event options appearing";
-        if (options.All(o => o.Locked || o.Special))
-            return "no event option the bot can take (all locked or special); a human has to choose";
-        if (!view.Page.Finished && options.Any(o => o.Leave && !o.Locked))
-            return "event finishing";
+        if (options.All(o => o.Locked || o.Special || o.Kills))
+            return "no event option the bot can take (all locked, deadly or special); a human has to choose";
 
-        // Unlocked options still without a button after the page settled point at a layout we can't read.
-        if (!_loggedUnmatched && options.Any(o => o.Button is null && !o.Locked && !o.Special))
+        var unmatched = options.Any(o => o.Button is null && !o.Locked && !o.Special && !o.Kills);
+        // A non-shared choice clears the buttons at once; the next page's arrive once the option has played out.
+        if (unmatched && view.Room.Layout is not null && Buttons(view.Room).Count == 0)
+            return "waiting for the event's next options";
+
+        // Unlocked options without a button while other buttons are up point at a layout we can't read.
+        if (!_loggedUnmatched && unmatched)
         {
             _loggedUnmatched = true;
             ModEntry.Log($"event {view.Title}: no option button matched some options (layout {view.Room.Layout?.GetType().Name ?? "none"})");
@@ -310,50 +299,57 @@ internal sealed class EventReader : IScreen
     private static Page ReadPage(EventModel ev)
     {
         var options = OptionsOf(ev);
-        var again = OptionsOf(ev);
-        var stable = options.Count == again.Count && options.Zip(again).All(p => ReferenceEquals(p.First, p.Second));
-
         var finished = ev.IsFinished;
         var body = ModelBody(ev);
         var key = new StringBuilder(finished ? "done|" : "open|");
         foreach (var o in options)
         {
             // New option objects mean a new page even when the wording repeats.
-            if (stable) key.Append(RuntimeHelpers.GetHashCode(o)).Append(':');
+            key.Append(RuntimeHelpers.GetHashCode(o)).Append(':');
             if (o.IsLocked) key.Append("locked:");
             key.Append(Describe.SafeText(() => o.Title)).Append('|');
         }
         key.Append(body);
-        return new Page(options, finished, body, key.ToString(), stable);
+        return new Page(options, finished, body, key.ToString());
     }
 
     private static EventView Read(GameContext ctx, NEventRoom room, EventModel ev, Page page)
     {
         var layout = room.Layout;
-        var ancient = layout is NAncientEventLayout; // VERIFY: NAncientEventLayout derives from the declared type of NEventRoom.Layout (else this "is" does not compile)
-        // VERIFY: NAncientEventLayout.DefaultFocusedControl is a property that stays null until the Ancient's dialogue is over
+        var ancient = layout is NAncientEventLayout;
+        // An Ancient's layout has no focused control until its dialogue reaches the last line.
         var dialogueDone = layout is not NAncientEventLayout talker || talker.DefaultFocusedControl is not null;
 
-        var buttons = MatchButtons(page, Buttons(room));
+        // A finished event has no options in the model: the room shows one PROCEED option of its own.
+        var buttons = Buttons(room);
+        var models = page.Finished && page.Options.Count == 0 ? buttons.Select(b => b.Option).ToList() : page.Options;
+        var matched = MatchButtons(models, buttons);
         var vote = IsVote(ctx, ev);
         var options = new List<OptionView>();
-        for (var i = 0; i < page.Options.Count; i++)
-            options.Add(View(i, page.Options[i], buttons[i], page.Finished, ancient, vote));
+        for (var i = 0; i < models.Count; i++)
+            options.Add(View(i, models[i], matched[i], ev, ancient, !dialogueDone, vote));
+
+        // A custom-layout event (FakeMerchant) draws its own scene without option buttons.
+        if (layout is null && room.CustomEventNode is Node custom)
+            options.Add(CustomLeave(options.Count, Nodes.Get<NProceedButton>(custom, "%ProceedButton")));
 
         var body = page.Body.Length > 0 ? page.Body : LayoutText(room);
-        var title = Describe.SafeText(() => ev.Title); // VERIFY: EventModel.Title is the event's name (LocString), "Neow" and the like for Ancients
+        var title = Describe.SafeText(() => ev.Title);
         return new EventView(room, ev, page, title, body, ancient, dialogueDone, options);
     }
 
-    private static OptionView View(int n, EventOption option, NEventOptionButton? button, bool finished, bool ancient, bool vote)
+    private static OptionView View(int n, EventOption option, NEventOptionButton? button, EventModel ev, bool ancient, bool talking, bool vote)
     {
         var title = Describe.SafeText(() => option.Title);
         var text = Describe.SafeText(() => option.Description);
         var locked = option.IsLocked;
-        var kills = WillKill(option);
-        var key = $"{option.TextKey}";
-        var leave = option.IsProceed && IsProceedKey(key);
+        var kills = WillKill(option, ev);
+        var key = option.TextKey ?? "";
+        // Only the plain PROCEED leaves. The Trial's DOUBLE_DOWN is IsProceed too and opens the abandon-run popup.
+        var leave = option.IsProceed && key == ProceedKey;
         var special = option.IsProceed && !leave;
+        // TheArchitect's last option is a normal one keyed PROCEED: it marks us ready to end the run.
+        var endsRun = ev is TheArchitect && !option.IsProceed && key == ProceedKey;
         var extras = ExtrasOf(n, option, title, text, ancient);
         var name = title.Length > 0 ? title : text.Length > 0 ? Shorten(text) : $"option {n}";
 
@@ -371,15 +367,18 @@ internal sealed class EventReader : IScreen
                 : "leaves the event in a way the bot does not drive; not offered";
             refusal = $"{name} {note}.";
         }
-        else if (leave && !finished)
+        else if (kills)
         {
-            refusal = "The event is not finished yet.";
+            // In co-op the button refuses it anyway (a thought bubble); alone it would end the run.
+            note = "would kill you; not offered";
+            refusal = $"{name} would kill you.";
         }
         else if (button is null)
         {
             refusal = $"No button found for {name}.";
         }
-        else if (!Nodes.IsShown(button) || !button.IsEnabled)
+        // While an Ancient talks its options wait below the dialogue; choosing clicks through it first.
+        else if ((!talking && !Nodes.IsShown(button)) || !button.IsEnabled)
         {
             refusal = $"{name} is not clickable right now.";
         }
@@ -399,7 +398,7 @@ internal sealed class EventReader : IScreen
             label = ancient
                 ? $"{(vote ? "Vote for" : "Take")} {(relic.Length > 0 ? relic : name)}"
                 : $"{(vote ? "Vote for" : "Choose")} {name}";
-            if (kills) label += " (this kills you)";
+            if (endsRun) label += " (ends the run)";
         }
 
         var json = new JsonObject { ["n"] = n, ["title"] = name };
@@ -409,9 +408,34 @@ internal sealed class EventReader : IScreen
         if (kills) json["will_kill_player"] = true;
         if (extras.RelicJson is { } relicJson) json["relic"] = relicJson.DeepClone();
         if (extras.Cards is { } cards) json["cards"] = cards.DeepClone();
+        if (endsRun) note ??= "ends the run; in co-op once every player has chosen it";
         if (note is not null) json["note"] = note;
 
-        return new OptionView(n, option, button, name, locked, leave, special, label, refusal, json);
+        return new OptionView(n, option, button, name, locked, leave, special, kills, endsRun, label, refusal, json);
+    }
+
+    /// <summary>
+    /// Leave for a custom-layout event: the scene's own proceed button, which only opens the map
+    /// (NFakeMerchant; disabled while its stock is open). The bot does not drive the rest of it.
+    /// </summary>
+    private static OptionView CustomLeave(int n, NProceedButton? proceed)
+    {
+        string? refusal = null;
+        if (proceed is null || !Nodes.Alive(proceed))
+            refusal = "This event's proceed button was not found.";
+        else if (!Nodes.IsShown(proceed) || !proceed.IsEnabled)
+            refusal = "Leave is not clickable right now.";
+        else if (Clicks.RecentlyClicked(proceed))
+            refusal = "Leave was just clicked; waiting for the game to react.";
+
+        var json = new JsonObject
+        {
+            ["n"] = n,
+            ["title"] = "Leave",
+            ["leave"] = true,
+            ["note"] = "this event draws its own screen; the bot can only leave it",
+        };
+        return new OptionView(n, null, proceed, "Leave", false, true, false, false, false, "Leave", refusal, json);
     }
 
     /// <summary>
@@ -427,22 +451,22 @@ internal sealed class EventReader : IScreen
         var cards = new JsonArray();
         try
         {
+            // The button draws this relic's icon only for an Ancient.
             if (ancient)
-                relic = Nodes.TryGetPrivate(option, "Relic") as RelicModel; // VERIFY: an Ancient's EventOption holds the offered relic in a member named Relic
+                relic = option.Relic;
 
-            // VERIFY: EventOption.HoverTips enumerates the option's hover tips; card tips expose the card as Card, relic tips the relic as Relic
-            if (Nodes.TryGetPrivate(option, "HoverTips") is System.Collections.IEnumerable tips)
+            if (option.HoverTips is { } tips)
             {
                 var seen = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var tip in tips)
                 {
-                    if (tip is null) continue;
-                    if (Nodes.TryGetPrivate(tip, "Card") is CardModel card)
+                    if (tip is CardHoverTip { Card: { } card })
                     {
                         if (cards.Count < MaxTipCards && seen.Add(Describe.CardName(card)))
                             cards.Add(Describe.Card(card, PileType.Deck));
                     }
-                    else if (relic is null && Nodes.TryGetPrivate(tip, "Relic") is RelicModel shown)
+                    // A relic's own tip is a plain HoverTip carrying the canonical relic.
+                    else if (relic is null && tip?.CanonicalModel is RelicModel shown)
                     {
                         relic = shown;
                     }
@@ -481,14 +505,10 @@ internal sealed class EventReader : IScreen
         if (view.Body.Length > 0) state["text"] = view.Body;
         if (view.Page.Finished) state["finished"] = true;
 
-        // An Ancient's options show once it stops talking; until then a human sees none.
-        if (view.DialogueDone)
-        {
-            var options = new JsonArray();
-            foreach (var o in view.Options) options.Add(o.Json);
-            state["options"] = options;
-        }
-        if (_vote is { } vote) state["voted"] = vote.Title;
+        var options = new JsonArray();
+        foreach (var o in view.Options) options.Add(o.Json);
+        state["options"] = options;
+        if (VotedFor(ctx, view) is { } voted) state["voted"] = voted;
 
         var player = Describe.PlayerRun(me, includeDeck: true);
         player.Remove("potions"); // replaced by the detailed slots below
@@ -503,119 +523,48 @@ internal sealed class EventReader : IScreen
 
     // ---------- buttons ----------
 
+    /// <summary>The layout's option buttons, in on-screen order; none for a custom-layout event.</summary>
     private static List<NEventOptionButton> Buttons(NEventRoom room)
     {
-        IEnumerable<NEventOptionButton>? source = null;
         try
         {
             if (room.Layout is { } layout && GodotObject.IsInstanceValid(layout))
-                source = layout.OptionButtons; // VERIFY: NEventLayout.OptionButtons is an IEnumerable<NEventOptionButton> in on-screen order
+                return layout.OptionButtons.Where(Nodes.Alive).ToList();
         }
         catch (Exception)
         {
-            source = null;
+            // A layout being torn down; read it again next time.
         }
-
-        var buttons = source?.Where(b => b is not null && Nodes.Alive(b)).ToList();
-        if (buttons is { Count: > 0 }) return buttons;
-
-        // Custom layouts may keep their buttons elsewhere in the room.
-        return Nodes.FindAll<NEventOptionButton>(room).Where(Nodes.Alive).ToList();
+        return new List<NEventOptionButton>();
     }
 
     /// <summary>
-    /// The button for each option: by the option model the button holds when it exposes one
-    /// (a button holding an option that is no longer on the page belongs to the last page and
-    /// is skipped), else by its index. When neither member works: by the title the button
-    /// shows, then by position when the leftover buttons and options pair up one to one.
+    /// The button for each option, by the option model the button was built for. A button
+    /// holding an option that is not on the page belongs to the last page and is skipped. The
+    /// button sends its own index, which is the option's index: the layout numbers new buttons
+    /// by child count right after clearing the old ones.
     /// </summary>
-    private static NEventOptionButton?[] MatchButtons(Page page, List<NEventOptionButton> buttons)
+    private static NEventOptionButton?[] MatchButtons(List<EventOption> options, List<NEventOptionButton> buttons)
     {
-        var options = page.Options;
         var matched = new NEventOptionButton?[options.Count];
-        var loose = new List<NEventOptionButton>();
-
         foreach (var button in buttons)
         {
-            var model = page.StableOptions ? OptionOf(button) : null;
-            if (model is null)
-            {
-                loose.Add(button);
-                continue;
-            }
-            var i = options.FindIndex(o => ReferenceEquals(o, model));
+            var i = options.FindIndex(o => ReferenceEquals(o, button.Option));
             if (i >= 0 && matched[i] is null) matched[i] = button;
-        }
-        if (loose.Count == 0) return matched;
-
-        var unplaced = new List<NEventOptionButton>();
-        foreach (var button in loose)
-        {
-            if (Nodes.TryGetPrivate(button, "Index") is int i && i >= 0 && i < options.Count && matched[i] is null) // VERIFY: NEventOptionButton's Index member (if any) is the option's index in CurrentOptions
-                matched[i] = button;
-            else
-                unplaced.Add(button);
-        }
-
-        // A member that placed any button is trusted alone. Otherwise go by what the buttons draw,
-        // then by position for the rest.
-        if (matched.Any(b => b is not null)) return matched;
-        unplaced = MatchByText(options, matched, unplaced);
-
-        var open = Enumerable.Range(0, options.Count).Where(i => matched[i] is null).ToList();
-        if (open.Count > 0 && unplaced.Count == open.Count)
-        {
-            // VERIFY: Layout.OptionButtons follows CurrentOptions order, one button per option (locked ones included)
-            for (var k = 0; k < open.Count; k++)
-                matched[open[k]] = unplaced[k];
         }
         return matched;
     }
 
     /// <summary>
-    /// Places each button one of whose labels starts with exactly one unplaced option's title,
-    /// and returns the buttons left over. It reads only what is on screen, so it works without
-    /// knowing the button's members.
+    /// Clicks through what is left of an Ancient's dialogue, as a human does before picking. The
+    /// lines are local to this machine; the hitbox hides and disables itself on the last line.
     /// </summary>
-    private static List<NEventOptionButton> MatchByText(List<EventOption> options, NEventOptionButton?[] matched, List<NEventOptionButton> buttons)
+    private static void SkipDialogue(NAncientEventLayout layout)
     {
-        if (buttons.Count == 0) return buttons;
-        var titles = options.Select(o => Describe.SafeText(() => o.Title).TrimStart('[', ' ')).ToList();
-        var claim = new int[buttons.Count];
-        for (var b = 0; b < buttons.Count; b++)
-        {
-            var labels = Nodes.FindAll<Godot.Control>(buttons[b])
-                .Select(Nodes.LabelText)
-                .Where(t => t.Length > 0)
-                .Select(t => t.TrimStart('[', ' '))
-                .ToList();
-
-            var hits = new List<int>();
-            for (var i = 0; i < titles.Count; i++)
-            {
-                if (matched[i] is not null || titles[i].Length < 2) continue;
-                var title = titles[i];
-                if (labels.Any(l => l.StartsWith(title, StringComparison.Ordinal))) hits.Add(i);
-            }
-            // Two titles fitting one button (a shared prefix, duplicate wording) is a guess; leave it.
-            claim[b] = hits.Count == 1 ? hits[0] : -1;
-        }
-
-        // An option two buttons claim (one may be the last page's, still fading out) stays open too.
-        var left = new List<NEventOptionButton>();
-        for (var b = 0; b < buttons.Count; b++)
-        {
-            var i = claim[b];
-            if (i >= 0 && claim.Count(c => c == i) == 1) matched[i] = buttons[b];
-            else left.Add(buttons[b]);
-        }
-        return left;
+        var hitbox = Nodes.Get<NAncientDialogueHitbox>(layout, "%DialogueHitbox");
+        for (var i = 0; i < MaxDialogueClicks && Nodes.Alive(hitbox) && hitbox.Visible && hitbox.IsEnabled; i++)
+            hitbox.ForceClick();
     }
-
-    /// <summary>The option model a button was built for, when it exposes one.</summary>
-    private static EventOption? OptionOf(NEventOptionButton button) =>
-        // VERIFY: NEventOptionButton keeps its EventOption in a member named Option (or _option)
-        (Nodes.TryGetPrivate(button, "Option") ?? Nodes.TryGetPrivate(button, "_option")) as EventOption;
 
     // ---------- model access ----------
 
@@ -623,7 +572,7 @@ internal sealed class EventReader : IScreen
     {
         try
         {
-            // VERIFY: GetLocalEvent returns the local player's EventModel, the same instance for the whole event
+            // One mutable copy per player, made when the event begins; it survives the event's fights.
             return RunManager.Instance?.EventSynchronizer?.GetLocalEvent();
         }
         catch
@@ -636,7 +585,6 @@ internal sealed class EventReader : IScreen
     {
         try
         {
-            // VERIFY: CurrentOptions enumerates EventOption, the type with Title, Description, IsLocked, IsProceed, TextKey and WillKillPlayer
             return ev.CurrentOptions?.Where(o => o is not null).ToList() ?? new List<EventOption>();
         }
         catch
@@ -645,15 +593,19 @@ internal sealed class EventReader : IScreen
         }
     }
 
-    /// <summary>The current page's text from the model; the layout's labels stand in when it has none.</summary>
+    /// <summary>
+    /// The current page's text from the model (the room fills in its variables when it shows the
+    /// page); the layout's labels stand in when it has none.
+    /// </summary>
     private static string ModelBody(EventModel ev) =>
-        Describe.SafeText(() => Nodes.TryGetPrivate(ev, "Description")); // VERIFY: EventModel's current page text is a member named Description (LocString) that follows page changes, not just the first page
+        Describe.SafeText(() => ev.Description);
 
-    private static bool WillKill(EventOption option)
+    private static bool WillKill(EventOption option, EventModel ev)
     {
         try
         {
-            return option.WillKillPlayer; // VERIFY: WillKillPlayer is a bool property, not a method taking the player
+            // WillKillPlayer is an optional predicate on the event's owner (null when the option can't kill).
+            return ev.Owner is { } owner && option.WillKillPlayer?.Invoke(owner) == true;
         }
         catch
         {
@@ -661,9 +613,22 @@ internal sealed class EventReader : IScreen
         }
     }
 
-    /// <summary>The plain proceed option. Other proceed options (the Trial's DOUBLE_DOWN) do more than leave.</summary>
-    private static bool IsProceedKey(string key) =>
-        key.Equals("PROCEED", StringComparison.OrdinalIgnoreCase) || key.EndsWith(".PROCEED", StringComparison.OrdinalIgnoreCase);
+    /// <summary>Title of the option our vote on this shared page stands for; the host clears every vote when it picks.</summary>
+    private static string? VotedFor(GameContext ctx, EventView view)
+    {
+        if (!IsVote(ctx, view.Event) || ctx.Me is not { } me) return null;
+        uint? index;
+        try
+        {
+            index = RunManager.Instance?.EventSynchronizer?.GetPlayerVote(me);
+        }
+        catch
+        {
+            return null;
+        }
+        if (index is not { } i) return null;
+        return i < view.Options.Count ? view.Options[(int)i].Title : $"option {i}";
+    }
 
     private static bool IsVote(GameContext ctx, EventModel ev) => ctx.IsMultiplayer && ev.IsShared;
 
@@ -672,7 +637,7 @@ internal sealed class EventReader : IScreen
     {
         if (ctx.InCombat)
             return "fight started by the event";
-        // VERIFY: RunState.BaseRoom is an AbstractRoom whose RoomType is Event for an EventRoom
+        // The event's room stays at the base of the room stack while its fight sits on top.
         if (rs.CurrentRoomCount > 1 && rs.BaseRoom?.RoomType == RoomType.Event && !ReferenceEquals(rs.CurrentRoom, rs.BaseRoom))
             return "returning to the event after the fight";
         return null;

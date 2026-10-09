@@ -56,29 +56,40 @@ internal sealed class MapReader : IScreen
             ModEntry.LogError($"reading map: {ex.Message}");
             return GameSnapshot.Busy(Name, "map not readable yet");
         }
-        if (view.Spots.Count == 0)
+        // NullActMap (before generation) still yields its placeholder start and boss at (0,0).
+        if (rs.Map is NullActMap || view.Spots.Count == 0)
             return GameSnapshot.Busy(Name, "map not generated yet");
 
         var state = BuildState(ctx, rs, me, view);
 
-        // Our vote first: the game may switch travel off locally once we have voted.
+        // Our vote first: travel stays enabled after voting (another click would change the vote).
         string? waiting = null;
         if (CurrentVote(rs) is { } vote)
             waiting = $"waiting for teammates to vote on the map (you voted {Show(vote.Target)})";
         else if (!screen.IsTravelEnabled)
             waiting = "map open but travel not enabled (viewing only, or still animating)";
+        else if (screen.Drawings.GetLocalDrawingMode() != DrawingMode.None)
+            waiting = "map drawing mode is on; the game ignores map point clicks until it is turned off";
 
         var actions = new List<LegalAction>();
         if (waiting is null)
         {
+            string? blocked = null;
             for (var i = 0; i < view.Next.Count; i++)
             {
                 var at = view.Next[i];
-                if (FindPointNode(screen, rs.Map, at, fresh: false) is { IsEnabled: true })
+                if (FindPointNode(screen, rs.Map, at, fresh: false) is not { } p) continue;
+                if (Blocked(screen, p) is { } why)
+                    blocked ??= $"{Show(at)} {why}";
+                else
                     actions.Add(new LegalAction($"map:{i}", $"Go to {Label(view.TypeAt(at))} at {Show(at)}"));
             }
-            if (actions.Count == 0)
-                waiting = "no map point is selectable yet";
+            // Standing on the act's last boss: the act ends through the rewards screen, so a map
+            // opened from the top bar now only blocks it.
+            if (view.Next.Count == 0)
+                waiting = "nowhere left to travel on this map; close the map to continue";
+            else if (actions.Count == 0)
+                waiting = blocked is null ? "no map point is selectable yet" : $"no map point is selectable yet: {blocked}";
         }
 
         if (waiting is not null)
@@ -106,8 +117,11 @@ internal sealed class MapReader : IScreen
             return ActionResult.Fail("Already travelling.");
         if (!screen.IsTravelEnabled)
             return ActionResult.Fail("Travel is not enabled on the map yet.");
+        // VoteForMapCoordAction is NonCombat: enqueued mid-combat it would hold up our queue.
         if (CombatManager.Instance?.IsInProgress == true)
             return ActionResult.Fail("A combat is in progress.");
+        if (screen.Drawings.GetLocalDrawingMode() != DrawingMode.None)
+            return ActionResult.Fail("Map drawing mode is on; the game ignores map point clicks.");
         if (CurrentVote(rs) is { } vote)
             return ActionResult.Fail($"Already voted for {Show(vote.Target)}; waiting for teammates.");
 
@@ -128,16 +142,25 @@ internal sealed class MapReader : IScreen
         var point = FindPointNode(screen, rs.Map, target, fresh: true);
         if (point is null)
             return ActionResult.Fail($"No map point node at {Show(target)}.");
-        if (!point.IsEnabled)
-            return ActionResult.Fail($"The map point at {Show(target)} is not selectable right now.");
+        if (Blocked(screen, point) is { } why)
+            return ActionResult.Fail($"The map point at {Show(target)} {why}.");
 
         var what = $"travel to {Label(view.TypeAt(target))} at {Show(target)}";
         var click = Clicks.Once(point, () => point.ForceClick(), $"map point {Show(target)}");
         if (!click.Ok)
             return click;
 
-        // In co-op the click only casts our vote; the party moves once everyone has voted.
-        var multiplayer = ctx.IsMultiplayer;
+        // With more than one player the click only casts our vote: the host moves the party once
+        // every player slot holds a vote (a lone player's vote decides at once).
+        var multiplayer = rs.Players.Count > 1;
+
+        // OnMapPointSelectedLocally records our vote on the screen as the click lands. Without it
+        // NMapPoint.OnRelease turned the click down, and latching a vote would wait forever.
+        if (multiplayer
+            && !(ctx.Me is { } me && screen.PlayerVoteDictionary.TryGetValue(me, out var voted)
+                 && voted is { } votedAt && Key(votedAt) == target))
+            return ActionResult.Fail($"The game ignored the click on map point {Show(target)}.");
+
         var roomBefore = rs.CurrentRoom;
         if (multiplayer)
             _vote = new Vote(rs.Map, roomBefore, view.Visited.Count, target);
@@ -172,15 +195,22 @@ internal sealed class MapReader : IScreen
         var act = rs.Act;
         if (act is not null)
         {
-            var boss = Describe.SafeText(() => act.BossEncounter?.Title); // VERIFY: EncounterModel has a Title (LocString) for the boss name
+            // The boss nodes show each encounter's art from the start of the act. Golden Compass and
+            // Spoils maps have no second boss node even when the act rolled a second boss.
+            var boss = Describe.SafeText(() => act.BossEncounter?.Title);
             if (boss.Length > 0) state["boss"] = boss;
-            var second = Describe.SafeText(() => act.SecondBossEncounter?.Title); // VERIFY: same Title member on the second boss encounter, and the map shows humans the second boss before the first is beaten
-            if (second.Length > 0) state["second_boss"] = second;
-
-            // Only useful before we reach it; afterwards the event itself is on screen.
-            if (view.At is null)
+            if (rs.Map.SecondBossMapPoint is not null)
             {
-                var ancient = Describe.SafeText(() => act.Ancient?.Title); // VERIFY: ActModel.Ancient has a Title, and the map shows humans which Ancient it is before arrival
+                var second = Describe.SafeText(() => act.SecondBossEncounter?.Title);
+                if (second.Length > 0) state["second_boss"] = second;
+            }
+
+            // Only useful before we reach it; afterwards the event itself is on screen. The start
+            // node shows the Ancient's icon only when it is Ancient-typed (act 1 without Neow
+            // retypes it to Monster).
+            if (view.At is null && rs.Map.StartingMapPoint.PointType == MapPointType.Ancient)
+            {
+                var ancient = Describe.SafeText(() => act.Ancient?.Title);
                 if (ancient.Length > 0) state["ancient"] = ancient;
             }
         }
@@ -245,49 +275,67 @@ internal sealed class MapReader : IScreen
     private static object? _nodesMap;
     private static List<NMapPoint> _nodes = new();
 
-    private static NMapPoint? FindPointNode(NMapScreen screen, object map, (int Col, int Row) at, bool fresh)
+    private static NMapPoint? FindPointNode(NMapScreen screen, ActMap map, (int Col, int Row) at, bool fresh)
     {
+        if (map.GetPoint(new MapCoord(at.Col, at.Row)) is not { } want)
+            return null;
+
         var screenId = screen.GetInstanceId();
         var stale = fresh || _nodesScreenId != screenId || !ReferenceEquals(_nodesMap, map);
-        if (!stale && MatchNode(at) is { } cached)
+        if (!stale && MatchNode(want) is { } cached)
             return cached;
 
         _nodes = Nodes.FindAll<NMapPoint>(screen);
         _nodesScreenId = screenId;
         _nodesMap = map;
-        return MatchNode(at);
+        return MatchNode(want);
     }
 
-    private static NMapPoint? MatchNode((int Col, int Row) at)
+    // SetMap queue-frees the old nodes and builds new ones on the same MapPoints (MapCmd re-sets
+    // the same map), so skip nodes queued for deletion and match the current map's point itself.
+    private static NMapPoint? MatchNode(MapPoint want)
     {
         foreach (var p in _nodes)
-        {
-            if (!GodotObject.IsInstanceValid(p) || !p.IsInsideTree()) continue;
-            if (p.Point is { } point && Key(point) == at) return p;
-        }
+            if (Nodes.Alive(p) && ReferenceEquals(p.Point, want)) return p;
+        return null;
+    }
+
+    /// <summary>
+    /// Why the game would ignore a click on this point, mirroring NMapPoint.OnRelease (which
+    /// drops a refused click silently); null when the click would cast a vote. Drawing mode
+    /// is checked with the screen. State is the live half of OnRelease's IsTravelable, IsEnabled
+    /// the cached one; both are current while the map is open.
+    /// </summary>
+    private static string? Blocked(NMapScreen screen, NMapPoint p)
+    {
+        if (p.State != MapPointState.Travelable || !p.IsEnabled)
+            return "is not selectable right now";
+        if (p.Point.coord.row == 0 && !SaveManager.Instance.SeenFtue(NMapSelectFtue.id))
+            return "waits for the map tutorial popup";
+        if (NControllerManager.Instance?.IsUsingController == true && !screen.IsNodeOnScreen(p))
+            return "is off screen while a controller is in use (scroll the map to it)";
         return null;
     }
 
     // ---------- map data ----------
 
-    private static (int Col, int Row) Key(MapCoord c) => (c.col, c.row); // VERIFY: MapCoord exposes lowercase col/row (fields or properties)
+    private static (int Col, int Row) Key(MapCoord c) => (c.col, c.row);
 
     private static (int Col, int Row) Key(MapPoint p) => Key(p.coord);
 
     private static string Show((int Col, int Row) at) => $"({at.Col},{at.Row})";
 
-    private static string TypeWord(MapPointType type) => type.ToString() switch
+    private static string TypeWord(MapPointType type) => type switch
     {
-        // VERIFY: MapPointType member names; anything unlisted falls through lowercased.
-        "Monster" => "monster",
-        "Elite" => "elite",
-        "RestSite" => "rest",
-        "Shop" => "shop",
-        "Treasure" => "treasure",
-        "Unknown" => "unknown",
-        "Boss" => "boss",
-        "Ancient" => "ancient",
-        var other => other.ToLowerInvariant(),
+        MapPointType.Monster => "monster",
+        MapPointType.Elite => "elite",
+        MapPointType.RestSite => "rest",
+        MapPointType.Shop => "shop",
+        MapPointType.Treasure => "treasure",
+        MapPointType.Unknown => "unknown",
+        MapPointType.Boss => "boss",
+        MapPointType.Ancient => "ancient",
+        _ => type.ToString().ToLowerInvariant(),
     };
 
     private static string Label(string type) => type switch
@@ -303,11 +351,8 @@ internal sealed class MapReader : IScreen
         _ => type,
     };
 
-    private static bool HasQuest(MapPoint p)
-    {
-        try { return p.Quests?.Any() == true; } // VERIFY: MapPoint.Quests is a generic collection, non-empty when a quest marker (Spoils Map X) is drawn on the point
-        catch { return false; }
-    }
+    // NNormalMapPoint shows its quest icon exactly when Quests is non-empty (Spoils Map, Fur Coat).
+    private static bool HasQuest(MapPoint p) => p.Quests.Count > 0;
 
     private sealed record Spot((int Col, int Row) At, string Type, List<(int Col, int Row)> Children, bool Quest);
 
@@ -341,8 +386,7 @@ internal sealed class MapReader : IScreen
                 var key = Key(p);
                 if (spots.ContainsKey(key)) return;
                 var children = new List<(int Col, int Row)>();
-                // Key has overloads for both MapPoint and MapCoord, so this compiles whichever the elements are.
-                foreach (var child in p.Children) children.Add(Key(child)); // VERIFY: MapPoint.Children enumerates MapPoint (or MapCoord)
+                foreach (var child in p.Children) children.Add(Key(child));
                 children.Sort();
                 spots[key] = new Spot(key, TypeWord(p.PointType), children, HasQuest(p));
             }
@@ -397,12 +441,17 @@ internal sealed class MapReader : IScreen
             }
             else if (map.GetPoint(last) is { } from)
             {
-                // VERIFY: MapTravel's namespace is covered by the global usings (expected MegaCrit.Sts2.Core.Map)
+                // Children, or the whole next row under free travel (Winged Boots solo, Flight).
                 next.AddRange(MapTravel.GetTravelablePointsFrom(rs, from)
                     .Select(p => Key(p))
                     .Distinct()
                     .OrderBy(k => k.Row)
                     .ThenBy(k => k.Col));
+            }
+            else
+            {
+                // The game falls back to the start when the last visited coord is not on the map.
+                next.Add(Key(map.StartingMapPoint));
             }
             return next;
         }
