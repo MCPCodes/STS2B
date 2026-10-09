@@ -28,7 +28,8 @@ internal static class Describe
     {
         var json = new JsonObject
         {
-            ["name"] = Text(card.Title) + (card.IsUpgraded ? "+" : ""),
+            // CardModel.Title already ends in "+" (or "+N" for multi-upgrade cards) when upgraded.
+            ["name"] = Text(card.Title),
             ["cost"] = Cost(card),
             ["type"] = card.Type.ToString(),
         };
@@ -83,7 +84,7 @@ internal static class Describe
         var counts = new SortedDictionary<string, int>(StringComparer.Ordinal);
         foreach (var c in cards)
         {
-            var name = Text(c.Title) + (c.IsUpgraded ? "+" : "");
+            var name = Text(c.Title);
             counts[name] = counts.TryGetValue(name, out var n) ? n + 1 : 1;
         }
         var json = new JsonObject();
@@ -164,13 +165,13 @@ internal static class Describe
     public static JsonObject Relic(RelicModel relic) => new()
     {
         ["name"] = Text(relic.Title),
-        ["text"] = SafeText(() => relic.Description),
+        ["text"] = SafeText(() => relic.DynamicDescription),
     };
 
     public static JsonObject Potion(PotionModel potion) => new()
     {
         ["name"] = Text(potion.Title),
-        ["text"] = SafeText(() => potion.Description),
+        ["text"] = SafeText(() => potion.DynamicDescription),
         ["target"] = potion.TargetType.ToString(),
     };
 

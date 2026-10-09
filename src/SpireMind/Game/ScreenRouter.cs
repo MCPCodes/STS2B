@@ -137,17 +137,7 @@ internal static class ScreenRouter
         };
     }
 
-    private static bool TimeoutOverlayShown()
-    {
-        // The network timeout overlay has no static accessor in the notes; look for it by type
-        // name among the run's global UI children (cheap: this runs on every poll) so a rename
-        // only disables this check.
-        if (NRun.Instance?.GlobalUi is not Node ui) return false;
-        foreach (var child in ui.GetChildren())
-        {
-            if (child is CanvasItem ci && ci.GetType().Name.Contains("TimeoutOverlay", StringComparison.Ordinal) && ci.IsVisibleInTree())
-                return true;
-        }
-        return false;
-    }
+    /// <summary>The co-op "waiting for player" overlay: one game-level (lobby, loading) and one per run.</summary>
+    private static bool TimeoutOverlayShown() =>
+        NGame.Instance?.TimeoutOverlay?.IsShown == true || NRun.Instance?.GlobalUi?.TimeoutOverlay?.IsShown == true;
 }

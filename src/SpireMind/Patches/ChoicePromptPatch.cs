@@ -25,7 +25,8 @@ internal static class ChoicePromptPatch
 {
     private static readonly string[] Factories =
     [
-        "FromHand", "FromHandForUpgrade", "FromSimpleGrid", "FromSimpleGridForRewards", "FromCombatPile", "FromChooseACardScreen",
+        "FromHand", "FromHandForDiscard", "FromHandForUpgrade", "FromSimpleGrid", "FromSimpleGridForRewards", "FromCombatPile",
+        "FromChooseACardScreen",
     ];
 
     private static IEnumerable<MethodBase> TargetMethods() =>
@@ -43,17 +44,27 @@ internal static class ChoicePromptPatch
 
             string? prompt = null;
             int? min = null, max = null;
-            foreach (var arg in __args)
+            if (__args.OfType<CardSelectorPrefs>().Select(p => (CardSelectorPrefs?)p).FirstOrDefault() is { } prefs)
             {
-                if (arg is null || arg is Player) continue;
-                prompt ??= arg switch
+                prompt = prefs.Prompt?.GetFormattedText();
+                min = prefs.MinSelect;
+                max = prefs.MaxSelect;
+            }
+            else
+            {
+                // The factories without prefs always pick one card. Don't read other arguments
+                // for text: the source card or enchantment would pass for the prompt.
+                switch (__originalMethod.Name)
                 {
-                    LocString loc => loc.GetFormattedText(),
-                    string s => s,
-                    _ => ReadString(arg, "Prompt", "Title", "Header", "Description"),
-                };
-                min ??= ReadInt(arg, "MinSelect", "MinCount", "Min");
-                max ??= ReadInt(arg, "MaxSelect", "MaxCount", "Max");
+                    case "FromHandForUpgrade":
+                        prompt = new LocString("gameplay_ui", "CHOOSE_CARD_UPGRADE_HEADER").GetFormattedText();
+                        min = max = 1;
+                        break;
+                    case "FromChooseACardScreen":
+                        min = __args.OfType<bool>().FirstOrDefault() ? 0 : 1; // canSkip
+                        max = 1;
+                        break;
+                }
             }
 
             ChoicePrompt.Latest = new ChoicePrompt.Info(
@@ -63,36 +74,5 @@ internal static class ChoicePromptPatch
         {
             ModEntry.LogError($"choice prompt capture: {ex.Message}");
         }
-    }
-
-    private static string? ReadString(object obj, params string[] names)
-    {
-        foreach (var name in names)
-        {
-            var value = Member(obj, name);
-            switch (value)
-            {
-                case LocString loc: return loc.GetFormattedText();
-                case string s when s.Length > 0: return s;
-            }
-        }
-        return null;
-    }
-
-    private static int? ReadInt(object obj, params string[] names)
-    {
-        foreach (var name in names)
-        {
-            if (Member(obj, name) is int i) return i;
-        }
-        return null;
-    }
-
-    private static object? Member(object obj, string name)
-    {
-        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-        var t = obj.GetType();
-        if (t.IsPrimitive || t.IsEnum) return null;
-        return t.GetProperty(name, flags)?.GetValue(obj) ?? t.GetField(name, flags)?.GetValue(obj);
     }
 }

@@ -59,6 +59,7 @@ global using MegaCrit.Sts2.Core.Nodes.Rewards;
 global using MegaCrit.Sts2.Core.Nodes.Rooms;
 global using MegaCrit.Sts2.Core.Nodes.Screens;
 global using MegaCrit.Sts2.Core.Nodes.Screens.Bestiary;
+global using MegaCrit.Sts2.Core.Nodes.Screens.Capstones;
 global using MegaCrit.Sts2.Core.Nodes.Screens.CardLibrary;
 global using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
 global using MegaCrit.Sts2.Core.Nodes.Screens.CharacterSelect;
