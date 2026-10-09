@@ -26,7 +26,8 @@ internal static class ChoicePromptPatch
     private static readonly string[] Factories =
     [
         "FromHand", "FromHandForDiscard", "FromHandForUpgrade", "FromSimpleGrid", "FromSimpleGridForRewards", "FromCombatPile",
-        "FromChooseACardScreen",
+        "FromChooseACardScreen", "FromChooseABundleScreen",
+        "FromDeckForUpgrade", "FromDeckForTransformation", "FromDeckForEnchantment", "FromDeckForRemoval", "FromDeckGeneric",
     ];
 
     private static IEnumerable<MethodBase> TargetMethods() =>
