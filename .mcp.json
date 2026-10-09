@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "spiremind": {
+      "type": "http",
+      "url": "http://127.0.0.1:17772/mcp"
+    }
+  }
+}

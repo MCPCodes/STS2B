@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Everything here is game-agnostic: the HTTP bridge, the MCP endpoint, snapshot
+    versioning and the decision waiter. It has no reference to the game so it can be
+    built and unit tested anywhere. The mod compiles these same sources into its own
+    DLL (see src/SpireMind/SpireMind.csproj) so the game only ever loads one assembly.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <RootNamespace>SpireMind.Core</RootNamespace>
+  </PropertyGroup>
+</Project>

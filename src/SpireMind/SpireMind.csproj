@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    The mod the game loads. Build on the Mac with scripts/build.sh, which passes GameDir.
+    Game assemblies are referenced from the install (never copied, never committed).
+  -->
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <AssemblyName>SpireMind</AssemblyName>
+    <RootNamespace>SpireMind</RootNamespace>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <GameDir Condition="'$(GameDir)' == ''">$(HOME)/Library/Application Support/Steam/steamapps/common/Slay the Spire 2</GameDir>
+    <GameArch Condition="'$(GameArch)' == ''">arm64</GameArch>
+    <Sts2DataDir Condition="'$(Sts2DataDir)' == ''">$(GameDir)/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_$(GameArch)</Sts2DataDir>
+  </PropertyGroup>
+
+  <Target Name="CheckGameDir" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(Sts2DataDir)/sts2.dll')"
+           Text="Couldn't find sts2.dll in '$(Sts2DataDir)'. Pass -p:GameDir=... or -p:Sts2DataDir=..." />
+  </Target>
+
+  <!-- Game-agnostic bridge code, compiled into this one DLL. -->
+  <ItemGroup>
+    <Compile Include="../SpireMind.Core/**/*.cs" Exclude="../SpireMind.Core/obj/**;../SpireMind.Core/bin/**" LinkBase="Core" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="sts2"><HintPath>$(Sts2DataDir)/sts2.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="GodotSharp"><HintPath>$(Sts2DataDir)/GodotSharp.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="0Harmony"><HintPath>$(Sts2DataDir)/0Harmony.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="SpireMind.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

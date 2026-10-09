@@ -1,0 +1,11 @@
+{
+  "id": "SpireMind",
+  "name": "SpireMind",
+  "author": "MCPCodes",
+  "description": "Lets Claude play Slay the Spire 2 through a local MCP bridge. Personal use.",
+  "version": "0.1.0",
+  "has_pck": false,
+  "has_dll": true,
+  "dependencies": [],
+  "affects_gameplay": false
+}
