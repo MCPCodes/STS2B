@@ -7,18 +7,20 @@ A personal-use mod that lets Claude (Opus, through Claude Code on a Max plan) pl
 ```
 Slay the Spire 2 (macOS)
   └─ SpireMind mod (C#, loaded from the game's mods folder)
+       ├─ chat box (T) where you talk to the bot, /pause and /resume
        └─ loopback HTTP server on 127.0.0.1:17772
             ├─ /mcp     MCP endpoint (Streamable HTTP, JSON responses)
             ├─ /state   current snapshot, for curl debugging
-            └─ /act     run one action, for curl debugging
+            ├─ /act     run one action, for curl debugging
+            └─ /chat    post to or read the in-game chat, for curl debugging
 Claude Code (signed in with the Max plan)
-  └─ .mcp.json points at /mcp → tools: get_state, wait_for_decision, act
+  └─ .mcp.json points at /mcp → tools: get_state, wait_for_decision, act, say, get_deck
   └─ /play command + strategy/ notes = the brain
 ```
 
 The mod turns whatever screen is up into a **snapshot**: the screen name, the facts needed to decide (hand, energy, enemies and their intents, map, rewards, shop stock...) and a list of **legal actions** with short ids. The model only ever picks one of those ids, so it can't click something that doesn't exist. Every snapshot has a version; acting on a stale version is rejected instead of misfiring.
 
-`act` waits for the game to settle (animations, enemy turn) and returns the next decision, so a typical turn is one tool call per card.
+`act` waits for the game to settle (animations, enemy turn) and returns the next decision, so a typical turn is one tool call per card. `say` puts a line in the in-game chat, and `get_deck` returns the full deck with card and relic text for build decisions.
 
 ## Layout
 
@@ -44,6 +46,29 @@ curl -s http://127.0.0.1:17772/health
 ```
 
 Paths default to the Steam install under `~/Library/Application Support/Steam/steamapps/common/Slay the Spire 2`. Override `GAME_DIR` or `MODS_DIR` in `scripts/local.env` if yours differ. A Steam update can replace the app bundle, which removes anything inside it, so rerun `scripts/install.sh` after updates.
+
+## Talking to the bot in game
+
+The bot plays as its character and answers in that character's voice. Press **T** to open the chat box at the bottom left. Enter sends and closes the box; Escape closes it; clicking away closes it and keeps what you typed for next time.
+
+- Address the bot by its character's name: "Ironclad, go for Strength", "hey Silent", "@Defect". With one bot, a message without a name reaches it too. A message that starts with another character's name is left for that bot. Between runs, before a character is picked, every message reaches it.
+- It sees your message on its next tool call, answers in a line or two and follows orders. Standing orders go under Orders in `runs/current.md` and last the whole run.
+- Commands take effect at once in the mod, without waiting for the model:
+  - `/pause` stops the bot so you can play by hand. Chat keeps working.
+  - `/resume` hands control back.
+  - `/help` lists the commands.
+- `SPIREMIND_CHAT_KEY` picks another hotkey (a Godot `Key` name such as `Y`; Enter and Escape fall back to T). `SPIREMIND_HUMAN_NAME` sets the name on your lines; it defaults to your OS user name, capitalised. Set them in the game's Steam launch options, e.g. `SPIREMIND_HUMAN_NAME=Mark %command%`.
+
+The same chat works from a terminal, which helps when testing without the overlay:
+
+```bash
+curl -s http://127.0.0.1:17772/chat -d '{"from": "Mark", "text": "Ironclad, how are we doing?"}'
+curl -s 'http://127.0.0.1:17772/chat?since=0'    # the log, the bot's name and the pause flag
+```
+
+`/state` and `/act` show the bot's unread messages under `chat` but leave them unread, so checking on the bot with curl doesn't take its messages.
+
+See `docs/chat.md` for the design.
 
 ## Ground rules
 

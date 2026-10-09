@@ -1,3 +1,5 @@
+using System.Text.Json.Nodes;
+
 namespace SpireMind.Core;
 
 /// <summary>
@@ -13,4 +15,9 @@ public interface IGameBridge
     /// <summary>Start the action. Returning means the game accepted it, not that it finished
     /// animating; callers wait for the next decision with <see cref="DecisionWaiter"/>.</summary>
     Task<ActionResult> ExecuteAsync(string actionId, CancellationToken ct);
+
+    /// <summary>The run's whole deck with card text, relics with text, potions, HP and gold, for
+    /// build decisions (snapshots only carry deck name counts). Return a new object each call;
+    /// the caller adds to it.</summary>
+    Task<JsonObject> DescribeDeckAsync(CancellationToken ct);
 }

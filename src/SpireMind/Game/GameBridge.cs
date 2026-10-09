@@ -1,3 +1,5 @@
+using System.Text.Json.Nodes;
+
 namespace SpireMind.Game;
 
 /// <summary>
@@ -70,6 +72,23 @@ internal sealed class GameBridge : IGameBridge
             {
                 ModEntry.LogError($"execute {actionId} failed: {ex}");
                 return ActionResult.Fail($"{ex.GetType().Name}: {ex.Message}");
+            }
+        });
+
+    public Task<JsonObject> DescribeDeckAsync(CancellationToken ct) =>
+        _main.Run(() =>
+        {
+            try
+            {
+                var ctx = GameContext.Capture();
+                if (ctx.Run is not { } run || ctx.Me is not { } me)
+                    return new JsonObject { ["error"] = "no run in progress" };
+                return Describe.Deck(run, me);
+            }
+            catch (Exception ex)
+            {
+                ModEntry.LogError($"describe deck failed: {ex}");
+                return new JsonObject { ["error"] = $"reader error: {ex.GetType().Name}: {ex.Message}" };
             }
         });
 

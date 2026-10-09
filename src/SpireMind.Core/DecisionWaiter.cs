@@ -29,7 +29,12 @@ public sealed class DecisionWaiter
     /// Wait for a settled decision newer than <paramref name="afterVersion"/> (or any
     /// settled decision when null). On timeout returns whatever the game shows now.
     /// </summary>
-    public async Task<GameSnapshot> WaitAsync(long? afterVersion, TimeSpan timeout, CancellationToken ct)
+    /// <param name="interrupt">Checked every poll; when true, returns the current snapshot at
+    /// once without waiting for it to settle (a chat message for the model arrived).</param>
+    /// <param name="hold">While true no decision is handed over and the wait runs on until
+    /// <paramref name="interrupt"/> or the timeout (the human paused the bot).</param>
+    public async Task<GameSnapshot> WaitAsync(long? afterVersion, TimeSpan timeout, CancellationToken ct,
+        Func<bool>? interrupt = null, Func<bool>? hold = null)
     {
         var deadline = DateTime.UtcNow + timeout;
         GameSnapshot? candidate = null;
@@ -39,9 +44,11 @@ public sealed class DecisionWaiter
         {
             ct.ThrowIfCancellationRequested();
             var snap = await CaptureAsync(ct);
+            if (interrupt?.Invoke() == true)
+                return snap;
 
             var isNew = afterVersion is null || snap.Version > afterVersion;
-            if (snap.AwaitingDecision && isNew)
+            if (snap.AwaitingDecision && isNew && hold?.Invoke() != true)
             {
                 if (candidate is null || candidate.Version != snap.Version)
                 {

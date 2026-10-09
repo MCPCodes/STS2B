@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace SpireMind.Core;
@@ -10,22 +11,28 @@ namespace SpireMind.Core;
 ///   GET  /health  liveness and version
 ///   GET  /state   the current snapshot (handy with curl while debugging)
 ///   POST /act     {"action_id": "...", "version": n}, same as the act tool
+///   POST /chat    {"from": "Mark", "text": "..."}, posts as the in-game chat box does
+///   GET  /chat?since=n  the chat log after line n, with the bot's name and the pause flag
+/// /state and /act go through the tools and show unread chat messages like them, but leave
+/// them unread, so a curl doesn't take them from the model.
 /// </summary>
 public sealed class BridgeServer : IDisposable
 {
     private readonly HttpListener _listener = new();
     private readonly McpEndpoint _mcp;
     private readonly BotTools _tools;
+    private readonly ChatHub _chat;
     private readonly string _version;
     private readonly Action<string> _log;
     private readonly CancellationTokenSource _stop = new();
 
     public int Port { get; }
 
-    public BridgeServer(int port, BotTools tools, string version, Action<string> log)
+    public BridgeServer(int port, BotTools tools, ChatHub chat, string version, Action<string> log)
     {
         Port = port;
         _tools = tools;
+        _chat = chat;
         _version = version;
         _log = log;
         _mcp = new McpEndpoint(tools, version);
@@ -105,20 +112,47 @@ public sealed class BridgeServer : IDisposable
                     return;
 
                 case ("GET", "/state"):
-                    var state = await _tools.CallAsync("get_state", new JsonObject(), _stop.Token);
+                    var state = await _tools.CallAsync("get_state", new JsonObject(), takeChat: false, _stop.Token);
                     await Send(res, state.IsError ? 500 : 200, state.Payload);
                     return;
 
                 case ("POST", "/act"):
                     var args = JsonNode.Parse(await ReadBody(req)) as JsonObject ?? new JsonObject();
-                    var acted = await _tools.CallAsync("act", args, _stop.Token);
+                    var acted = await _tools.CallAsync("act", args, takeChat: false, _stop.Token);
                     await Send(res, acted.IsError ? 409 : 200, acted.Payload);
+                    return;
+
+                case ("POST", "/chat"):
+                    var message = JsonNode.Parse(await ReadBody(req)) as JsonObject ?? new JsonObject();
+                    var posted = _chat.PostFromHuman(Text(message["from"]) ?? "Player", Text(message["text"]) ?? "");
+                    await Send(res, posted.Outcome == PostOutcome.Empty ? 400 : 200, new JsonObject
+                    {
+                        ["outcome"] = posted.Outcome switch
+                        {
+                            PostOutcome.Queued => "queued",
+                            PostOutcome.Command => "command",
+                            PostOutcome.NotForMe => "not_for_me",
+                            _ => "empty",
+                        },
+                        ["reply"] = posted.Reply,
+                    });
+                    return;
+
+                case ("GET", "/chat"):
+                    var since = long.TryParse(req.QueryString["since"], out var n) ? n : 0;
+                    await Send(res, 200, ChatLog(since));
                     return;
 
                 default:
                     await Send(res, 404, new JsonObject { ["error"] = $"no route {req.HttpMethod} {path}" });
                     return;
             }
+        }
+        catch (JsonException ex)
+        {
+            // A bad body on /act or /chat is the caller's mistake, not a server failure.
+            try { await Send(res, 400, new JsonObject { ["error"] = $"body must be a JSON object: {ex.Message}" }); }
+            catch { /* client already gone */ }
         }
         catch (Exception ex)
         {
@@ -127,6 +161,25 @@ public sealed class BridgeServer : IDisposable
             catch { /* client already gone */ }
         }
     }
+
+    private JsonObject ChatLog(long since)
+    {
+        var lines = new JsonArray();
+        foreach (var l in _chat.LinesSince(since))
+        {
+            lines.Add(new JsonObject
+            {
+                ["seq"] = l.Seq,
+                ["kind"] = l.Kind.ToString().ToLowerInvariant(),
+                ["from"] = l.From,
+                ["text"] = l.Text,
+            });
+        }
+        return new JsonObject { ["bot"] = _chat.BotName, ["paused"] = _chat.Paused, ["lines"] = lines };
+    }
+
+    private static string? Text(JsonNode? node) =>
+        node is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
 
     public static bool IsLocalOrigin(string? origin)
     {

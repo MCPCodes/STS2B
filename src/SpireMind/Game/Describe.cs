@@ -239,6 +239,44 @@ internal static class Describe
         return json;
     }
 
+    /// <summary>
+    /// The whole run for build decisions (get_deck): every deck card with its text in deck
+    /// order, relics and potions with what they do. Snapshots only carry deck name counts.
+    /// </summary>
+    public static JsonObject Deck(RunState run, Player me)
+    {
+        var json = new JsonObject
+        {
+            ["character"] = Text(me.Character?.Title),
+            ["hp"] = me.Creature.CurrentHp,
+            ["max_hp"] = me.Creature.MaxHp,
+            ["gold"] = me.Gold,
+            ["run"] = RunInfo(run),
+            ["deck_size"] = me.Deck.Cards.Count,
+        };
+
+        var deck = new JsonArray();
+        foreach (var card in me.Deck.Cards)
+        {
+            var entry = CardOffer(card);
+            if (card.IsUpgraded) entry["upgraded"] = true;
+            deck.Add(entry);
+        }
+        json["deck"] = deck;
+
+        var relics = new JsonArray();
+        foreach (var r in me.Relics) relics.Add(Relic(r));
+        json["relics"] = relics;
+
+        // Filled slots only; the snapshots say which slot each potion is in.
+        var potions = new JsonArray();
+        for (var i = 0; i < me.MaxPotionCount; i++)
+            if (me.GetPotionAtSlotIndex(i) is { } p)
+                potions.Add(Potion(p));
+        json["potions"] = potions;
+        return json;
+    }
+
     /// <summary>Act, floor and ascension for orientation.</summary>
     public static JsonObject RunInfo(RunState run) => new()
     {

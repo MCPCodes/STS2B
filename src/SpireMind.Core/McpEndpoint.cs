@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -8,6 +9,8 @@ namespace SpireMind.Core;
 /// plain JSON response (no SSE stream). That subset is enough for tools and is what lets
 /// Claude Code talk to the mod directly with no Python or Node sidecar:
 ///   claude mcp add --transport http spiremind http://127.0.0.1:17772/mcp
+/// A tool call the client gives up on (notifications/cancelled) is cancelled here, so an
+/// abandoned wait_for_decision stops instead of taking chat messages nobody will read.
 /// </summary>
 public sealed class McpEndpoint
 {
@@ -17,6 +20,9 @@ public sealed class McpEndpoint
 
     private readonly BotTools _tools;
     private readonly string _serverVersion;
+
+    /// <summary>Tool calls in progress, by their JSON-RPC id as JSON text.</summary>
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _calls = new();
 
     public McpEndpoint(BotTools tools, string serverVersion)
     {
@@ -61,12 +67,17 @@ public sealed class McpEndpoint
 
         var id = msg["id"]?.DeepClone();
         var method = (msg["method"] as JsonValue)?.GetValue<string>();
+        var @params = msg["params"] as JsonObject ?? new JsonObject();
+
+        if (method == "notifications/cancelled")
+        {
+            Cancel(@params["requestId"]);
+            return null;
+        }
 
         // Notifications and client responses carry no reply.
         if (method is null || id is null)
             return null;
-
-        var @params = msg["params"] as JsonObject ?? new JsonObject();
 
         switch (method)
         {
@@ -77,7 +88,7 @@ public sealed class McpEndpoint
             case "tools/list":
                 return Result(id, ListTools());
             case "tools/call":
-                return Result(id, await CallToolAsync(@params, ct));
+                return await CallToolAsync(id, @params, ct);
             default:
                 return ErrorResponse(id, -32601, $"Method not found: {method}");
         }
@@ -113,12 +124,31 @@ public sealed class McpEndpoint
         return new JsonObject { ["tools"] = list };
     }
 
-    private async Task<JsonObject> CallToolAsync(JsonObject p, CancellationToken ct)
+    private async Task<JsonObject> CallToolAsync(JsonNode id, JsonObject p, CancellationToken ct)
     {
         var name = (p["name"] as JsonValue)?.GetValue<string>() ?? "";
         var args = p["arguments"] as JsonObject ?? new JsonObject();
-        var outcome = await _tools.CallAsync(name, args, ct);
-        return new JsonObject
+
+        var key = id.ToJsonString();
+        using var call = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _calls[key] = call;
+        ToolOutcome outcome;
+        try
+        {
+            outcome = await _tools.CallAsync(name, args, call.Token);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // The client cancelled it, or a newer wait_for_decision replaced it. Nobody is
+            // listening for this answer; it only closes the HTTP request.
+            return ErrorResponse(id, -32800, "Request cancelled");
+        }
+        finally
+        {
+            _calls.TryRemove(new KeyValuePair<string, CancellationTokenSource>(key, call));
+        }
+
+        return Result(id, new JsonObject
         {
             ["content"] = new JsonArray(new JsonObject
             {
@@ -126,7 +156,15 @@ public sealed class McpEndpoint
                 ["text"] = outcome.Payload.ToJsonString(),
             }),
             ["isError"] = outcome.IsError,
-        };
+        });
+    }
+
+    private void Cancel(JsonNode? requestId)
+    {
+        if (requestId is null || !_calls.TryGetValue(requestId.ToJsonString(), out var call))
+            return;
+        try { call.Cancel(); }
+        catch (ObjectDisposedException) { /* it finished meanwhile */ }
     }
 
     private static JsonObject Result(JsonNode id, JsonNode result) =>

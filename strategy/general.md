@@ -261,3 +261,18 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
 - Hoarding potions and dying with full slots.
 - Hard-casting Sly cards (costed 2-3) instead of discarding them for free.
 - Following stale advice. Re-read the card text. Patches changed many cards (Borrowed Time, Drum of Battle, Shatter, Blade of Ink, Expect a Fight...).
+
+## 12. Committing to a build (the Build plan)
+Rules 2.6 and 2.7 say when to commit. This is how to run it, with the plan written in `runs/current.md`.
+- **Pick a target lane at Neow.** Read your character file's archetypes and choose the one your Neow pick (and any rare it gave) points toward.
+  - With no signal, aim for the lane the file calls most consistent, and stay open until rares and relics point elsewhere.
+  - The plan names the lane, the cards and relics that make it work, what to avoid, and what the deck lacks for the act boss.
+- **Act 1: flexible power first.** Take cards that are good in any deck (front-loaded damage, efficient block, draw) over narrow payoffs.
+  - An on-lane card wins a close call. A payoff with no enablers yet does not.
+- **Commit by mid Act 2** (around the treasure room). By then you hold the engine's core, which the character files spell out (often 2+ enablers and a payoff).
+  - After that, draft only for the engine and for gaps: block, AoE, an Artifact or boss answer.
+  - Pivot late only for a run-defining rare or relic, or a standing order from the human. Rewrite the plan when you do.
+- **Skips and removals are build tools.** Every off-plan card makes the engine show up less often.
+  - Once committed, skip any reward that is neither on plan nor fixing a gap.
+  - Count a Strike or Defend removal as a pick. It is often worth more than an average on-plan common.
+- **Check the plan before every card reward, purchase, removal, upgrade and relic choice.** Upgrade the cards the plan leans on.

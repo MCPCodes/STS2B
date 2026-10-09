@@ -99,6 +99,35 @@ public sealed class FakeGame : IGameBridge
         }
     }
 
+    public Task<JsonObject> DescribeDeckAsync(CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            return Task.FromResult(new JsonObject
+            {
+                ["character"] = "Ironclad",
+                ["hp"] = _hp,
+                ["max_hp"] = 80,
+                ["gold"] = 99,
+                ["deck_size"] = 10,
+                ["deck"] = new JsonArray(
+                    Card("Strike", 5, 1, "Attack", "Deal 6 damage."),
+                    Card("Defend", 4, 1, "Skill", "Gain 5 Block."),
+                    Card("Bash", 1, 2, "Attack", "Deal 8 damage. Apply 2 Vulnerable.")),
+                ["relics"] = new JsonArray(new JsonObject
+                {
+                    ["name"] = "Burning Blood", ["text"] = "At the end of combat, heal 6 HP.",
+                }),
+                ["potions"] = new JsonArray(null, null, null),
+            });
+        }
+
+        static JsonObject Card(string name, int count, int cost, string type, string text) => new()
+        {
+            ["name"] = name, ["count"] = count, ["cost"] = cost, ["type"] = type, ["text"] = text,
+        };
+    }
+
     private void StartTurn()
     {
         _turn++;

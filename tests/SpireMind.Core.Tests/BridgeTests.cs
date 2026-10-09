@@ -18,7 +18,7 @@ public class BridgeTests
             PollInterval = TimeSpan.FromMilliseconds(10),
             SettleTime = TimeSpan.FromMilliseconds(30),
         };
-        return (new BotTools(game, waiter, versioner) { ActSettleTimeout = TimeSpan.FromSeconds(3) }, game);
+        return (new BotTools(game, waiter, versioner, new ChatHub()) { ActSettleTimeout = TimeSpan.FromSeconds(3) }, game);
     }
 
     private static JsonObject Call(BotTools tools, string name, JsonObject? args = null)
@@ -90,7 +90,7 @@ public class BridgeTests
 
         var list = mcp.HandleAsync("""{"jsonrpc":"2.0","id":2,"method":"tools/list"}""", default).Result!;
         var names = list["result"]!["tools"]!.AsArray().Select(t => t!["name"]!.GetValue<string>()).ToArray();
-        Assert.Equal(["get_state", "wait_for_decision", "act"], names);
+        Assert.Equal(["get_state", "wait_for_decision", "act", "say", "get_deck"], names);
 
         var call = mcp.HandleAsync("""{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_state","arguments":{}}}""", default).Result!;
         var text = call["result"]!["content"]![0]!["text"]!.GetValue<string>();
@@ -120,7 +120,7 @@ public class BridgeTests
     {
         var (tools, _) = Build();
         var port = FreePort();
-        using var server = new BridgeServer(port, tools, "test", _ => { });
+        using var server = new BridgeServer(port, tools, new ChatHub(), "test", _ => { });
         server.Start();
 
         using var http = new HttpClient();
@@ -140,7 +140,7 @@ public class BridgeTests
         Assert.Equal(HttpStatusCode.MethodNotAllowed, get.StatusCode);
     }
 
-    private static int FreePort()
+    internal static int FreePort()
     {
         var l = new TcpListener(IPAddress.Loopback, 0);
         l.Start();
@@ -159,6 +159,7 @@ public class ActWarningTests
             Screen = "combat", AwaitingDecision = true, Actions = [new LegalAction("end_turn", "End turn")],
         });
         public Task<ActionResult> ExecuteAsync(string actionId, CancellationToken ct) => Task.FromResult(ActionResult.Success);
+        public Task<JsonObject> DescribeDeckAsync(CancellationToken ct) => Task.FromResult(new JsonObject());
     }
 
     [Fact]
@@ -167,7 +168,7 @@ public class ActWarningTests
         var game = new DeafGame();
         var versioner = new SnapshotVersioner();
         var waiter = new DecisionWaiter(game, versioner) { PollInterval = TimeSpan.FromMilliseconds(5), SettleTime = TimeSpan.FromMilliseconds(5) };
-        var tools = new BotTools(game, waiter, versioner) { ActSettleTimeout = TimeSpan.FromMilliseconds(100) };
+        var tools = new BotTools(game, waiter, versioner, new ChatHub()) { ActSettleTimeout = TimeSpan.FromMilliseconds(100) };
         var outcome = tools.CallAsync("act", new System.Text.Json.Nodes.JsonObject { ["action_id"] = "end_turn" }, default).Result;
         Assert.False(outcome.IsError);
         Assert.Contains("Nothing changed", outcome.Payload["warning"]!.GetValue<string>());
