@@ -148,7 +148,8 @@ internal static class Describe
             var kind = p.TypeForCurrentAmount.ToString();
             if (kind.Length > 0 && kind != "None") entry["kind"] = kind;
             // STS2 has plenty of powers the model has never seen, so say what each one does.
-            var text = SafeText(() => p.DynamicDescription);
+            // PowerModel has no DynamicDescription; its first hover tip is the tooltip text with amounts and names filled in.
+            var text = SafeText(() => p.HoverTips.OfType<HoverTip>().Select(t => t.Description).FirstOrDefault());
             if (text.Length > 0) entry["text"] = text;
             arr.Add(entry);
         }
