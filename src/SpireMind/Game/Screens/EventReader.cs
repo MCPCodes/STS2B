@@ -598,7 +598,8 @@ internal sealed class EventReader : IScreen
     /// page); the layout's labels stand in when it has none.
     /// </summary>
     private static string ModelBody(EventModel ev) =>
-        Describe.SafeText(() => ev.Description);
+        // A page without text (Neow's first page talks through dialogue) formats as its raw key.
+        ev.Description is { } d && d.Exists() ? Describe.SafeText(() => d) : "";
 
     private static bool WillKill(EventOption option, EventModel ev)
     {

@@ -58,7 +58,7 @@ internal sealed class GameBridge : IGameBridge
                     return ActionResult.Fail($"'{actionId}' is no longer available on the {fresh.Screen} screen.");
 
                 var result = active.Screen.Execute(ctx, active.Node, actionId);
-                if (result.Ok && LeavesRoom(fresh, actionId))
+                if (result.Ok && LeavesRoom(fresh, active.Node, actionId))
                     Latches.ProceededFrom = ctx.Run?.CurrentRoom;
                 if (result.Ok)
                     ModEntry.Log($"{fresh.Screen}: {actionId}");
@@ -74,8 +74,10 @@ internal sealed class GameBridge : IGameBridge
         });
 
     /// <summary>A room's proceed button, or an event option labelled Leave.</summary>
-    private static bool LeavesRoom(GameSnapshot snapshot, string actionId) =>
+    private static bool LeavesRoom(GameSnapshot snapshot, Node? node, string actionId) =>
         actionId == "proceed"
-        || (snapshot.Screen == "event"
-            && snapshot.Actions.FirstOrDefault(a => a.Id == actionId)?.Label.StartsWith("Leave", StringComparison.Ordinal) == true);
+            // A non-terminal rewards screen (Orrery or Cauldron in a shop, a chest's extra rewards) only closes itself.
+            ? !(node is NRewardsScreen rewards && Nodes.TryGetPrivate(rewards, "_isTerminal") is false)
+            : snapshot.Screen == "event"
+              && snapshot.Actions.FirstOrDefault(a => a.Id == actionId)?.Label.StartsWith("Leave", StringComparison.Ordinal) == true;
 }
