@@ -149,3 +149,27 @@ public class BridgeTests
         return port;
     }
 }
+
+public class ActWarningTests
+{
+    private sealed class DeafGame : IGameBridge
+    {
+        public Task<GameSnapshot> CaptureAsync(CancellationToken ct) => Task.FromResult(new GameSnapshot
+        {
+            Screen = "combat", AwaitingDecision = true, Actions = [new LegalAction("end_turn", "End turn")],
+        });
+        public Task<ActionResult> ExecuteAsync(string actionId, CancellationToken ct) => Task.FromResult(ActionResult.Success);
+    }
+
+    [Fact]
+    public void Warns_when_an_action_changes_nothing()
+    {
+        var game = new DeafGame();
+        var versioner = new SnapshotVersioner();
+        var waiter = new DecisionWaiter(game, versioner) { PollInterval = TimeSpan.FromMilliseconds(5), SettleTime = TimeSpan.FromMilliseconds(5) };
+        var tools = new BotTools(game, waiter, versioner) { ActSettleTimeout = TimeSpan.FromMilliseconds(100) };
+        var outcome = tools.CallAsync("act", new System.Text.Json.Nodes.JsonObject { ["action_id"] = "end_turn" }, default).Result;
+        Assert.False(outcome.IsError);
+        Assert.Contains("Nothing changed", outcome.Payload["warning"]!.GetValue<string>());
+    }
+}

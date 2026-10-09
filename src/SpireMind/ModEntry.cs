@@ -21,6 +21,10 @@ public static class ModEntry
     {
         try
         {
+            // Read-only observation patches (choice prompts). Failing to patch only loses prompt text.
+            try { new HarmonyLib.Harmony("mcpcodes.spiremind").PatchAll(typeof(ModEntry).Assembly); }
+            catch (Exception ex) { LogError($"harmony patches skipped: {ex.Message}"); }
+
             var tree = (SceneTree)Engine.GetMainLoop();
             tree.Connect(SceneTree.SignalName.ProcessFrame, Callable.From(MainThread.Drain));
 

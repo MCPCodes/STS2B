@@ -106,7 +106,12 @@ public sealed class BotTools
             return Rejected(result.Error ?? "The game refused the action.", await _waiter.CaptureAsync(ct));
 
         var next = await _waiter.WaitAsync(before.Version, ActSettleTimeout, ct);
-        return new ToolOutcome(new JsonObject { ["done"] = actionId, ["next"] = next.ToJson() });
+        var reply = new JsonObject { ["done"] = actionId, ["next"] = next.ToJson() };
+        if (next.Version == before.Version)
+            reply["warning"] = "Nothing changed after this action. The game may have ignored it; re-check the state before repeating it.";
+        else if (!next.AwaitingDecision)
+            reply["warning"] = "The game is still busy. Call wait_for_decision before acting again.";
+        return new ToolOutcome(reply);
     }
 
     private static ToolOutcome Rejected(string why, GameSnapshot current) =>
