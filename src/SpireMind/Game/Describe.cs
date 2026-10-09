@@ -43,6 +43,9 @@ internal static class Describe
         return json;
     }
 
+    /// <summary>A card's name for action labels. CardModel.Title already ends in "+" (or "+N") when upgraded.</summary>
+    public static string CardName(CardModel card) => Text(card.Title);
+
     /// <summary>Card for reward/shop/deck lists, where rarity helps judge value.</summary>
     public static JsonObject CardOffer(CardModel card)
     {
@@ -214,7 +217,35 @@ internal static class Describe
         ["ascension"] = run.AscensionLevel,
     };
 
-    private static string SafeText(Func<object?> get)
+    /// <summary>Co-op teammates as short lines ("Silent 41/70 hp") for off-combat choices their HP bears on.</summary>
+    public static JsonArray TeamHp(IEnumerable<Player> teammates)
+    {
+        var team = new JsonArray();
+        foreach (var p in teammates)
+            team.Add($"{Text(p.Character?.Title)} {p.Creature.CurrentHp}/{p.Creature.MaxHp} hp");
+        return team;
+    }
+
+    // ---------- json helpers ----------
+
+    /// <summary>
+    /// A new object with <paramref name="key"/> first, then <paramref name="body"/>'s properties
+    /// moved over (body is left empty), so ids read first in the model's context.
+    /// </summary>
+    public static JsonObject Lead(string key, JsonNode? value, JsonObject body)
+    {
+        var json = new JsonObject { [key] = value };
+        foreach (var name in body.Select(kv => kv.Key).ToList())
+        {
+            var node = body[name];
+            body.Remove(name);
+            json[name] = node;
+        }
+        return json;
+    }
+
+    /// <summary>Text from a getter that may throw (some LocStrings need variables we can't supply); "" then.</summary>
+    public static string SafeText(Func<object?> get)
     {
         try { return Text(get()); }
         catch { return ""; }

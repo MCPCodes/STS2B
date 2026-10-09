@@ -7,7 +7,7 @@ namespace SpireMind.Game;
 /// </summary>
 internal interface IScreen
 {
-    /// <summary>Snapshot screen name: combat, map, rewards, card_reward, card_select, shop, rest, event, treasure, game_over, modal, menu.</summary>
+    /// <summary>Snapshot screen name: combat, map, rewards, card_reward, card_select, shop, rest, event, treasure, game_over, modal, menu, crystal_sphere. CombatReader also reports "hand_select" while the hand is in select mode.</summary>
     string Name { get; }
 
     /// <summary>Build the snapshot. <paramref name="node"/> is the node the router matched (the overlay, room or modal), when there is one.</summary>

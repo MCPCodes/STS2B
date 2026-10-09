@@ -12,6 +12,9 @@ internal static class ScreenRouter
 
     private static RunState? _lastRun;
 
+    /// <summary>Overlay types we have no reader for, logged once each instead of on every poll.</summary>
+    private static readonly HashSet<string> UnhandledLogged = new(StringComparer.Ordinal);
+
     public static ActiveScreen? Resolve(GameContext ctx, out GameSnapshot? busy)
     {
         busy = null;
@@ -28,10 +31,10 @@ internal static class ScreenRouter
             return null;
         }
 
-        var active = Route(ctx);
+        var active = Route(ctx, out var unrouted);
         if (active is null)
         {
-            busy = GameSnapshot.Busy("unknown", "no recognised screen yet");
+            busy = GameSnapshot.Busy("unknown", unrouted);
             return null;
         }
 
@@ -66,8 +69,9 @@ internal static class ScreenRouter
         return null;
     }
 
-    private static ActiveScreen? Route(GameContext ctx)
+    private static ActiveScreen? Route(GameContext ctx, out string why)
     {
+        why = "no recognised screen yet";
         object? current = null;
         try { current = ActiveScreenContext.Instance?.GetCurrentScreen(); }
         catch (Exception ex) { ModEntry.LogError($"GetCurrentScreen: {ex.Message}"); }
@@ -77,16 +81,25 @@ internal static class ScreenRouter
             return new ActiveScreen(ModalReader.Instance, modal);
 
         if (current is ICapstoneScreen)
-            return null; // deck view or pause menu: a human opened it, let them close it.
+        {
+            why = "a deck view or the pause menu is open; close it to continue";
+            return null; // a human opened it, let them close it.
+        }
 
         if (!ctx.InRun)
+        {
+            // The run can stop counting as in progress while its game over screen is still up.
+            if (NOverlayStack.Instance?.Peek() is NGameOverScreen over && GodotObject.IsInstanceValid(over))
+                return new ActiveScreen(GameOverReader.Instance, over);
             return new ActiveScreen(MenuReader.Instance, current as Node);
+        }
 
         // The map draws over terminal reward screens that stay on the overlay stack until the
         // room changes, so it wins when open.
         if (NMapScreen.Instance is { IsOpen: true } map)
             return new ActiveScreen(MapReader.Instance, map);
 
+        // VERIFY: a rewards screen in a treasure room, shop (Orrery, Cauldron) or event leaves the stack once its proceed is pressed; one that stays would hide the room under it
         if (NOverlayStack.Instance?.Peek() is Node top && GodotObject.IsInstanceValid(top))
         {
             IScreen? reader = top switch
@@ -103,12 +116,22 @@ internal static class ScreenRouter
             if (reader is not null)
                 return new ActiveScreen(reader, top);
 
-            ModEntry.Log($"unhandled overlay {top.GetType().Name}");
+            var type = top.GetType().Name;
+            if (UnhandledLogged.Add(type)) ModEntry.Log($"unhandled overlay {type}");
+            why = $"a screen the bot can't read is open ({type})";
             return null;
         }
 
+        // A fight comes first whatever the screen context reports: one an event starts runs
+        // inside the event's room. Hand selection (the "hand_select" snapshot) lives in the
+        // combat reader too.
+        if (ctx.InCombat) // VERIFY: CombatManager.IsInProgress turns false once a fight is over, so an event's page after its fight reads as the event
+            return new ActiveScreen(CombatReader.Instance, current as NCombatRoom ?? NRun.Instance?.CombatRoom);
+
         // Room layer. Prefer the concrete node the screen context reports; fall back to the
-        // logical room type when the context is something we don't special-case.
+        // logical room type when the context is something we don't special-case (the merchant's
+        // inventory, for one, reports itself rather than the room).
+        // VERIFY: the merchant inventory is not an NOverlayStack screen (else the overlay switch above needs a case for it)
         switch (current)
         {
             case NCombatRoom combatRoom:
@@ -126,15 +149,20 @@ internal static class ScreenRouter
         var roomType = ctx.Run?.CurrentRoom?.RoomType;
         return roomType switch
         {
-            RoomType.Monster or RoomType.Elite or RoomType.Boss when ctx.InCombat
-                => new ActiveScreen(CombatReader.Instance, NRun.Instance?.CombatRoom),
             RoomType.Event => new ActiveScreen(EventReader.Instance, NRun.Instance?.EventRoom),
             RoomType.Treasure => new ActiveScreen(TreasureReader.Instance, NRun.Instance?.TreasureRoom),
             RoomType.RestSite => new ActiveScreen(RestSiteReader.Instance, NRestSiteRoom.Instance),
             RoomType.Shop => new ActiveScreen(ShopReader.Instance, NMerchantRoom.Instance),
-            // Map room (act start) or between rooms with the map closed: nothing to do yet.
-            _ => null,
+            // Map room (act start), a fight's room after the fight, or between rooms with the map
+            // closed: nothing to do yet.
+            _ => NoRoom(roomType, out why),
         };
+    }
+
+    private static ActiveScreen? NoRoom(RoomType? roomType, out string why)
+    {
+        why = roomType is null or RoomType.Unassigned ? "between rooms" : $"nothing to do in this {roomType} room yet";
+        return null;
     }
 
     /// <summary>The co-op "waiting for player" overlay: one game-level (lobby, loading) and one per run.</summary>

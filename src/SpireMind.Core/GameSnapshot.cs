@@ -18,8 +18,10 @@ public sealed class GameSnapshot
     /// <summary>Bumped by <see cref="SnapshotVersioner"/> whenever state or actions change.</summary>
     public long Version { get; set; }
 
-    /// <summary>combat, map, rewards, card_reward, shop, rest, event, treasure, card_select,
-    /// character_select, menu, game_over, or busy while animations and enemy turns play out.</summary>
+    /// <summary>combat, hand_select, map, rewards, card_reward, card_select, shop, rest, event,
+    /// treasure, game_over, modal, menu, crystal_sphere, or unknown when nothing is recognised.
+    /// AwaitingDecision is false (and Waiting says why) while animations, enemy turns and
+    /// teammates play out.</summary>
     public required string Screen { get; init; }
 
     /// <summary>True when the local player has a choice to make and <see cref="Actions"/> is usable.</summary>
