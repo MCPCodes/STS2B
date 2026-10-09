@@ -43,6 +43,31 @@ internal static class Describe
         return json;
     }
 
+    /// <summary>
+    /// A hand card, plus "vs": its text against each of <paramref name="enemies"/> where that
+    /// differs from the text at rest. Hand text counts the player's own modifiers (Strength,
+    /// Weak) but not the target's (Vulnerable and the like), which the game only shows while the
+    /// card hovers an enemy. Only cards aimed at enemies are rendered per enemy.
+    /// </summary>
+    public static JsonObject HandCard(CardModel card, IEnumerable<(string Id, Creature Enemy)> enemies)
+    {
+        // Against each enemy first and at rest last, so the card is left previewing no target,
+        // as it does on screen when nothing hovers.
+        var versus = new List<(string Id, string Text)>();
+        if (card.TargetType is TargetType.AnyEnemy or TargetType.AllEnemies)
+            foreach (var (id, enemy) in enemies)
+                versus.Add((id, SafeText(() => card.GetDescriptionForPile(PileType.Hand, enemy))));
+
+        var json = Card(card, PileType.Hand);
+        var atRest = (string?)json["text"] ?? "";
+        JsonObject? vs = null;
+        foreach (var (id, text) in versus)
+            if (text.Length > 0 && text != atRest)
+                (vs ??= new JsonObject())[id] = text;
+        if (vs is not null) json["vs"] = vs;
+        return json;
+    }
+
     /// <summary>A card's name for action labels. CardModel.Title already ends in "+" (or "+N") when upgraded.</summary>
     public static string CardName(CardModel card) => Text(card.Title);
 
@@ -117,10 +142,14 @@ internal static class Describe
         foreach (var p in c.Powers)
         {
             if (!p.IsVisible) continue;
-            var entry = new JsonObject { ["id"] = p.Id.Entry };
+            var name = SafeText(() => p.Title);
+            var entry = new JsonObject { ["name"] = name.Length > 0 ? name : p.Id.Entry };
             if (p.DisplayAmount is var amount && amount != 0) entry["amount"] = amount;
             var kind = p.TypeForCurrentAmount.ToString();
             if (kind.Length > 0 && kind != "None") entry["kind"] = kind;
+            // STS2 has plenty of powers the model has never seen, so say what each one does.
+            var text = SafeText(() => p.DynamicDescription);
+            if (text.Length > 0) entry["text"] = text;
             arr.Add(entry);
         }
         return arr;

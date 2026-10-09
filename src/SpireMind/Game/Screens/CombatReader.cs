@@ -65,12 +65,16 @@ internal sealed class CombatReader : IScreen
         var plays = new List<PlayOption>();
         var hand = new JsonArray();
         var cards = b.Pcs.Hand.Cards;
+        var targets = Enumerable.Range(0, b.Enemies.Count)
+            .Where(j => IsTargetableEnemy(b.Cs, b.Enemies[j]))
+            .Select(j => ($"e{j}", b.Enemies[j]))
+            .ToList();
         for (var i = 0; i < cards.Count; i++)
         {
             var options = PlayOptionsFor(b, i, cards[i], out var unplayable);
             plays.AddRange(options);
 
-            var entry = Describe.Lead("i", i, Describe.Card(cards[i], PileType.Hand));
+            var entry = Describe.Lead("i", i, Describe.HandCard(cards[i], targets));
             entry["playable"] = options.Count > 0;
             if (options.Count == 0 && unplayable is not null) entry["unplayable"] = unplayable;
             hand.Add(entry);
