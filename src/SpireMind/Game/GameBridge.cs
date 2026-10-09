@@ -58,6 +58,8 @@ internal sealed class GameBridge : IGameBridge
                     return ActionResult.Fail($"'{actionId}' is no longer available on the {fresh.Screen} screen.");
 
                 var result = active.Screen.Execute(ctx, active.Node, actionId);
+                if (result.Ok && LeavesRoom(fresh, actionId))
+                    Latches.ProceededFrom = ctx.Run?.CurrentRoom;
                 if (result.Ok)
                     ModEntry.Log($"{fresh.Screen}: {actionId}");
                 else
@@ -70,4 +72,10 @@ internal sealed class GameBridge : IGameBridge
                 return ActionResult.Fail($"{ex.GetType().Name}: {ex.Message}");
             }
         });
+
+    /// <summary>A room's proceed button, or an event option labelled Leave.</summary>
+    private static bool LeavesRoom(GameSnapshot snapshot, string actionId) =>
+        actionId == "proceed"
+        || (snapshot.Screen == "event"
+            && snapshot.Actions.FirstOrDefault(a => a.Id == actionId)?.Label.StartsWith("Leave", StringComparison.Ordinal) == true);
 }

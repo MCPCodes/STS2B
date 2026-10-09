@@ -66,6 +66,8 @@ internal sealed class MapReader : IScreen
         string? waiting = null;
         if (CurrentVote(rs) is { } vote)
             waiting = $"waiting for teammates to vote on the map (you voted {Show(vote.Target)})";
+        else if (RoomUnfinished(ctx, rs) is { } unfinished)
+            waiting = $"the map was opened by hand while {unfinished}; close the map so the room can be finished";
         else if (!screen.IsTravelEnabled)
             waiting = "map open but travel not enabled (viewing only, or still animating)";
         else if (screen.Drawings.GetLocalDrawingMode() != DrawingMode.None)
@@ -99,6 +101,44 @@ internal sealed class MapReader : IScreen
         return new GameSnapshot { Screen = Name, AwaitingDecision = true, State = state, Actions = actions };
     }
 
+    /// <summary>
+    /// Why travelling now would abandon the current room, or null when it's done. The bot
+    /// opens the map only through a room's proceed button or an event's Leave (recorded in
+    /// <see cref="Latches.ProceededFrom"/>); a map opened by hand from the top bar must not
+    /// walk away from unclaimed rewards, a shop, a rest site or an event mid-way.
+    /// </summary>
+    private static string? RoomUnfinished(GameContext ctx, RunState rs)
+    {
+        var room = rs.CurrentRoom;
+        if (room is null || rs.VisitedMapCoords.Count == 0) return null; // act start: nothing to finish
+        if (ReferenceEquals(Latches.ProceededFrom, room)) return null;
+
+        switch (room.RoomType)
+        {
+            case RoomType.Map:
+                return null;
+            case RoomType.Monster or RoomType.Elite or RoomType.Boss:
+                if (ctx.InCombat) return "a fight is on";
+                // Rewards screens stay on the overlay stack under the map; any claimable button means loot left behind.
+                foreach (var b in Nodes.FindAll<NRewardButton>(NOverlayStack.Instance))
+                {
+                    if (Nodes.Alive(b) && b.IsEnabled) return "rewards are still unclaimed";
+                }
+                return null;
+            case RoomType.Event:
+                try { return RunManager.Instance.EventSynchronizer.GetLocalEvent()?.IsFinished == true ? null : "the event isn't finished"; }
+                catch { return "the event isn't finished"; }
+            case RoomType.RestSite:
+                return NRestSiteRoom.Instance?.ProceedButton is { IsEnabled: true } ? null : "no rest site option was chosen";
+            case RoomType.Shop:
+                return "in the shop";
+            case RoomType.Treasure:
+                return "in the treasure room";
+            default:
+                return null;
+        }
+    }
+
     public ActionResult Execute(GameContext ctx, Node? node, string actionId)
     {
         if (PotionActions.TryExecute(ctx, actionId, false, out var potionResult))
@@ -124,6 +164,8 @@ internal sealed class MapReader : IScreen
             return ActionResult.Fail("Map drawing mode is on; the game ignores map point clicks.");
         if (CurrentVote(rs) is { } vote)
             return ActionResult.Fail($"Already voted for {Show(vote.Target)}; waiting for teammates.");
+        if (RoomUnfinished(ctx, rs) is { } unfinished)
+            return ActionResult.Fail($"The current room isn't finished ({unfinished}).");
 
         MapView view;
         try

@@ -17,6 +17,13 @@ internal static class Latches
     /// <summary>Act index we already voted to leave via the proceed button.</summary>
     public static int ActVoteCastFor { get; set; } = -1;
 
+    /// <summary>
+    /// The room the bot itself left through a proceed button or an event's Leave. The map can
+    /// also be opened by hand from the top bar; travelling from there would walk away from
+    /// unclaimed rewards or an unfinished shop, so MapReader only travels once the room is done.
+    /// </summary>
+    public static object? ProceededFrom { get; set; }
+
     public static bool EndTurnAlreadyRequested(GameContext ctx)
     {
         if (ctx.Combat is null || ctx.MyCombat is null) return false;
@@ -35,6 +42,7 @@ internal static class Latches
         EndTurnRequestedFor = -1;
         EndTurnCombat = null;
         ActVoteCastFor = -1;
+        ProceededFrom = null;
         Clicks.Reset();
     }
 }
