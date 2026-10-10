@@ -107,7 +107,7 @@ public static class ModelPrices
     public static IReadOnlyDictionary<string, ModelPrice> Table { get; } = new Dictionary<string, ModelPrice>(StringComparer.OrdinalIgnoreCase)
     {
         ["claude-opus-5-5"] = new(Input: 4m, CacheWrite5m: 5m, CacheWrite1h: 8m, CacheRead: 0.20m, Output: 20m),
-        ["claude-sonnet-5-5"] = new(Input: 2m, CacheWrite5m: 2.5m, CacheWrite1h: 4m, CacheRead: 0.10m, Output: 10m),
+        ["claude-sonnet-5-5"] = new(Input: 2m, CacheWrite5m: 2.5m, CacheWrite1h: 4m, CacheRead: 0.20m, Output: 10m),
         ["claude-haiku-5-5"] = new(Input: 0.10m, CacheWrite5m: 0.125m, CacheWrite1h: 0.20m, CacheRead: 0.01m, Output: 0.50m)
         {
             LongPromptThreshold = 100_000,

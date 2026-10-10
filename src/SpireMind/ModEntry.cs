@@ -60,7 +60,9 @@ public static class ModEntry
             {
                 // The game loads mods with LoadFromAssemblyPath, so Location is the DLL's path (empty only for one loaded from bytes).
                 var location = typeof(ModEntry).Assembly.Location;
+                var server = _server;
                 BrainWiring.Start(chat, tools, waiter, () => game.IsMultiplayer, port,
+                    () => server.ExternalClientActive(TimeSpan.FromSeconds(30)),
                     location.Length > 0 ? System.IO.Path.GetDirectoryName(location) : null, Log, LogError);
             }
             catch (Exception ex) { LogError($"brain skipped: {ex}"); }

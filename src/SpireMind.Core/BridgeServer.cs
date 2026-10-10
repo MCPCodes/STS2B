@@ -8,6 +8,7 @@ namespace SpireMind.Core;
 /// <summary>
 /// Loopback-only HTTP server inside the game process.
 ///   POST /mcp     MCP endpoint for Claude Code
+///   POST /mcp/own the same endpoint for the Claude Code the mod starts itself (the subscription brain)
 ///   GET  /health  liveness and version
 ///   GET  /state   the current snapshot (handy with curl while debugging)
 ///   POST /act     {"action_id": "...", "version": n}, same as the act tool
@@ -28,6 +29,10 @@ public sealed class BridgeServer : IDisposable
     private readonly CancellationTokenSource _stop = new();
 
     public int Port { get; }
+
+    /// <summary>True while an MCP client on /mcp (not the mod's own Claude Code on /mcp/own) has a
+    /// tool call running or had one within <paramref name="window"/>.</summary>
+    public bool ExternalClientActive(TimeSpan window) => _mcp.ExternalClientActive(window);
 
     /// <summary>
     /// Saves a picture of the game's screen and returns where, for checking by eye what the
@@ -94,8 +99,8 @@ public sealed class BridgeServer : IDisposable
             var path = req.Url?.AbsolutePath.TrimEnd('/') ?? "";
             switch (req.HttpMethod, path)
             {
-                case ("POST", "/mcp"):
-                    var reply = await _mcp.HandleAsync(await ReadBody(req), _stop.Token);
+                case ("POST", "/mcp" or "/mcp/own"):
+                    var reply = await _mcp.HandleAsync(await ReadBody(req), external: path == "/mcp", _stop.Token);
                     if (reply is null)
                     {
                         res.StatusCode = 202;
@@ -107,7 +112,7 @@ public sealed class BridgeServer : IDisposable
                     }
                     return;
 
-                case (_, "/mcp"):
+                case (_, "/mcp" or "/mcp/own"):
                     // No server-initiated stream; the transport spec allows 405 here.
                     res.StatusCode = 405;
                     res.Headers["Allow"] = "POST";

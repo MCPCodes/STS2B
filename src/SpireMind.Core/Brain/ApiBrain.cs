@@ -90,6 +90,12 @@ public sealed class ApiBrain : IPlayBrain
     /// <summary>Said once in the game chat when the API can't be reached and the brain keeps retrying.</summary>
     public const string Retrying = "Can't reach Claude right now, retrying.";
 
+    /// <summary>Said instead of <see cref="Retrying"/> when the API answers 429; the API's own sentence follows.</summary>
+    public const string RateLimited = "Claude is rate limiting your API key, retrying. /model switches models.";
+
+    /// <summary>Said instead of <see cref="Retrying"/> when the API answers 529.</summary>
+    public const string Overloaded = "Claude is overloaded right now, retrying. /model switches models.";
+
     /// <summary>The stop line when another client's wait_for_decision replaced the brain's.</summary>
     public const string AnotherClient = "Another client is playing through the mod (Claude Code's /play?), so the API brain stopped.";
 
@@ -142,6 +148,8 @@ public sealed class ApiBrain : IPlayBrain
     private string? _conversationEffort;
     private int _endTurnsInRow;
     private int _cutOffsInRow;
+    private int _refusalsInRow;
+    private long? _waitShown; // the version of the decision the last wait_for_decision handed to the model
     private int _conversation;
     private int _turn;
     private int _transcribed;
@@ -233,6 +241,11 @@ public sealed class ApiBrain : IPlayBrain
     /// <summary>The pause between local waits that ended without a decision, in case the game
     /// returns at once.</summary>
     public TimeSpan LocalWaitPause { get; init; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>How long a wait_for_decision is held locally when the model repeats it on a decision
+    /// the last wait already handed over, so a model that waits on a pending decision (the human
+    /// said "hold on" without /pause, co-op) costs one request per hold instead of one every few seconds.</summary>
+    public TimeSpan RepeatWaitHold { get; init; } = TimeSpan.FromSeconds(60);
 
     /// <summary>How often get_state is polled outside a run.</summary>
     public TimeSpan IdlePollInterval { get; init; } = TimeSpan.FromSeconds(5);
@@ -420,6 +433,8 @@ public sealed class ApiBrain : IPlayBrain
             _inRun = false;
             _newRunPending = false;
             _cutOffsInRow = 0;
+            _refusalsInRow = 0;
+            _waitShown = null;
 
             // Nothing is sent until a run is in progress or the human writes.
             await IdleUntilPlayAsync(ct);
@@ -481,7 +496,18 @@ public sealed class ApiBrain : IPlayBrain
         _conversationEffort = effort;
         var request = BuildRequest(model, effort, settings.MaxTokens ?? MaxTokensFor(effort));
         var sentAt = _clock();
-        if (await SendAsync(request, ct) is not { } response)
+        ClaudeResponse? sent;
+        try
+        {
+            sent = await SendAsync(request, ct);
+        }
+        catch (SettingsChangedException)
+        {
+            // /model or /effort while the request was being resent: the next step builds a new one.
+            Log("brain: the model or effort changed while retrying; sending a new request");
+            return;
+        }
+        if (sent is not { } response)
         {
             // The API said the prompt is over the context window.
             if (_messages.Count <= 1)
@@ -509,12 +535,23 @@ public sealed class ApiBrain : IPlayBrain
         switch (stopReason)
         {
             case "refusal":
-                throw new StopBrainException(BrainStopReason.Error, "Claude declined to continue (refusal), so the API brain stopped.");
+                // A safety classifier declined (they also fire on harmless requests). The refused
+                // turn can't be continued, so try once from a fresh conversation, then give up.
+                var category = Str(response.Raw["stop_details"]?["category"]) ?? "no category";
+                _refusalsInRow++;
+                Log($"brain: Claude declined the request (refusal, {category}), {_refusalsInRow} in a row");
+                if (_refusalsInRow > 1)
+                    throw new StopBrainException(BrainStopReason.Error,
+                        $"Claude declined to continue twice in a row (refusal, {category}), so the API brain stopped.");
+                StartConversation(Refreshed);
+                return;
             case "model_context_window_exceeded":
                 Log("brain: the context window is full; starting a fresh conversation");
                 StartConversation(Refreshed);
                 return;
         }
+
+        _refusalsInRow = 0;
 
         // Counted across fresh conversations too: a refresh doesn't make the next reply fit.
         if (stopReason == "max_tokens")
@@ -543,6 +580,7 @@ public sealed class ApiBrain : IPlayBrain
                 blocks.Add(ToolResult(use.Id,
                     new JsonObject { ["error"] = "Not run: your reply hit the output limit before this call was complete." }, isError: true));
             blocks.Add(TextBlock(CutOff));
+            _waitShown = null; // whatever it calls next, it isn't waiting on purpose
             AddUser(blocks);
             return;
         }
@@ -551,7 +589,14 @@ public sealed class ApiBrain : IPlayBrain
         {
             if (toolUses.Any(t => ForwardTools.Contains(t.Name)))
                 _endTurnsInRow = 0;
-            AddUser(await RunToolsAsync(toolUses, ct));
+            var results = await RunToolsAsync(toolUses, ct);
+            // Sonnet 5.5 and Haiku 5.5 can read user text inside a tool_result as an injection
+            // attempt, so the human's lines also go in a text block after the last tool_result.
+            // _unseenChat was cleared after the response, so it holds this round's messages only.
+            if (_unseenChat.Count > 0)
+                results.Add(TextBlock("The human wrote in the game chat (the same lines as chat.messages above):\n" +
+                                      new JsonArray(_unseenChat.Select(m => m.DeepClone()).ToArray()).ToJsonString(ModelJson)));
+            AddUser(results);
             return;
         }
 
@@ -572,6 +617,7 @@ public sealed class ApiBrain : IPlayBrain
         // A decision is waiting: a short nudge the first time.
         if (_endTurnsInRow == 1 && IsTrue(_lastSnapshot?["awaiting_decision"]))
         {
+            _waitShown = null; // the nudge asks for a wait_for_decision, which must answer at once
             AddUser(new JsonArray(TextBlock(KeepPlaying)));
             return;
         }
@@ -650,6 +696,7 @@ public sealed class ApiBrain : IPlayBrain
         _unseenChat.Clear();
         _conversationBaseTokens = null;
         _endTurnsInRow = 0;
+        _waitShown = null;
         _conversation++;
         _turn = 0;
         _transcribed = 0;
@@ -709,6 +756,7 @@ public sealed class ApiBrain : IPlayBrain
         while (true)
         {
             string problem;
+            var line = Retrying;
             var wait = pause;
             try
             {
@@ -734,6 +782,12 @@ public sealed class ApiBrain : IPlayBrain
                         throw Stop(BrainStopReason.SpendLimit, ex);
                     case ClaudeErrorKind.Network or ClaudeErrorKind.Overloaded or ClaudeErrorKind.Server or ClaudeErrorKind.RateLimited:
                         problem = ex.Message;
+                        line = ex.Kind switch
+                        {
+                            ClaudeErrorKind.RateLimited => $"{RateLimited} The API says: \"{Shorten(ex.ApiMessage, 160)}\"",
+                            ClaudeErrorKind.Overloaded => Overloaded,
+                            _ => Retrying,
+                        };
                         // A rate limit that asked for a longer wait than the client would make.
                         if (ex.RetryAfter is { } asked && asked > wait)
                             wait = asked;
@@ -756,11 +810,17 @@ public sealed class ApiBrain : IPlayBrain
             Log(Invariant($"brain: can't reach Claude ({problem}); retrying in {wait.TotalSeconds:0} s"));
             if (!announced)
             {
-                Announce(Retrying);
+                Announce(line);
                 announced = true;
             }
             await _delay(wait, ct);
             pause = pause * 2 > RetryMaxDelay ? RetryMaxDelay : pause * 2;
+
+            // /model or /effort meanwhile: this request would go on asking the old model.
+            var now = _settings();
+            if (BrainSettings.ResolveModel(now.Model) != _conversationModel
+                || (string.IsNullOrWhiteSpace(now.Effort) ? null : now.Effort) != _conversationEffort)
+                throw new SettingsChangedException();
         }
 
         // The exception's summary ("The API credit has run out.") is the line for the chat.
@@ -781,6 +841,8 @@ public sealed class ApiBrain : IPlayBrain
         foreach (var use in toolUses)
         {
             ToolOutcome outcome;
+            if (use.Name is "act" or "act_sequence")
+                _waitShown = null;
             if (use.Name == "wait_for_decision")
                 outcome = await WaitLocallyAsync(ct);
             else if (_notes.Handles(use.Name))
@@ -800,12 +862,24 @@ public sealed class ApiBrain : IPlayBrain
     /// </summary>
     private async Task<ToolOutcome> WaitLocallyAsync(CancellationToken ct)
     {
+        // A decision this conversation's last wait already handed over is held back for up to
+        // RepeatWaitHold: the model is waiting for something to change, and asking it again every
+        // few seconds would be a paid loop. A new version, a chat message or an error ends the hold.
+        var shown = _waitShown;
+        var held = TimeSpan.Zero;
         while (true)
         {
             var outcome = await CallHostAsync("wait_for_decision", new JsonObject { ["timeout_seconds"] = LocalWaitSeconds }, ct);
-            if (outcome.IsError || IsTrue(outcome.Payload["awaiting_decision"]) || HasChatMessages(outcome.Payload))
+            var decision = !outcome.IsError && IsTrue(outcome.Payload["awaiting_decision"]);
+            var version = outcome.Payload["version"] is JsonValue v && v.TryGetValue<long>(out var n) ? n : (long?)null;
+            var repeated = decision && shown is not null && version == shown && held < RepeatWaitHold;
+            if (outcome.IsError || HasChatMessages(outcome.Payload) || (decision && !repeated))
+            {
+                _waitShown = decision ? version : null;
                 return outcome;
+            }
             await _delay(LocalWaitPause, ct);
+            held += LocalWaitPause;
         }
     }
 
@@ -931,6 +1005,8 @@ public sealed class ApiBrain : IPlayBrain
         }
         entry["new_messages"] = new JsonArray(sent.Skip(_transcribed).Select(m => m?.DeepClone()).ToArray());
         entry["stop_reason"] = response.StopReason;
+        if (response.Raw["stop_details"] is { } details)
+            entry["stop_details"] = details.DeepClone();
         entry["content"] = response.Content.DeepClone();
         entry["usage"] = response.UsageJson?.DeepClone();
         entry["cost_usd"] = cost;
@@ -981,6 +1057,11 @@ public sealed class ApiBrain : IPlayBrain
         node is JsonValue v && v.TryGetValue<bool>(out var b) && b;
 
     private static string Invariant(FormattableString text) => text.ToString(CultureInfo.InvariantCulture);
+
+    private static string Shorten(string text, int max) => text.Length <= max ? text : text[..(max - 3)] + "...";
+
+    // /model or /effort changed while SendAsync was resending a request.
+    private sealed class SettingsChangedException : Exception;
 
     private sealed class StopBrainException(BrainStopReason reason, string message) : Exception(message)
     {

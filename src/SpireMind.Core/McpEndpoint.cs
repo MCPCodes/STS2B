@@ -24,6 +24,11 @@ public sealed class McpEndpoint
     /// <summary>Tool calls in progress, by their JSON-RPC id as JSON text.</summary>
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _calls = new();
 
+    // Tool calls from clients other than the mod's own Claude Code: how many are running, and
+    // when (UTC ticks) the last one started or ended; 0 when there never was one.
+    private int _externalCalls;
+    private long _externalLastTicks;
+
     public McpEndpoint(BotTools tools, string serverVersion)
     {
         _tools = tools;
@@ -34,7 +39,17 @@ public sealed class McpEndpoint
     /// Handle one POST body. Returns the JSON to send back, or null when the body held only
     /// notifications/responses (the transport then answers 202 Accepted with no body).
     /// </summary>
-    public async Task<JsonNode?> HandleAsync(string body, CancellationToken ct)
+    public Task<JsonNode?> HandleAsync(string body, CancellationToken ct) => HandleAsync(body, external: true, ct);
+
+    /// <summary>True while a client other than the mod's own Claude Code has a tool call running,
+    /// or had one within <paramref name="window"/>: somebody else is playing through the mod.</summary>
+    public bool ExternalClientActive(TimeSpan window) =>
+        Volatile.Read(ref _externalCalls) > 0
+        || (Interlocked.Read(ref _externalLastTicks) is var last and > 0 && DateTime.UtcNow.Ticks - last < window.Ticks);
+
+    /// <param name="external">False for the mod's own Claude Code (the subscription brain), whose
+    /// calls don't count for <see cref="ExternalClientActive"/>.</param>
+    public async Task<JsonNode?> HandleAsync(string body, bool external, CancellationToken ct)
     {
         JsonNode? parsed;
         try
@@ -51,16 +66,16 @@ public sealed class McpEndpoint
             var replies = new JsonArray();
             foreach (var item in batch)
             {
-                var reply = await HandleMessageAsync(item as JsonObject, ct);
+                var reply = await HandleMessageAsync(item as JsonObject, external, ct);
                 if (reply is not null) replies.Add(reply);
             }
             return replies.Count > 0 ? replies : null;
         }
 
-        return await HandleMessageAsync(parsed as JsonObject, ct);
+        return await HandleMessageAsync(parsed as JsonObject, external, ct);
     }
 
-    private async Task<JsonNode?> HandleMessageAsync(JsonObject? msg, CancellationToken ct)
+    private async Task<JsonNode?> HandleMessageAsync(JsonObject? msg, bool external, CancellationToken ct)
     {
         if (msg is null)
             return ErrorResponse(null, -32600, "Invalid request");
@@ -88,7 +103,7 @@ public sealed class McpEndpoint
             case "tools/list":
                 return Result(id, ListTools());
             case "tools/call":
-                return await CallToolAsync(id, @params, ct);
+                return await CallToolAsync(id, @params, external, ct);
             default:
                 return ErrorResponse(id, -32601, $"Method not found: {method}");
         }
@@ -124,8 +139,13 @@ public sealed class McpEndpoint
         return new JsonObject { ["tools"] = list };
     }
 
-    private async Task<JsonObject> CallToolAsync(JsonNode id, JsonObject p, CancellationToken ct)
+    private async Task<JsonObject> CallToolAsync(JsonNode id, JsonObject p, bool external, CancellationToken ct)
     {
+        if (external)
+        {
+            Interlocked.Increment(ref _externalCalls);
+            Interlocked.Exchange(ref _externalLastTicks, DateTime.UtcNow.Ticks);
+        }
         var name = (p["name"] as JsonValue)?.GetValue<string>() ?? "";
         var args = p["arguments"] as JsonObject ?? new JsonObject();
 
@@ -146,6 +166,11 @@ public sealed class McpEndpoint
         finally
         {
             _calls.TryRemove(new KeyValuePair<string, CancellationTokenSource>(key, call));
+            if (external)
+            {
+                Interlocked.Exchange(ref _externalLastTicks, DateTime.UtcNow.Ticks);
+                Interlocked.Decrement(ref _externalCalls);
+            }
         }
 
         return Result(id, new JsonObject

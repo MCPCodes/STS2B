@@ -121,11 +121,18 @@ public sealed class SubscriptionBrain : IPlayBrain, IDisposable
     // Folders put first on the child's PATH after the binary's own, for node and helpers.
     private static readonly string[] SystemPath = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 
-    // How Claude Code says the subscription ran out. Only searched in the result, assistant
+    // How Claude Code says the subscription ran out. Only searched in an error result, assistant
     // text and stderr: tool results carry game text, where "limit" means something else.
+    // Claude Code 2.1.287 says "You've hit your session limit · resets 3pm (Europe/Berlin)", with
+    // "weekly limit", "Opus limit", "Sonnet limit", "Fable limit", "usage limit" or just "limit"
+    // in that place, and "You're out of usage credits".
     private static readonly Regex LimitPattern = new(
-        @"usage limit|limit reached|rate[ _-]?limit|out of extra usage|hit your (?:usage )?limit",
+        @"usage limit|limit reached|rate[ _-]?limit|out of (?:extra usage|usage credits)|(?:hit|reached) your (?:[\w'’-]+ ){0,3}limit",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    // Claude Code's sentence for a server that is throttling for a moment, which names the usage
+    // limit only to say it isn't one: "Server is temporarily limiting requests (not your usage limit)".
+    private const string NotTheLimit = "not your usage limit";
 
     // How Claude Code says a --resume id is unknown.
     private static readonly Regex NotFoundPattern = new(
@@ -235,7 +242,7 @@ public sealed class SubscriptionBrain : IPlayBrain, IDisposable
     /// <summary>The <c>--mcp-config</c> JSON: the mod's endpoint on <paramref name="port"/> as the only server.</summary>
     public static string McpConfig(int port) =>
         "{\"mcpServers\":{\"" + McpServerName + "\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:"
-        + port.ToString(CultureInfo.InvariantCulture) + "/mcp\"}}}";
+        + port.ToString(CultureInfo.InvariantCulture) + "/mcp/own\"}}}";
 
     /// <summary>Start playing on a background task. False when already running. Each start
     /// checks the setup again and begins a new Claude Code session once a run is in progress.</summary>
@@ -843,7 +850,9 @@ public sealed class SubscriptionBrain : IPlayBrain, IDisposable
 
         Log(Invariant($"claude: result {subtype}, is_error {(isError ? "true" : "false")}, {turns} turns, {seconds:0.0} s: {Cut(text, LogCut)}"));
         watch.Result(isError);
-        watch.SawLimit(text, inResult: true);
+        // A result that isn't an error is the model's own last message, where these words can be game talk.
+        if (isError)
+            watch.SawLimit(text, inResult: true);
         watch.SawConversationLost(text);
     }
 
@@ -874,6 +883,8 @@ public sealed class SubscriptionBrain : IPlayBrain, IDisposable
         // Remembers the sentence a limit pattern matched in. True when one did.
         public bool SawLimit(string text, bool inResult)
         {
+            if (text.Contains(NotTheLimit, StringComparison.OrdinalIgnoreCase))
+                return false;
             var match = LimitPattern.Match(text);
             if (!match.Success)
                 return false;

@@ -39,6 +39,12 @@ public sealed partial class BrainController
     /// <summary>Said when a run starts on the API credit after the API failed during the last one.</summary>
     public const string BackOnApiLine = "New run, so back on your API credit.";
 
+    /// <summary>The reply to /start while another MCP client (Claude Code's /play) is calling the game tools.</summary>
+    public const string OtherClientLine = "Claude Code is playing through the mod right now. Stop it there, then type /start again.";
+
+    /// <summary>Added to the /effort reply for xhigh and max while the API brain is the one that uses it.</summary>
+    public const string HighEffortCaution = " Replies are capped at 16,000 tokens including thinking, so a hard turn may be cut off at this level.";
+
     private const string NoKeyReason = "there's no API key";
     private const string BudgetReason = "this month's API budget is used up";
     private const string ZeroBudgetReason = "the monthly API budget is set to $0";
@@ -54,6 +60,7 @@ public sealed partial class BrainController
     private readonly Action<string> _log;
     private readonly Func<DateTime> _clock;
     private readonly Func<TimeSpan, CancellationToken, Task> _delay;
+    private readonly Func<bool>? _otherClient;
 
     private readonly object _gate = new();
     private readonly List<IPlayBrain> _live = []; // started and not stopped yet, the current one or old ones
@@ -93,6 +100,9 @@ public sealed partial class BrainController
     /// <param name="log">The mod's log. Never gets the key. Exceptions it throws are swallowed.</param>
     /// <param name="clock">Time source for tests; defaults to <see cref="DateTime.UtcNow"/>.</param>
     /// <param name="delay">The poll loop's wait, for tests; defaults to <see cref="Task.Delay(TimeSpan, CancellationToken)"/>.</param>
+    /// <param name="otherClient">True while an MCP client other than the mod's own Claude Code is
+    /// calling the game tools (a /play session by hand). /start then refuses, since two players
+    /// would act on the same decisions and both be billed. Must return at once; null means never.</param>
     public BrainController(
         Func<BrainSettings> loadSettings,
         Action<BrainSettings> saveSettings,
@@ -103,8 +113,10 @@ public sealed partial class BrainController
         ChatHub chat,
         Action<string>? log = null,
         Func<DateTime>? clock = null,
-        Func<TimeSpan, CancellationToken, Task>? delay = null)
+        Func<TimeSpan, CancellationToken, Task>? delay = null,
+        Func<bool>? otherClient = null)
     {
+        _otherClient = otherClient;
         _loadSettings = loadSettings;
         _saveSettings = saveSettings;
         _createApi = createApi;
@@ -168,7 +180,11 @@ public sealed partial class BrainController
         foreach (var warning in settings.Warnings)
             Log($"brain: {warning}");
         if (settings.Autostart)
+        {
             Log($"brain: autostart is on. {StartChosen(settings, fromCommand: false)}");
+            // Nobody typed /start in this session, so the chat says who plays when the first run starts.
+            lock (_gate) _announceStart = true;
+        }
         EnsurePolling();
     }
 
@@ -232,6 +248,12 @@ public sealed partial class BrainController
 
     private string StartCommand(string from, string args)
     {
+        // Before anything is saved: a refused /start must not leave autostart on.
+        if (Playing == BrainKind.None && OtherClient())
+        {
+            Log($"brain: /start by {from} refused: another MCP client is calling the game tools");
+            return OtherClientLine;
+        }
         var settings = Reload(Settings, keepAutostart: false) with { Autostart = true };
         var saved = Save(settings);
         lock (_gate) _settings = settings;
@@ -258,6 +280,8 @@ public sealed partial class BrainController
             _announceStart = false;
         }
         Log($"brain: /stop by {from}");
+        // Ends an act_sequence or wait_for_decision still running for a client that is about to go.
+        _chat.NoteStop();
 
         var bot = BotName;
         if (brain is null)
@@ -346,7 +370,7 @@ public sealed partial class BrainController
         // Claude Code isn't told an effort, so only the API brain uses it.
         return subscription
             ? $"Effort set to {effort}. Only the API brain uses it, so Claude Code playing now isn't affected.{saved}"
-            : $"Effort set to {effort}. It applies from the next request.{saved}";
+            : $"Effort set to {effort}. It applies from the next request.{(effort is "xhigh" or "max" ? HighEffortCaution : "")}{saved}";
     }
 
     // Starts the brain the settings call for unless one plays, and says what happened: the
@@ -704,6 +728,12 @@ public sealed partial class BrainController
                 _kind = BrainKind.None;
                 generation = ++_generation;
             }
+            else if (_announceStart)
+            {
+                // A brain already in control (the API brain idling since the game started) that
+                // nobody started with /start in this session: say that it plays, once.
+                line = PlayingLine(bot, _kind, reason, settings, spent);
+            }
             _announceStart = false;
         }
 
@@ -838,6 +868,16 @@ public sealed partial class BrainController
     }
 
     private string BotName => _chat.BotName ?? "The bot";
+
+    private bool OtherClient()
+    {
+        try { return _otherClient?.Invoke() == true; }
+        catch (Exception ex)
+        {
+            Log($"brain: couldn't tell whether another client is playing ({ex.GetType().Name}: {ex.Message})");
+            return false;
+        }
+    }
 
     private static string Source(BrainKind kind) => kind == BrainKind.Api ? "API credit" : "Claude subscription";
 

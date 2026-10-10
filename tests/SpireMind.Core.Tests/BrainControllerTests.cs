@@ -648,17 +648,69 @@ public class BrainControllerTests
     }
 
     [Fact]
-    public async Task Initialize_with_autostart_and_no_key_waits_for_a_run_quietly()
+    public async Task Initialize_with_autostart_and_no_key_waits_for_a_run_and_says_who_plays_once()
     {
         using var rig = new Rig { Key = null };
         rig.Config = rig.Config with { Autostart = true };
 
         await rig.Init();
         Assert.Empty(rig.SubBrains);
+        Assert.Empty(rig.Chat.LinesSince(0));
         await rig.Poll("map");
 
         Assert.True(Assert.Single(rig.SubBrains).IsRunning);
+        Assert.Equal([NoKeyPlaying], rig.LinesSince(0));
+    }
+
+    [Fact]
+    public async Task Autostart_says_who_plays_when_the_first_run_of_the_session_starts()
+    {
+        using var rig = new Rig();
+        rig.Config = rig.Config with { Autostart = true };
+
+        await rig.Init(); // the API brain idles at the menu: nothing in the chat yet
+        Assert.True(Assert.Single(rig.ApiBrains).IsRunning);
         Assert.Empty(rig.Chat.LinesSince(0));
+
+        await rig.Poll("map"); // Mark clicks Continue
+        Assert.Equal(["Ironclad is playing on your API credit (Opus 5.5, high effort, $0.00 of $200 spent this month). /stop to take over."],
+            rig.LinesSince(0));
+
+        // Once per game session: the next run starts quietly.
+        var mark = rig.Mark();
+        await rig.Poll("game_over");
+        await rig.Poll("map");
+        Assert.Empty(rig.LinesSince(mark));
+        Assert.Single(rig.ApiBrains);
+    }
+
+    [Fact]
+    public async Task Start_is_refused_while_another_client_plays_through_the_mod()
+    {
+        using var rig = new Rig { OtherClient = true };
+        await rig.Init();
+        await rig.Poll("map");
+
+        Assert.Equal(BrainController.OtherClientLine, rig.Post("/start"));
+        Assert.Empty(rig.ApiBrains);
+        Assert.Empty(rig.Saved); // autostart stays off
+        Assert.False(rig.Controller.Settings.Autostart);
+
+        rig.OtherClient = false;
+        Assert.StartsWith("Ironclad is playing on your API credit", rig.Post("/start"));
+    }
+
+    [Fact]
+    public async Task Stop_tells_running_tool_calls()
+    {
+        using var rig = new Rig();
+        await rig.Init();
+        rig.Post("/start");
+        var before = rig.Chat.Stops;
+
+        rig.Post("/stop");
+
+        Assert.Equal(before + 1, rig.Chat.Stops);
     }
 
     [Fact]
@@ -788,7 +840,7 @@ public class BrainControllerTests
         await rig.Init();
 
         Assert.Equal("The effort is high. Options: low, medium, high, xhigh, max.", rig.Post("/effort"));
-        Assert.Equal("Effort set to max. It applies from the next request.", rig.Post("/effort MAX"));
+        Assert.Equal("Effort set to max. It applies from the next request." + BrainController.HighEffortCaution, rig.Post("/effort MAX"));
         Assert.Equal("max", rig.Controller.Settings.Effort);
         Assert.Equal("max", rig.Saved[^1].Effort);
         Assert.False(rig.Saved[^1].Autostart);
@@ -864,6 +916,7 @@ file sealed class Rig : IDisposable
     public TimeSpan StopWaitLimit { get; init; } = TimeSpan.FromSeconds(10);
     public bool SaveThrows { get; init; }
     public volatile bool ScreenThrows;
+    public volatile bool OtherClient;
     public TaskCompletionSource PollCancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     /// <summary>What config.json holds (never a key).</summary>
@@ -952,7 +1005,8 @@ file sealed class Rig : IDisposable
                 PollCancelled.TrySetResult();
                 throw;
             }
-        })
+        },
+        otherClient: () => OtherClient)
     {
         MaxRestartsPerRun = MaxRestartsPerRun,
         StopWaitLimit = StopWaitLimit,

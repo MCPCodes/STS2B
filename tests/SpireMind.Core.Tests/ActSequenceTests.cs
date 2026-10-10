@@ -425,6 +425,38 @@ public class ActSequenceTests
     }
 
     [Fact]
+    public void Stops_when_the_bot_is_stopped_mid_sequence()
+    {
+        // /stop while Claude Code's act_sequence runs: the call outlives its client, so it has to end itself.
+        var game = new ScriptedFight("Strike", "Defend", "Defend");
+        ChatHub? hub = null;
+        game.OnExecute = _ => { if (game.Executed.Count == 0) hub!.NoteStop(); };
+        var (tools, chat) = Build(game);
+        hub = chat;
+
+        var outcome = Sequence(tools, Version(tools), "play:0>e0", "play:1", "play:2", "end_turn");
+
+        Assert.Equal(["play:0>e0"], game.Executed);
+        Assert.Equal("The bot was stopped with /stop.", Stopped(outcome));
+        Assert.Equal(["play:1", "play:2", "end_turn"], NotRun(outcome));
+    }
+
+    [Fact]
+    public async Task A_wait_left_behind_ends_when_the_bot_is_stopped()
+    {
+        var game = new ScriptedFight("Strike");
+        var (tools, chat) = Build(game);
+        chat.PostFromHuman("Mark", "/pause"); // paused: the wait holds until a message, the timeout, or a stop
+        var wait = tools.CallAsync("wait_for_decision", new JsonObject { ["timeout_seconds"] = 240 }, CancellationToken.None);
+        await Task.Delay(100);
+        Assert.False(wait.IsCompleted);
+
+        chat.NoteStop();
+
+        await wait.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
     public void Stops_when_paused_mid_sequence()
     {
         var game = new ScriptedFight("Strike", "Defend");

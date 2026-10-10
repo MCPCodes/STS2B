@@ -36,7 +36,7 @@ public class SubscriptionBrainTests
             "-p", "/play the whole run",
             "--session-id", id,
             "--strict-mcp-config",
-            "--mcp-config", "{\"mcpServers\":{\"spiremind\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:8765/mcp\"}}}",
+            "--mcp-config", "{\"mcpServers\":{\"spiremind\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:8765/mcp/own\"}}}",
             "--tools", "Read,Edit,Write,ToolSearch",
             "--permission-mode", "dontAsk",
             "--allowedTools", "mcp__spiremind", "mcp__spiremind__*", $"Edit(/{rig.Repo}/runs/**)", $"Edit(/{rig.Repo}/strategy/**)",
@@ -537,6 +537,72 @@ public class SubscriptionBrainTests
         Assert.Equal([message], rig.Announced);
         Assert.Single(rig.Launcher.Sessions);
         Assert.Equal(1, rig.InRunCalls);
+    }
+
+    [Theory]
+    // The sentences Claude Code 2.1.287 builds for a rejected request ("You've hit your <name><reset>").
+    [InlineData("You've hit your session limit · resets 3pm (Europe/Berlin)")]
+    [InlineData("You've hit your weekly limit · resets Oct 14, 9am (Europe/Berlin) · progress saved")]
+    [InlineData("You've hit your Opus limit · resets Oct 14, 9am (Europe/Berlin)")]
+    [InlineData("You've hit your usage limit · resets 3pm (Europe/Berlin)")]
+    [InlineData("You're out of usage credits · resets 3pm (Europe/Berlin)")]
+    public async Task The_limit_sentences_of_this_Claude_Code_stop_after_one_session(string sentence)
+    {
+        using var rig = new SubRig();
+        rig.Launcher.Then(c =>
+        {
+            var assistant = (JsonObject)JsonNode.Parse(Assistant(Text(sentence)))!;
+            assistant["error"] = "rate_limit";
+            c.Out(assistant.ToJsonString());
+            var result = (JsonObject)JsonNode.Parse(Result("success", true, sentence))!;
+            result["api_error_status"] = 429;
+            c.Out(result.ToJsonString());
+            c.Exit(1);
+        });
+
+        rig.Brain.Start();
+        var (reason, message) = await rig.Stopped.Task.WaitAsync(Guard);
+
+        Assert.Equal(BrainStopReason.Error, reason);
+        Assert.Equal($"{SubscriptionBrain.UsageLimit} Claude Code says: \"{sentence}\"", message);
+        Assert.Equal([message], rig.Announced);
+        Assert.Single(rig.Launcher.Sessions);
+    }
+
+    [Fact]
+    public async Task A_passing_server_throttle_is_not_the_usage_limit()
+    {
+        using var rig = new SubRig();
+        const string sentence = "API Error: Server is temporarily limiting requests (not your usage limit) · this may be a temporary capacity issue. If it persists, check https://status.claude.com.";
+        rig.Launcher.Then(c =>
+        {
+            c.Out(Assistant(Text(sentence)));
+            c.Out(Result("success", true, sentence));
+            c.Exit(1);
+        });
+        rig.Brain.Start();
+        await rig.Launcher.Running.Task.WaitAsync(Guard);
+
+        Assert.Equal(2, rig.Launcher.Sessions.Length); // resumed, not stopped
+        Assert.Empty(rig.Announced);
+        Assert.True(rig.Brain.IsRunning);
+    }
+
+    [Fact]
+    public async Task Limit_words_in_a_successful_last_message_do_not_stop_it()
+    {
+        using var rig = new SubRig();
+        rig.Launcher.Then(c =>
+        {
+            c.Out(Assistant(Text("Hand limit reached, so I held the potion. Stopping here.")));
+            c.Out(Result("success", false, "Hand limit reached, so I held the potion. Stopping here."));
+            c.Exit(0);
+        });
+        rig.Brain.Start();
+        await rig.Launcher.Running.Task.WaitAsync(Guard);
+
+        Assert.Equal(2, rig.Launcher.Sessions.Length);
+        Assert.Empty(rig.Announced);
     }
 
     [Fact]

@@ -116,6 +116,94 @@ public class ApiBrainTests
     }
 
     [Fact]
+    public async Task A_wait_repeated_on_the_same_decision_is_held_locally()
+    {
+        using var rig = new Rig();
+        var waits = 0;
+        // The decision stays at version 7 for 50 local waits, then the game moves on to version 8.
+        rig.Host.Handler = (name, _, _) => Task.FromResult(name == "wait_for_decision"
+            ? Outcome(Snap("combat", true, version: ++waits <= 50 ? 7 : 8))
+            : Outcome(Snap("combat", true, version: 7)));
+        rig.Api
+            .Then(Reply("tool_use", null, ToolUse("toolu_a", "wait_for_decision")))
+            .Then(Reply("tool_use", null, ToolUse("toolu_b", "wait_for_decision")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        // The first wait hands version 7 over at once; the second is held until version 8.
+        Assert.Equal(3, rig.Api.Count);
+        Assert.Equal(51, waits);
+        var second = JsonNode.Parse(rig.Api[2]["messages"]![4]!["content"]![0]!["content"]!.GetValue<string>())!;
+        Assert.Equal(8, second["version"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task A_held_wait_gives_the_same_decision_back_after_the_hold()
+    {
+        using var rig = new Rig();
+        var waits = 0;
+        rig.Host.Handler = (name, _, _) =>
+        {
+            if (name == "wait_for_decision") waits++;
+            return Task.FromResult(Outcome(Snap("combat", true, version: 7)));
+        };
+        rig.Api
+            .Then(Reply("tool_use", null, ToolUse("toolu_a", "wait_for_decision")))
+            .Then(Reply("tool_use", null, ToolUse("toolu_b", "wait_for_decision")))
+            .Then(Reply("tool_use", null, ToolUse("toolu_c", "act", new JsonObject { ["action_id"] = "end_turn", ["version"] = 7 })))
+            .Then(Reply("tool_use", null, ToolUse("toolu_d", "wait_for_decision")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        // 1 (first wait) + 61 (held for 60 one-second pauses) + 1 (after an act the next wait isn't a repeat).
+        Assert.Equal(63, waits);
+        Assert.Equal(60, rig.Delays.Count(d => d == TimeSpan.FromSeconds(1)));
+    }
+
+    [Fact]
+    public async Task The_wait_the_nudge_asks_for_is_not_held()
+    {
+        using var rig = new Rig();
+        var waits = 0;
+        rig.Host.Handler = (name, _, _) =>
+        {
+            if (name == "wait_for_decision") waits++;
+            return Task.FromResult(Outcome(Snap("combat", true, version: 7)));
+        };
+        rig.Api
+            .Then(Reply("tool_use", null, ToolUse("toolu_a", "wait_for_decision")))
+            .Then(Reply("end_turn", null, new JsonObject { ["type"] = "text", ["text"] = "Thinking about Bash." }))
+            .Then(Reply("tool_use", null, ToolUse("toolu_b", "wait_for_decision")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(2, waits);
+        Assert.DoesNotContain(rig.Delays, d => d == TimeSpan.FromSeconds(1));
+    }
+
+    [Fact]
+    public async Task Chat_from_a_tool_result_also_goes_in_a_text_block_after_the_results()
+    {
+        using var rig = new Rig();
+        rig.Host.Handler = (name, _, _) => Task.FromResult(name == "act"
+            ? Outcome(WithChat(Snap("combat", true, version: 8), "Ironclad, take the elite"))
+            : Outcome(Snap("combat", true, version: 7)));
+        rig.Api.Then(Reply("tool_use", null,
+            ToolUse("toolu_1", "act", new JsonObject { ["action_id"] = "play:0>e0", ["version"] = 7 }),
+            ToolUse("toolu_2", "get_state")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        var blocks = rig.Api[1]["messages"]![2]!["content"]!.AsArray();
+        Assert.Equal(["tool_result", "tool_result", "text"], blocks.Select(b => b!["type"]!.GetValue<string>()));
+        Assert.Contains("Ironclad, take the elite", blocks[2]!["text"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task Wait_for_decision_returns_early_for_chat()
     {
         using var rig = new Rig();
@@ -397,9 +485,49 @@ public class ApiBrainTests
         var first = rig.Api[0].ToJsonString();
         Assert.All(Enumerable.Range(0, 7), i => Assert.Equal(first, rig.Api[i].ToJsonString()));
         Assert.Equal([30, 60, 120, 240, 300, 300], rig.Delays.Where(d => d >= TimeSpan.FromSeconds(30)).Select(d => (int)d.TotalSeconds));
-        Assert.Equal([ApiBrain.Retrying], rig.Announced);
+        Assert.Equal([ApiBrain.Overloaded], rig.Announced);
         Assert.True(rig.Brain.IsRunning);
         Assert.False(rig.Stopped.Task.IsCompleted);
+    }
+
+    [Fact]
+    public async Task A_rate_limit_is_named_in_the_chat_with_the_api_s_own_sentence()
+    {
+        using var rig = new Rig();
+        rig.Api.Then(new ClaudeApiException(ClaudeErrorKind.RateLimited, 429, "rate_limit_error",
+            "This request would exceed your organization's rate limit of 8,000 output tokens per minute", "req_1", attempts: 5));
+        rig.Api.Then(Reply("tool_use", null, ToolUse("toolu_1", "get_state")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        var line = Assert.Single(rig.Announced);
+        Assert.StartsWith(ApiBrain.RateLimited, line);
+        Assert.Contains("8,000 output tokens per minute", line);
+    }
+
+    [Fact]
+    public async Task A_model_change_while_retrying_goes_into_the_next_request()
+    {
+        using var rig = new Rig();
+        rig.Api.Then(() =>
+        {
+            rig.Settings = rig.Settings with { Model = "haiku", Effort = "low" }; // /model haiku, /effort low while it retries
+            throw new ClaudeApiException(ClaudeErrorKind.RateLimited, 429, "rate_limit_error", "slow down", null, attempts: 5);
+        });
+        rig.Api.Then(new ClaudeApiException(ClaudeErrorKind.RateLimited, 429, "rate_limit_error", "slow down", null, attempts: 5));
+        rig.Api.Then(Reply("tool_use", null, ToolUse("toolu_1", "get_state")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal("claude-opus-5-5", rig.Api[0]["model"]!.GetValue<string>());
+        Assert.All(Enumerable.Range(1, rig.Api.Count - 1), i =>
+        {
+            Assert.Equal("claude-haiku-5-5", rig.Api[i]["model"]!.GetValue<string>());
+            Assert.Equal("low", rig.Api[i]["output_config"]!["effort"]!.GetValue<string>());
+        });
+        Assert.True(rig.Brain.IsRunning);
     }
 
     [Fact]
@@ -475,16 +603,38 @@ public class ApiBrainTests
     }
 
     [Fact]
-    public async Task Refusal_announces_and_stops_with_error()
+    public async Task Two_refusals_in_a_row_announce_and_stop_with_error()
     {
         using var rig = new Rig();
-        rig.Api.Then(Reply("refusal", null));
+        rig.Api.Then(Reply("refusal", null)).Then(Reply("refusal", null));
 
         rig.Brain.Start();
         var (reason, _) = await rig.Stopped.Task.WaitAsync(Guard);
 
         Assert.Equal(BrainStopReason.Error, reason);
         Assert.Contains(rig.Announced, a => a.Contains("refusal"));
+        Assert.Equal(2, rig.Api.Count);
+    }
+
+    [Fact]
+    public async Task One_refusal_starts_a_fresh_conversation_and_play_goes_on()
+    {
+        using var rig = new Rig();
+        rig.Api
+            .Then(Reply("tool_use", null, ToolUse("toolu_1", "get_state")))
+            .Then(Reply("refusal", null))
+            .Then(Reply("tool_use", null, ToolUse("toolu_2", "get_state")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(4, rig.Api.Count);
+        Assert.Equal(3, rig.Api[1]["messages"]!.AsArray().Count);
+        Assert.Single(rig.Api[2]["messages"]!.AsArray());
+        Assert.StartsWith(ApiBrain.Refreshed, Text(rig.Api[2]["messages"]![0]!));
+        Assert.Empty(rig.Announced);
+        Assert.Contains(rig.Logged, l => l.Contains("refusal") && l.Contains("no category"));
+        Assert.True(rig.Brain.IsRunning);
     }
 
     [Fact]
@@ -806,7 +956,7 @@ public class ApiBrainTests
     public async Task An_announce_that_throws_still_ends_the_loop_cleanly()
     {
         using var rig = new Rig { AnnounceThrows = true, LogThrows = true };
-        rig.Api.Then(Reply("refusal", null));
+        rig.Api.Then(Reply("refusal", null)).Then(Reply("refusal", null));
 
         rig.Brain.Start();
         var (reason, message) = await rig.Stopped.Task.WaitAsync(Guard);
@@ -1586,6 +1736,12 @@ file sealed class FakeApi : IClaudeApi
     public FakeApi Then(Exception error)
     {
         lock (_gate) _script.Enqueue(() => throw error);
+        return this;
+    }
+
+    public FakeApi Then(Func<ClaudeResponse> step)
+    {
+        lock (_gate) _script.Enqueue(step);
         return this;
     }
 

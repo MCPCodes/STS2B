@@ -171,9 +171,11 @@ public sealed partial class BotTools
 
         try
         {
-            // A message for the model ends the wait at once; while paused no decision is handed over.
+            // A message for the model ends the wait at once, and so does /stop, so a wait whose
+            // client is gone can't take a later message; while paused no decision is handed over.
+            var stops = _chat.Stops;
             var snap = await _waiter.WaitAsync(afterVersion: null, timeout, live.Token,
-                interrupt: () => _chat.HasUnread, hold: () => _chat.Paused);
+                interrupt: () => _chat.HasUnread || _chat.Stops != stops, hold: () => _chat.Paused);
             return new ToolOutcome(Present(snap));
         }
         finally
@@ -225,6 +227,7 @@ public sealed partial class BotTools
     private async Task<ToolOutcome> ActSequenceAsync(JsonObject args, CancellationToken ct)
     {
         _chat.MarkThinking(false);
+        var stops = _chat.Stops;
 
         if (ActionIds(args["actions"]) is not { } ids)
             return new ToolOutcome(Error("actions must be a list of action ids"), IsError: true);
@@ -260,7 +263,7 @@ public sealed partial class BotTools
             var id = ids[k];
             if (last is not null)
             {
-                stopped = WhyStop(last, start);
+                stopped = WhyStop(last, start, stops);
                 var match = stopped is null ? FindAgain(id, start, current) : null;
                 if (match is null)
                 {
@@ -356,9 +359,12 @@ public sealed partial class BotTools
     /// next id, or null to go on. <paramref name="start"/> is the snapshot the sequence started on.
     /// A card that ends the turn (Void Form) leaves the screen on combat, and the settle wait runs
     /// through the enemy turn, so a new turn number is the only sign of it.</summary>
-    private string? WhyStop(Step last, GameSnapshot start)
+    private string? WhyStop(Step last, GameSnapshot start, long stops)
     {
         var now = last.After;
+        // First, whatever the game shows: the human took the game back.
+        if (_chat.Stops != stops)
+            return "The bot was stopped with /stop.";
         if (now.Version == last.Before.Version)
             return $"Nothing changed after '{last.Label}'. The game may have ignored it; re-check the state before repeating it.";
         if (now.Screen != start.Screen)

@@ -182,6 +182,34 @@ public class BridgeTests
         Assert.Equal(HttpStatusCode.MethodNotAllowed, get.StatusCode);
     }
 
+    [Fact]
+    public async Task Tool_calls_on_mcp_count_as_another_client_and_those_on_mcp_own_do_not()
+    {
+        var (tools, _) = Build();
+        var port = FreePort();
+        using var server = new BridgeServer(port, tools, new ChatHub(), "test", _ => { });
+        server.Start();
+        using var http = new HttpClient();
+        const string call = """{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_state","arguments":{}}}""";
+        var window = TimeSpan.FromSeconds(30);
+
+        // Listing tools is not playing, and the mod's own Claude Code (/mcp/own) never counts.
+        await http.PostAsync($"http://127.0.0.1:{port}/mcp",
+            new StringContent("""{"jsonrpc":"2.0","id":7,"method":"tools/list"}""", Encoding.UTF8, "application/json"));
+        var own = await http.PostAsync($"http://127.0.0.1:{port}/mcp/own", new StringContent(call, Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.OK, own.StatusCode);
+        Assert.Contains("awaiting_decision", await own.Content.ReadAsStringAsync());
+        Assert.False(server.ExternalClientActive(window));
+
+        var other = await http.PostAsync($"http://127.0.0.1:{port}/mcp", new StringContent(call, Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.OK, other.StatusCode);
+        Assert.True(server.ExternalClientActive(window));
+        Assert.False(server.ExternalClientActive(TimeSpan.Zero)); // nothing in flight, and the window is over
+
+        var get = await http.GetAsync($"http://127.0.0.1:{port}/mcp/own");
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, get.StatusCode);
+    }
+
     internal static int FreePort()
     {
         var l = new TcpListener(IPAddress.Loopback, 0);

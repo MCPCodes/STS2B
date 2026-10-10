@@ -43,6 +43,7 @@ public sealed partial class ChatHub
     private DateTime? _thinkingSince;
     private DateTime _speechHoldUntil = DateTime.MinValue;
     private long _seq;
+    private long _stops;
 
     /// <param name="clock">Time source for tests; defaults to <see cref="DateTime.UtcNow"/>.</param>
     public ChatHub(Func<DateTime>? clock = null) => _clock = clock ?? (() => DateTime.UtcNow);
@@ -123,6 +124,20 @@ public sealed partial class ChatHub
     public long LastSeq
     {
         get { lock (_gate) return _seq; }
+    }
+
+    /// <summary>How many times the bot was told to stop (/stop). A tool call that may outlive its
+    /// client (Claude Code told to quit in the middle of an act_sequence, or a wait_for_decision
+    /// it left behind) remembers the count when it starts and ends early once it has moved.</summary>
+    public long Stops
+    {
+        get { lock (_gate) return _stops; }
+    }
+
+    /// <summary>Tells running tool calls that the bot was stopped; see <see cref="Stops"/>.</summary>
+    public void NoteStop()
+    {
+        lock (_gate) _stops++;
     }
 
     /// <summary>Raised for every new line after the lock is released, on the thread that added
