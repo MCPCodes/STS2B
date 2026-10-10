@@ -121,6 +121,27 @@ public class ClaudeClientTests
     }
 
     [Fact]
+    public async Task A_request_can_ask_for_betas_of_its_own_without_sending_the_key()
+    {
+        var rig = new Rig();
+        rig.Handler.Script(_ => Ok(), _ => Ok());
+        var client = new ClaudeClient(Key, rig.Handler, "http://localhost:9999/") { Betas = ["compact-2026-01-12"] };
+        var request = Request();
+        request[ClaudeClient.BetasField] = new JsonArray("mid-conversation-output-config-2026-07-01", "compact-2026-01-12");
+        var before = request.ToJsonString();
+
+        await client.SendAsync(request, CancellationToken.None);
+        await client.SendAsync(Request(), CancellationToken.None);
+
+        var sent = rig.Handler.Requests[0];
+        Assert.Equal("compact-2026-01-12,mid-conversation-output-config-2026-07-01", sent.Headers["anthropic-beta"]);
+        Assert.DoesNotContain(ClaudeClient.BetasField, sent.Body);
+        Assert.Equal(Request().ToJsonString(), sent.Body);
+        Assert.Equal(before, request.ToJsonString()); // the caller's object is untouched
+        Assert.Equal("compact-2026-01-12", rig.Handler.Requests[1].Headers["anthropic-beta"]); // per request only
+    }
+
+    [Fact]
     public async Task Assistant_message_keeps_thinking_blocks_unmodified_and_detached()
     {
         var rig = new Rig();

@@ -433,6 +433,224 @@ public class ApiBrainTests
         Assert.Contains("after-effort", text);
     }
 
+    // ---- Elite and boss effort ----
+
+    /// <summary>A snapshot whose state names its room (run.room, as combat snapshots do).</summary>
+    private static JsonObject RoomSnap(string screen, string room, long version = 1)
+    {
+        var snap = Snap(screen, true, version);
+        snap["state"] = new JsonObject { ["run"] = new JsonObject { ["floor"] = 6, ["room"] = room } };
+        return snap;
+    }
+
+    /// <summary>Host whose act calls return <paramref name="afterActs"/> in turn; get_state gives the map.</summary>
+    private static Func<string, JsonObject, CancellationToken, Task<ToolOutcome>> ActsReturn(params JsonObject[] afterActs)
+    {
+        var acts = 0;
+        return (name, _, _) => Task.FromResult(Outcome(name == "act"
+            ? afterActs[Math.Min(acts++, afterActs.Length - 1)].DeepClone()
+            : Snap("map", true)));
+    }
+
+    private static ClaudeResponse Act(string id) => Reply("tool_use", null, ToolUse(id, "act", new JsonObject { ["action_id"] = "map:0" }));
+
+    private static string[] Roles(JsonObject request) =>
+        request["messages"]!.AsArray().Select(m => m!["role"]!.GetValue<string>()).ToArray();
+
+    private static string? Effort(JsonObject request) => request["output_config"]?["effort"]?.GetValue<string>();
+
+    [Fact]
+    public async Task An_elite_room_raises_the_effort_inside_the_conversation_and_the_map_lowers_it()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Effort = "medium" };
+        rig.Host.Handler = ActsReturn(RoomSnap("combat", "Elite"), Snap("rewards", true), Snap("card_reward", true), Snap("map", true));
+        rig.Api.Then(Act("toolu_1")).Then(Act("toolu_2")).Then(Act("toolu_3")).Then(Act("toolu_4"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        // Before: the normal effort, no effort messages, no beta.
+        Assert.Equal("medium", Effort(rig.Api[0]));
+        Assert.Equal(16000, rig.Api[0]["max_tokens"]!.GetValue<int>());
+        Assert.Null(rig.Api[0][ClaudeClient.BetasField]);
+
+        // In the elite room: one effort-only system message just before the new user turn; the
+        // top-level effort stays, so the cached prefix holds; max_tokens follows the effort in effect.
+        Assert.Equal(["user", "assistant", "system", "user"], Roles(rig.Api[1]));
+        var raise = rig.Api[1]["messages"]![2]!;
+        Assert.Empty(raise["content"]!.AsArray());
+        Assert.Equal("high", raise["output_config"]!["effort"]!.GetValue<string>());
+        Assert.Equal("medium", Effort(rig.Api[1]));
+        Assert.Equal(32000, rig.Api[1]["max_tokens"]!.GetValue<int>());
+        Assert.Equal(ApiBrain.PerMessageEffortBeta, Assert.Single(rig.Api[1][ClaudeClient.BetasField]!.AsArray())!.GetValue<string>());
+        // Append-only: the earlier messages are byte for byte what the last request sent.
+        Assert.Equal(rig.Api[0]["messages"]![0]!.ToJsonString(), rig.Api[1]["messages"]![0]!.ToJsonString());
+
+        // The room's own screens (rewards, card reward) keep the elite effort, with no new message.
+        Assert.Equal(["user", "assistant", "system", "user", "assistant", "user"], Roles(rig.Api[2]));
+        Assert.Equal(32000, rig.Api[2]["max_tokens"]!.GetValue<int>());
+        Assert.Equal(32000, rig.Api[3]["max_tokens"]!.GetValue<int>());
+
+        // The map is leaving the room: back to the normal effort the same way.
+        var roles = Roles(rig.Api[4]);
+        Assert.Equal(["user", "assistant", "system", "user", "assistant", "user", "assistant", "user", "assistant", "system", "user"], roles);
+        Assert.Equal("medium", rig.Api[4]["messages"]![9]!["output_config"]!["effort"]!.GetValue<string>());
+        Assert.Equal("medium", Effort(rig.Api[4]));
+        Assert.Equal(16000, rig.Api[4]["max_tokens"]!.GetValue<int>());
+        Assert.NotNull(rig.Api[4][ClaudeClient.BetasField]); // the conversation still holds effort messages
+
+        // Each switch is logged once.
+        Assert.Single(rig.Logged, l => l.Contains("entered the Elite room; effort medium to high, keeping the conversation"));
+        Assert.Single(rig.Logged, l => l.Contains("left the Elite room; effort high to medium, keeping the conversation"));
+    }
+
+    [Fact]
+    public async Task A_boss_room_uses_the_boss_effort_and_a_fight_effort_like_the_normal_one_changes_nothing()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Effort = "medium", EliteEffort = "same", BossEffort = "max" };
+        rig.Host.Handler = ActsReturn(RoomSnap("combat", "Elite"), Snap("map", true), RoomSnap("combat", "Boss"));
+        rig.Api.Then(Act("toolu_1")).Then(Act("toolu_2")).Then(Act("toolu_3"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.DoesNotContain("system", Roles(rig.Api[1])); // elite: same as the normal effort
+        Assert.DoesNotContain("system", Roles(rig.Api[2]));
+        Assert.Equal("system", Roles(rig.Api[3])[^2]);
+        Assert.Equal("max", rig.Api[3]["messages"]!.AsArray()[^2]!["output_config"]!["effort"]!.GetValue<string>());
+        Assert.Equal(64000, rig.Api[3]["max_tokens"]!.GetValue<int>());
+        Assert.Equal("medium", Effort(rig.Api[3]));
+    }
+
+    [Fact]
+    public async Task Starting_in_a_boss_fight_puts_the_boss_effort_at_the_top_level()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Effort = "low" };
+        rig.Host.Handler = (_, _, _) => Task.FromResult(Outcome(RoomSnap("combat", "Boss")));
+        rig.Api.Then(Act("toolu_1"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal("high", Effort(rig.Api[0]));
+        Assert.Equal(32000, rig.Api[0]["max_tokens"]!.GetValue<int>());
+        Assert.Equal(["user"], Roles(rig.Api[0]));
+        Assert.Equal(["user", "assistant", "user"], Roles(rig.Api[1])); // still the boss room, nothing switches
+        Assert.Null(rig.Api[1][ClaudeClient.BetasField]);
+    }
+
+    [Fact]
+    public async Task A_model_without_per_message_effort_starts_a_fresh_conversation_for_a_fight_room()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Model = "claude-fable-5", Effort = "medium" };
+        rig.Host.Handler = ActsReturn(RoomSnap("combat", "Elite"));
+        rig.Api.Then(Act("toolu_1"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        var text = Text(Assert.Single(rig.Api[1]["messages"]!.AsArray())!);
+        Assert.StartsWith(ApiBrain.RoomEffortChanged, text);
+        Assert.Contains("\"room\":\"Elite\"", text);
+        Assert.Equal("high", Effort(rig.Api[1]));
+        Assert.Equal(32000, rig.Api[1]["max_tokens"]!.GetValue<int>());
+        Assert.Null(rig.Api[1][ClaudeClient.BetasField]);
+        Assert.Contains(rig.Logged, l => l.Contains("entered the Elite room; effort medium to high, starting a fresh conversation"));
+    }
+
+    [Fact]
+    public async Task Effort_typed_in_a_fight_room_still_starts_a_fresh_conversation()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Effort = "medium" };
+        var acts = 0;
+        rig.Host.Handler = (name, _, _) =>
+        {
+            if (name != "act")
+                return Task.FromResult(Outcome(Snap("map", true)));
+            if (++acts == 2)
+                rig.Settings = rig.Settings with { BossEffort = "xhigh" }; // /effort boss xhigh mid-fight
+            return Task.FromResult(Outcome(RoomSnap("combat", "Boss")));
+        };
+        rig.Api.Then(Act("toolu_1")).Then(Act("toolu_2"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal("system", Roles(rig.Api[1])[^2]); // entering: kept
+        var text = Text(Assert.Single(rig.Api[2]["messages"]!.AsArray())!);
+        Assert.StartsWith(ApiBrain.ModelChanged, text);
+        Assert.Equal("xhigh", Effort(rig.Api[2]));
+        Assert.Equal(64000, rig.Api[2]["max_tokens"]!.GetValue<int>());
+        Assert.Null(rig.Api[2][ClaudeClient.BetasField]);
+    }
+
+    [Fact]
+    public async Task Normal_effort_typed_in_a_fight_room_waits_until_the_room_is_left()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Effort = "medium", EliteEffort = "high" };
+        var acts = 0;
+        rig.Host.Handler = (name, _, _) =>
+        {
+            if (name != "act")
+                return Task.FromResult(Outcome(Snap("map", true)));
+            acts++;
+            if (acts == 2)
+                rig.Settings = rig.Settings with { Effort = "low" }; // /effort low in the fight
+            return Task.FromResult(Outcome(acts < 3 ? RoomSnap("combat", "Elite") : Snap("map", true)));
+        };
+        rig.Api.Then(Act("toolu_1")).Then(Act("toolu_2")).Then(Act("toolu_3"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(["user", "assistant", "system", "user", "assistant", "user"], Roles(rig.Api[2])); // unchanged in the fight
+        Assert.Equal(32000, rig.Api[2]["max_tokens"]!.GetValue<int>());
+        Assert.Equal("low", rig.Api[3]["messages"]!.AsArray()[^2]!["output_config"]!["effort"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task A_refused_effort_message_falls_back_to_fresh_conversations()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Effort = "medium" };
+        rig.Host.Handler = ActsReturn(RoomSnap("combat", "Elite"), Snap("map", true));
+        rig.Api
+            .Then(Act("toolu_1"))
+            .Then(new ClaudeApiException(ClaudeErrorKind.InvalidRequest, 400, "invalid_request_error", "messages.2: unexpected role", "req_1"))
+            .Then(Act("toolu_2"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal("system", Roles(rig.Api[1])[^2]);
+        var text = Text(Assert.Single(rig.Api[2]["messages"]!.AsArray())!);
+        Assert.StartsWith(ApiBrain.RoomEffortChanged, text);
+        Assert.Equal("high", Effort(rig.Api[2]));
+        Assert.Null(rig.Api[2][ClaudeClient.BetasField]);
+        // Leaving the room afterwards starts afresh too, instead of trying the beta again.
+        Assert.StartsWith(ApiBrain.RoomEffortChanged, Text(Assert.Single(rig.Api[3]["messages"]!.AsArray())!));
+        Assert.Equal("medium", Effort(rig.Api[3]));
+        Assert.True(rig.Brain.IsRunning);
+    }
+
+    [Fact]
+    public void Only_models_the_beta_lists_take_per_message_effort()
+    {
+        Assert.True(ApiBrain.SupportsPerMessageEffort("claude-opus-5-5"));
+        Assert.True(ApiBrain.SupportsPerMessageEffort("claude-sonnet-5-5"));
+        Assert.True(ApiBrain.SupportsPerMessageEffort("claude-haiku-5-5"));
+        Assert.True(ApiBrain.SupportsPerMessageEffort("claude-fable-5-1"));
+        Assert.False(ApiBrain.SupportsPerMessageEffort("claude-fable-5"));
+        Assert.False(ApiBrain.SupportsPerMessageEffort("claude-opus-4-8"));
+        Assert.False(ApiBrain.SupportsPerMessageEffort(null));
+    }
+
     [Fact]
     public async Task Monthly_cap_stops_before_any_request()
     {

@@ -170,6 +170,97 @@ public class BrainSettingsTests : IDisposable
     }
 
     [Fact]
+    public void Fight_efforts_default_to_high_but_never_below_the_normal_effort()
+    {
+        var s = Load();
+        Assert.Null(s.EliteEffort);
+        Assert.Null(s.BossEffort);
+        Assert.Equal("medium", s.EffortFor(null));
+        Assert.Equal("medium", s.EffortFor("Monster"));
+        Assert.Equal("high", s.EffortFor("Elite"));
+        Assert.Equal("high", s.EffortFor("BOSS"));
+        Assert.Equal("xhigh", (s with { Effort = "xhigh" }).EffortFor("Boss"));
+        Assert.Equal("high", (s with { Effort = "low" }).EffortFor("Elite"));
+    }
+
+    [Fact]
+    public void Fight_efforts_from_config_are_used_as_chosen()
+    {
+        WriteConfig("""{ "effort": "high", "elite_effort": "Medium", "boss_effort": null }""");
+        var s = Load();
+        Assert.Empty(s.Warnings);
+        Assert.Equal("medium", s.EliteEffort);
+        Assert.Equal("same", s.BossEffort); // null means the normal effort
+        Assert.Equal("medium", s.EffortFor("Elite")); // below the normal effort, as chosen
+        Assert.Equal("high", s.EffortFor("Boss"));
+        Assert.Equal("low", (s with { Effort = "low" }).EffortFor("Boss"));
+        Assert.Equal("max", (s with { BossEffort = "max" }).EffortFor("Boss"));
+        Assert.Contains("EliteEffort = medium, BossEffort = same", s.ToString());
+    }
+
+    [Fact]
+    public void Bad_fight_efforts_fall_back_to_the_default_with_a_warning()
+    {
+        WriteConfig("""{ "elite_effort": "extreme", "boss_effort": 3 }""");
+        var s = Load();
+        Assert.Null(s.EliteEffort);
+        Assert.Null(s.BossEffort);
+        Assert.Equal(2, s.Warnings.Count);
+        Assert.Contains(s.Warnings, w => w.StartsWith("elite_effort must be one of"));
+        Assert.Contains(s.Warnings, w => w.StartsWith("boss_effort must be one of"));
+        Assert.Throws<ArgumentException>(() => s with { BossEffort = "extreme" });
+        Assert.True(BrainSettings.TryParseFightEffort(" Default ", out var cleared));
+        Assert.Null(cleared);
+        Assert.True(BrainSettings.TryParseFightEffort("SAME", out var same));
+        Assert.Equal("same", same);
+        Assert.False(BrainSettings.TryParseFightEffort("loud", out _));
+    }
+
+    [Fact]
+    public void Fight_efforts_are_saved_only_when_chosen()
+    {
+        var chosen = Load() with { EliteEffort = "xhigh", BossEffort = "same" };
+        chosen.Save();
+        var json = JsonNode.Parse(File.ReadAllText(chosen.ConfigPath))!.AsObject();
+        Assert.Equal("xhigh", json["elite_effort"]!.GetValue<string>());
+        Assert.Equal("same", json["boss_effort"]!.GetValue<string>());
+        var again = Load();
+        Assert.Equal("xhigh", again.EliteEffort);
+        Assert.Equal("same", again.BossEffort);
+
+        (again with { EliteEffort = null, BossEffort = null }).Save();
+        json = JsonNode.Parse(File.ReadAllText(chosen.ConfigPath))!.AsObject();
+        Assert.False(json.ContainsKey("elite_effort"));
+        Assert.False(json.ContainsKey("boss_effort"));
+    }
+
+    [Fact]
+    public void A_fight_room_holds_through_its_own_screens_until_the_bot_leaves()
+    {
+        static JsonObject Snap(string screen, string? room = null, bool inState = false)
+        {
+            var state = new JsonObject();
+            if (room is not null && inState) state["room"] = room;
+            else if (room is not null) state["run"] = new JsonObject { ["room"] = room };
+            return new JsonObject { ["screen"] = screen, ["state"] = state };
+        }
+
+        Assert.Equal("Elite", RunScreens.FightRoom(null, Snap("combat", "Elite")));
+        Assert.Equal("Boss", RunScreens.FightRoom(null, Snap("combat", "boss")));
+        Assert.Null(RunScreens.FightRoom(null, Snap("combat", "Monster")));
+        Assert.Null(RunScreens.FightRoom("Elite", Snap("combat", "Monster")));
+        foreach (var screen in new[] { "combat", "hand_select", "rewards", "card_reward", "card_select", "treasure", "modal", "unknown" })
+            Assert.Equal("Elite", RunScreens.FightRoom("Elite", Snap(screen)));
+        foreach (var screen in new[] { "map", "shop", "rest", "event", "crystal_sphere", "menu", "game_over" })
+            Assert.Null(RunScreens.FightRoom("Boss", Snap(screen)));
+        Assert.Null(RunScreens.FightRoom("Boss", Snap("game_over", "Boss", inState: true)));
+        Assert.Null(RunScreens.FightRoom(null, Snap("rewards")));
+        var flagged = Snap("modal");
+        flagged["in_run"] = false;
+        Assert.Null(RunScreens.FightRoom("Elite", flagged));
+    }
+
+    [Fact]
     public void A_model_without_prices_is_kept_with_a_warning()
     {
         WriteConfig("""{ "model": "claude-opus-6" }""");

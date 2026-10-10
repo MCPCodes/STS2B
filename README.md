@@ -71,7 +71,7 @@ Then, in game, open the chat (T) and type:
 - `/stop`: the bot stops: no more API calls, and Claude Code quits if it was playing.
 - `/budget`: what the API has cost this month and this run, the model, and what is playing.
 - `/model`: shows the model; `/model opus`, `sonnet`, `haiku` or `fable` switches it.
-- `/effort`: shows the thinking effort; `/effort low`, `medium`, `high`, `xhigh` or `max` sets it.
+- `/effort`: shows the thinking effort, and the effort in elite and boss rooms; `/effort low`, `medium`, `high`, `xhigh` or `max` sets the normal one. Elite and boss rooms use high by default (or the normal effort when that is higher), since it wins more of the hard fights; `/effort elite medium` or `/effort boss max` sets a fight's own, `same` makes it follow the normal effort and `default` puts it back.
 - `/pause` holds the bot so you can play a bit by hand, and `/resume` hands control back.
 
 Without a key, or once the API credit, the Console spend limit or the mod's own monthly cap (`monthly_budget_usd` in `~/.config/spiremind/config.json`, $200 by default) runs out, it plays on your Claude subscription instead, as long as Claude Code is installed and signed in (run `claude` once in Terminal and log in). The chat says when it switches, and the next run tries the API again.

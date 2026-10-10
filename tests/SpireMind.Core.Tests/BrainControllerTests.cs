@@ -839,7 +839,7 @@ public class BrainControllerTests
         using var rig = new Rig();
         await rig.Init();
 
-        Assert.Equal("The effort is high. Options: low, medium, high, xhigh, max.", rig.Post("/effort"));
+        Assert.Equal("The effort is high; high (the default) in elite rooms and high (the default) in boss rooms. " + Options, rig.Post("/effort"));
         Assert.Equal("Effort set to max. It applies from the next request." + BrainController.HighEffortCaution, rig.Post("/effort MAX"));
         Assert.Equal("max", rig.Controller.Settings.Effort);
         Assert.Equal("max", rig.Saved[^1].Effort);
@@ -847,6 +847,54 @@ public class BrainControllerTests
         Assert.Equal("\"extreme\" isn't an effort level. Options: low, medium, high, xhigh, max.", rig.Post("/effort extreme"));
         Assert.Equal("The effort is max already.", rig.Post("/effort max"));
         Assert.Single(rig.Saved);
+    }
+
+    private const string Options = "Options: low, medium, high, xhigh, max. /effort elite or /effort boss with a level, " +
+                                   "same (the normal effort) or default (high, or the normal effort when higher) sets a fight's.";
+
+    [Fact]
+    public async Task Effort_shows_and_sets_the_elite_and_boss_efforts()
+    {
+        using var rig = new Rig();
+        rig.Config = rig.Config with { Effort = "medium" };
+        await rig.Init();
+
+        Assert.Equal("The effort is medium; high (the default) in elite rooms and high (the default) in boss rooms. " + Options, rig.Post("/effort"));
+        Assert.Equal("The effort in boss rooms is high (the default). " + Options, rig.Post("/effort boss"));
+
+        Assert.Equal("The effort in boss rooms is now xhigh. It applies from the next request in a boss room.", rig.Post("/effort Boss XHIGH"));
+        Assert.Equal("xhigh", rig.Controller.Settings.BossEffort);
+        Assert.Equal("xhigh", rig.Saved[^1].BossEffort);
+        Assert.Null(rig.Saved[^1].EliteEffort);
+        Assert.Equal("medium", rig.Saved[^1].Effort); // the normal effort is untouched
+
+        // A fight effort chosen below high is used as it is.
+        Assert.Equal("The effort in elite rooms is now low. It applies from the next request in an elite room.", rig.Post("/effort elite low"));
+        Assert.Equal("low", rig.Controller.Settings.EffortFor(BrainSettings.EliteRoom));
+        Assert.Equal("The effort in elite rooms is now medium (the normal effort). It applies from the next request in an elite room.", rig.Post("/effort elite same"));
+        Assert.Equal("same", rig.Saved[^1].EliteEffort);
+        Assert.Equal("The effort in elite rooms is medium (the normal effort) already.", rig.Post("/effort elite same"));
+        Assert.Equal("The effort is medium; medium (the normal effort) in elite rooms and xhigh in boss rooms. " + Options, rig.Post("/effort"));
+        Assert.Equal("The effort in boss rooms is now high (the default). It applies from the next request in a boss room.", rig.Post("/effort boss default"));
+        Assert.Null(rig.Saved[^1].BossEffort);
+        Assert.Equal("\"loud\" isn't an effort level. " + Options, rig.Post("/effort boss loud"));
+
+        // /effort with a level still sets the normal effort, and the default fight effort follows it up.
+        Assert.Equal("Effort set to xhigh. It applies from the next request." + BrainController.HighEffortCaution, rig.Post("/effort xhigh"));
+        Assert.Equal("xhigh", rig.Controller.Settings.EffortFor(BrainSettings.BossRoom));
+        Assert.Contains(rig.Logged, l => l == "brain: boss effort set to xhigh by Mark");
+    }
+
+    [Fact]
+    public async Task Budget_mentions_fight_efforts_that_differ()
+    {
+        using var rig = new Rig();
+        rig.Config = rig.Config with { Effort = "medium", BossEffort = "max" };
+        await rig.Init();
+
+        Assert.Contains("Opus 5.5, medium effort, high in elite rooms and max in boss rooms.\n", rig.Post("/budget"));
+        rig.Post("/effort boss default");
+        Assert.Contains("Opus 5.5, medium effort, high in elite and boss rooms.\n", rig.Post("/budget"));
     }
 
     [Fact]
@@ -861,7 +909,7 @@ public class BrainControllerTests
         Assert.Contains("/stop stops the bot until you /start it again", help);
         Assert.Contains("/budget shows the API spend and what's playing", help);
         Assert.Contains("/model [opus|sonnet|haiku|fable] shows or switches the model", help);
-        Assert.Contains("/effort [low|medium|high|xhigh|max] shows or sets the thinking effort", help);
+        Assert.Contains("/effort [low|medium|high|xhigh|max] or elite|boss [level|same|default] shows or sets the thinking effort", help);
     }
 
     [Theory]

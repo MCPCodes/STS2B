@@ -243,7 +243,7 @@ public sealed partial class BrainController
         _chat.AddCommand("stop", "", "stops the bot until you /start it again", StopCommand);
         _chat.AddCommand("budget", "", "shows the API spend and what's playing", BudgetCommand);
         _chat.AddCommand("model", $"[{string.Join("|", BrainSettings.ModelAliases.Keys)}]", "shows or switches the model", ModelCommand);
-        _chat.AddCommand("effort", $"[{string.Join("|", BrainSettings.Efforts)}]", "shows or sets the thinking effort", EffortCommand);
+        _chat.AddCommand("effort", EffortUsage, "shows or sets the thinking effort", EffortCommand);
     }
 
     private string StartCommand(string from, string args)
@@ -318,7 +318,7 @@ public sealed partial class BrainController
 
         var requests = calls == 1 ? "1 request" : $"{calls} requests";
         return $"API spend: {Money(month)} of {Budget(settings.MonthlyBudgetUsd)} this month, {Money(run)} this run in {requests}. " +
-               $"{ModelName(settings.Model)}, {settings.Effort} effort.\n{playing}";
+               $"{ModelName(settings.Model)}, {settings.Effort} effort{FightEffortNote(settings)}.\n{playing}";
     }
 
     private string ModelCommand(string from, string args)
@@ -349,10 +349,12 @@ public sealed partial class BrainController
 
     private string EffortCommand(string from, string args)
     {
+        if (FightEffortCommand(from, args) is { } fight)
+            return fight;
         var current = Settings;
         var options = $"Options: {string.Join(", ", BrainSettings.Efforts)}.";
         if (args.Length == 0)
-            return $"The effort is {current.Effort}. {options}";
+            return EffortSummary(current);
         if (!BrainSettings.TryParseEffort(args, out var effort))
             return $"\"{args}\" isn't an effort level. {options}";
         if (effort == current.Effort)
