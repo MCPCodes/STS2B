@@ -60,7 +60,8 @@ public static class ModEntry
             {
                 // VERIFY: Assembly.Location is set for mods the game loads (it is empty for one loaded from bytes).
                 var location = typeof(ModEntry).Assembly.Location;
-                BrainWiring.Start(chat, tools, waiter, port, location.Length > 0 ? System.IO.Path.GetDirectoryName(location) : null, Log, LogError);
+                BrainWiring.Start(chat, tools, waiter, () => game.IsMultiplayer, port,
+                    location.Length > 0 ? System.IO.Path.GetDirectoryName(location) : null, Log, LogError);
             }
             catch (Exception ex) { LogError($"brain skipped: {ex}"); }
 

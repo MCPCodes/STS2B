@@ -45,9 +45,9 @@ public interface IChildProcess : IDisposable
     /// output channels, which may still hold lines.</summary>
     Task<int> Exited { get; }
 
-    /// <summary>Asks the process to stop, like Ctrl-C (SIGINT). On Windows, where there is no
-    /// such signal, it kills the process instead.</summary>
-    void Interrupt();
+    /// <summary>Asks the process to stop, like Ctrl-C (SIGINT). False when it killed the process
+    /// instead: on Windows, where there is no such signal, or when the signal couldn't be sent.</summary>
+    bool Interrupt();
 
     /// <summary>Kills the process and every process it started.</summary>
     void Kill();
@@ -144,25 +144,27 @@ public sealed class ChildProcess : IChildProcess
     }
 
     /// <inheritdoc/>
-    public void Interrupt()
+    public bool Interrupt()
     {
         if (System.OperatingSystem.IsWindows())
         {
             Kill();
-            return;
+            return false;
         }
         // Checked first: once the process is gone its id can belong to someone else.
         if (_exited.Task.IsCompleted || Volatile.Read(ref _disposed) != 0 || HasExited())
-            return;
+            return true;
         try
         {
             SysKill(Id, SigInt);
+            return true;
         }
         catch (Exception)
         {
             // No libc to call (or P/Invoke isn't allowed where the mod was loaded): a kill still
-            // stops it, only less politely.
+            // stops it, only less politely. The caller logs it.
             Kill();
+            return false;
         }
     }
 

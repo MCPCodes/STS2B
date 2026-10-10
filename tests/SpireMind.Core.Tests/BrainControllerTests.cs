@@ -386,6 +386,87 @@ public class BrainControllerTests
         Assert.Equal(4, rig.SubBrains.Length);
     }
 
+    [Fact]
+    public async Task The_subscription_brain_is_stopped_once_the_run_has_been_over_for_a_while()
+    {
+        using var rig = new Rig { Key = null };
+        await rig.Init();
+        await rig.Poll("combat");
+        rig.Post("/start");
+        var sub = Assert.Single(rig.SubBrains);
+        var mark = rig.Mark();
+
+        // Game over, then the menu: time for the post-mortem first.
+        await rig.Poll("game_over");
+        rig.Now += TimeSpan.FromSeconds(90);
+        await rig.Poll("menu");
+        await rig.Poll(null); // a modal at the menu says nothing
+        Assert.True(sub.IsRunning);
+        Assert.Equal(0, sub.StopCalls);
+
+        rig.Now += TimeSpan.FromSeconds(30);
+        await rig.Poll("menu");
+        await Rig.WaitUntil(() => !sub.IsRunning);
+        Assert.Equal(1, sub.StopCalls);
+        Assert.Equal(BrainKind.None, rig.Controller.Playing);
+        Assert.Empty(rig.LinesSince(mark));
+        Assert.Contains(rig.Logged, l => l.Contains("the run has been over for 120 s; stopping the subscription brain"));
+        Assert.EndsWith("Nothing is playing yet. Your Claude subscription takes over once a run is in progress, since there's no API key.",
+            rig.Post("/budget"));
+
+        // Nothing starts at the menu; the next run starts it again, quietly.
+        mark = rig.Mark();
+        rig.Now += TimeSpan.FromMinutes(10);
+        await rig.Poll("menu");
+        Assert.Single(rig.SubBrains);
+        await rig.Poll("map");
+        Assert.Equal(2, rig.SubBrains.Length);
+        Assert.True(rig.SubBrains[1].IsRunning);
+        Assert.Equal(BrainKind.Subscription, rig.Controller.Playing);
+        Assert.Empty(rig.LinesSince(mark));
+    }
+
+    [Fact]
+    public async Task A_run_continued_within_the_grace_keeps_the_subscription_brain()
+    {
+        using var rig = new Rig { Key = null };
+        await rig.Init();
+        await rig.Poll("combat");
+        rig.Post("/start");
+        var sub = Assert.Single(rig.SubBrains);
+
+        // Save and quit, then continue: the clock starts again the next time the run is over.
+        await rig.Poll("menu");
+        rig.Now += TimeSpan.FromSeconds(90);
+        await rig.Poll("map");
+        rig.Now += TimeSpan.FromSeconds(90);
+        await rig.Poll("menu");
+        rig.Now += TimeSpan.FromSeconds(90);
+        await rig.Poll("menu");
+
+        Assert.True(sub.IsRunning);
+        Assert.Equal(0, sub.StopCalls);
+        Assert.Single(rig.SubBrains);
+        Assert.Equal(BrainKind.Subscription, rig.Controller.Playing);
+    }
+
+    [Fact]
+    public async Task The_api_brain_is_left_at_the_menu()
+    {
+        using var rig = new Rig();
+        await rig.Init();
+        await rig.Poll("combat");
+        rig.Post("/start");
+        var api = Assert.Single(rig.ApiBrains);
+
+        await rig.Poll("game_over");
+        rig.Now += TimeSpan.FromMinutes(10);
+        await rig.Poll("menu");
+
+        Assert.True(api.IsRunning);
+        Assert.Equal(0, api.StopCalls);
+    }
+
     // ---- New runs ----
 
     [Fact]
@@ -589,6 +670,21 @@ public class BrainControllerTests
     }
 
     [Fact]
+    public async Task Model_and_effort_say_what_claude_code_does_with_them()
+    {
+        using var rig = new Rig { Key = null };
+        await rig.Init();
+        await rig.Poll("combat");
+        rig.Post("/start");
+        Assert.Equal(BrainKind.Subscription, rig.Controller.Playing);
+
+        Assert.Equal("Model set to Sonnet 5.5. Claude Code keeps its current model until its next session.", rig.Post("/model sonnet"));
+        Assert.Equal("claude-sonnet-5-5", rig.Controller.Settings.Model);
+        Assert.Equal("Effort set to max. Only the API brain uses it, so Claude Code playing now isn't affected.", rig.Post("/effort max"));
+        Assert.Equal("max", rig.Controller.Settings.Effort);
+    }
+
+    [Fact]
     public async Task Effort_shows_sets_and_refuses_unknown_levels()
     {
         using var rig = new Rig();
@@ -666,7 +762,7 @@ file sealed class Rig : IDisposable
     public string Dir { get; } = Path.Combine(Path.GetTempPath(), "spiremind-controller-" + Guid.NewGuid().ToString("N"));
     public SpendTracker Spend { get; }
     public ChatHub Chat { get; } = new() { BotName = "Ironclad" };
-    public DateTime Now { get; } = new(2026, 10, 10, 12, 0, 0, DateTimeKind.Utc);
+    public DateTime Now { get; set; } = new(2026, 10, 10, 12, 0, 0, DateTimeKind.Utc);
     public int MaxRestartsPerRun { get; init; } = 3;
     public TimeSpan StopWaitLimit { get; init; } = TimeSpan.FromSeconds(10);
     public bool SaveThrows { get; init; }

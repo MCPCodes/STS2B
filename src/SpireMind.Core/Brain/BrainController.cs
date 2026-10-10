@@ -14,7 +14,8 @@ public enum BrainKind { None, Api, Subscription }
 /// <item>The API brain plays when the settings have a key, this month's spend is under
 /// monthly_budget_usd and the API hasn't failed during this run. It may start at the menu,
 /// since it idles there for free. Otherwise the subscription brain plays, and only while a run
-/// is in progress, so it never spends subscription turns at the menu.</item>
+/// is in progress: it starts with a run and is stopped once the run has been over for
+/// <see cref="RunOverGrace"/>, so it never spends subscription turns at the menu.</item>
 /// <item>When the API brain stops for a missing or rejected key, the credit, the Console spend
 /// limit or the monthly cap, the subscription brain takes over for the rest of the run (or the
 /// next run, when it stopped between runs). The next run tries the API again.</item>
@@ -66,6 +67,7 @@ public sealed partial class BrainController
     private bool _hold; // a brain stopped with an error or by someone else: nothing restarts until the next run or /start
     private int _restarts; // subscription restarts during this run
     private bool _announceStart; // /start said a brain would play once a run is in progress; say so when it does
+    private DateTime? _outOfRunSince; // when the subscription brain was first seen playing outside a run
     private Task _stopping = Task.CompletedTask; // StopAsync calls in flight
     private CancellationTokenSource? _pollCts;
     private bool _initialized;
@@ -128,6 +130,12 @@ public sealed partial class BrainController
     /// <summary>How long a stopping brain gets before it is aborted. The next brain starts only
     /// once the last one has stopped, since two at once would cancel each other's waits.</summary>
     public TimeSpan StopWaitLimit { get; init; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>How long the subscription brain may go on once the poll loop sees the run over
+    /// (game over or the menu): time for the post-mortem in the journal. After that it is
+    /// stopped, and the next run starts it again. Claude Code would otherwise keep waiting at the
+    /// menu, a subscription turn every few minutes.</summary>
+    public TimeSpan RunOverGrace { get; init; } = TimeSpan.FromMinutes(2);
 
     /// <summary>The current settings. Brains read them through a Func before every request, so
     /// /model and /effort apply at once.</summary>
@@ -301,9 +309,17 @@ public sealed partial class BrainController
 
         var settings = Reload(current, keepAutostart: true) with { Model = id };
         var saved = Save(settings);
-        lock (_gate) _settings = settings;
+        bool subscription;
+        lock (_gate)
+        {
+            _settings = settings;
+            subscription = _kind == BrainKind.Subscription;
+        }
         Log($"brain: model set to {id} by {from}");
-        return $"Model set to {ModelName(id)}. It applies from the next request.{saved}";
+        // Claude Code gets --model when a session starts, so a session already running keeps its model.
+        return subscription
+            ? $"Model set to {ModelName(id)}. Claude Code keeps its current model until its next session.{saved}"
+            : $"Model set to {ModelName(id)}. It applies from the next request.{saved}";
     }
 
     private string EffortCommand(string from, string args)
@@ -319,9 +335,17 @@ public sealed partial class BrainController
 
         var settings = Reload(current, keepAutostart: true) with { Effort = effort };
         var saved = Save(settings);
-        lock (_gate) _settings = settings;
+        bool subscription;
+        lock (_gate)
+        {
+            _settings = settings;
+            subscription = _kind == BrainKind.Subscription;
+        }
         Log($"brain: effort set to {effort} by {from}");
-        return $"Effort set to {effort}. It applies from the next request.{saved}";
+        // Claude Code isn't told an effort, so only the API brain uses it.
+        return subscription
+            ? $"Effort set to {effort}. Only the API brain uses it, so Claude Code playing now isn't affected.{saved}"
+            : $"Effort set to {effort}. It applies from the next request.{saved}";
     }
 
     // Starts the brain the settings call for unless one plays, and says what happened: the
@@ -591,7 +615,9 @@ public sealed partial class BrainController
     private async Task OnScreenAsync(string? screen)
     {
         var seen = RunScreens.InRun(screen);
+        var now = _clock();
         bool runStarted, autostart;
+        IPlayBrain? idle = null;
         lock (_gate)
         {
             if (_shutdown)
@@ -606,8 +632,15 @@ public sealed partial class BrainController
                 _restarts = 0;
             }
             autostart = _settings.Autostart;
+            idle = TakeIdleSubscription(now);
         }
 
+        if (idle is not null)
+        {
+            // Not held: the next run starts it again.
+            Log(Invariant($"brain: the run has been over for {RunOverGrace.TotalSeconds:0} s; stopping the subscription brain until the next run"));
+            _ = StopBrain(idle);
+        }
         if (runStarted)
         {
             _spend.ResetRun();
@@ -674,6 +707,28 @@ public sealed partial class BrainController
 
         if (line is not null)
             Announce(line);
+    }
+
+    // Caller holds _gate. The subscription brain, taken off the controller to be stopped, once
+    // the run has been over for RunOverGrace while it plays; null otherwise. A modal (no answer)
+    // keeps the clock running, and seeing the run again resets it.
+    private IPlayBrain? TakeIdleSubscription(DateTime now)
+    {
+        if (_inRun != false || _kind != BrainKind.Subscription || _brain is null)
+        {
+            _outOfRunSince = null;
+            return null;
+        }
+        _outOfRunSince ??= now;
+        if (now - _outOfRunSince < RunOverGrace)
+            return null;
+
+        var brain = _brain;
+        _brain = null;
+        _kind = BrainKind.None;
+        _generation++; // its Stopped event is now stale
+        _outOfRunSince = null;
+        return brain;
     }
 
     // During a run with autostart on: the subscription brain starts when it is the choice and

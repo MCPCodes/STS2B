@@ -29,14 +29,16 @@ internal static class BrainWiring
     /// <param name="chat">The chat the commands and brain lines go to.</param>
     /// <param name="tools">The BotTools instance the MCP endpoint uses; the API brain calls it in-process.</param>
     /// <param name="waiter">Reads the screen for the controller and the subscription brain.</param>
+    /// <param name="multiplayer">Whether the run is co-op, which adds strategy/coop.md to the API
+    /// brain's prompt. Called on the brain's task, so it must not touch the game.</param>
     /// <param name="port">The bridge's port, whose /mcp endpoint the subscription brain plays through.</param>
     /// <param name="modDir">The folder the mod was loaded from, for the staged prompt and
     /// brain/repo_path; null when unknown.</param>
     /// <param name="log">The mod's log. Called from the brains' tasks too, so it must be thread-safe.</param>
     /// <param name="logError">The mod's error log, for problems with the setup and the files.</param>
     /// <returns>The controller, or null when it couldn't be built.</returns>
-    public static BrainController? Start(ChatHub chat, BotTools tools, DecisionWaiter waiter, int port, string? modDir,
-        Action<string> log, Action<string> logError)
+    public static BrainController? Start(ChatHub chat, BotTools tools, DecisionWaiter waiter, Func<bool> multiplayer, int port,
+        string? modDir, Action<string> log, Action<string> logError)
     {
         // Brain tasks log from the thread pool. Once the game is quitting, their lines are
         // dropped, since the engine they print through may already be gone.
@@ -65,7 +67,7 @@ internal static class BrainWiring
                         () => controller!.Settings,
                         spend,
                         character: () => chat.BotName,
-                        multiplayer: () => false,
+                        multiplayer: multiplayer,
                         transcript: transcript,
                         recentChat: () => RecentChat(chat),
                         announce: line => chat.Announce(line),
@@ -79,7 +81,8 @@ internal static class BrainWiring
                         ClaudePath = settings.ClaudePath,
                         WorkingDirectory = folders.SubscriptionDirectory,
                         Port = port,
-                        Model = settings.Model,
+                        // Read as each session starts, so /model reaches Claude Code at its next one.
+                        Model = () => controller!.Settings.Model,
                     };
                     return new SubscriptionBrain(options, ProcessLauncher.Instance,
                         inRun: async ct => RunScreens.InRun(await CurrentScreenAsync(waiter, ct)),

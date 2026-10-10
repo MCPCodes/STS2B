@@ -90,13 +90,35 @@ public class SubscriptionBrainTests
     public async Task The_model_is_passed_when_set()
     {
         using var rig = new SubRig();
-        rig.Options = rig.Options with { Model = "claude-sonnet-5-5" };
+        rig.Options = rig.Options with { Model = () => "claude-sonnet-5-5" };
 
         rig.Brain.Start();
         await rig.Launcher.Running.Task.WaitAsync(Guard);
 
         var arguments = rig.Launcher.Sessions[0].Arguments;
         Assert.Equal(["--verbose", "--model", "claude-sonnet-5-5"], arguments.TakeLast(3));
+    }
+
+    [Fact]
+    public async Task A_new_model_reaches_the_next_session()
+    {
+        using var rig = new SubRig();
+        var model = "claude-opus-5-5";
+        rig.Options = rig.Options with { Model = () => model };
+        rig.Launcher.Then(c =>
+        {
+            model = "claude-sonnet-5-5"; // /model while the first session plays
+            c.Exit(0);
+        });
+
+        rig.Brain.Start();
+        await rig.Launcher.Running.Task.WaitAsync(Guard);
+
+        var sessions = rig.Launcher.Sessions;
+        Assert.Equal(2, sessions.Length);
+        Assert.Equal(["--model", "claude-opus-5-5"], sessions[0].Arguments.TakeLast(2));
+        Assert.Equal("--resume", sessions[1].Arguments[2]);
+        Assert.Equal(["--model", "claude-sonnet-5-5"], sessions[1].Arguments.TakeLast(2));
     }
 
     [Fact]
@@ -317,7 +339,7 @@ public class SubscriptionBrainTests
     public async Task A_session_that_ends_mid_run_is_resumed_with_the_same_flags(bool? stillInRun)
     {
         using var rig = new SubRig();
-        rig.Options = rig.Options with { Model = "claude-opus-5-5" };
+        rig.Options = rig.Options with { Model = () => "claude-opus-5-5" };
         rig.InRunAnswers = [true, stillInRun];
         rig.Launcher.Then(c => c.Exit(0));
 
@@ -592,6 +614,8 @@ public class SubscriptionBrainTests
 
         Assert.Equal(["interrupt", "kill", "dispose"], child.Events);
         Assert.Equal(1, rig.Delays.Count(d => d == TimeSpan.FromSeconds(5)));
+        Assert.Contains("subscription: killing Claude Code (pid 1001)", rig.Logged);
+        Assert.DoesNotContain(rig.Logged, l => l.Contains("after the stop") || l.Contains("SIGINT"));
         var (reason, message) = await rig.Stopped.Task.WaitAsync(Guard);
         Assert.Equal(BrainStopReason.UserStop, reason);
         Assert.Equal(SubscriptionBrain.Stopping, message);
@@ -612,6 +636,28 @@ public class SubscriptionBrainTests
         Assert.Equal(["interrupt", "dispose"], child.Events);
         Assert.Equal(BrainStopReason.UserStop, (await rig.Stopped.Task.WaitAsync(Guard)).Reason);
         Assert.Single(rig.Launcher.Sessions);
+        Assert.Contains("subscription: Claude Code (pid 1001) exited with code 130 after the stop", rig.Logged);
+        Assert.DoesNotContain(rig.Logged, l => l.Contains("SIGINT") || l.Contains("killing"));
+    }
+
+    [Fact]
+    public async Task Stop_says_so_when_sigint_could_not_be_sent()
+    {
+        using var rig = new SubRig();
+        rig.Launcher.NoSigInt = true;
+
+        rig.Brain.Start();
+        var child = await rig.Launcher.Running.Task.WaitAsync(Guard);
+        await rig.Brain.StopAsync().WaitAsync(Guard);
+
+        Assert.Equal(["interrupt", "kill", "dispose"], child.Events);
+        var logged = rig.Logged;
+        var asked = Array.IndexOf(logged, "subscription: asking Claude Code (pid 1001) to stop");
+        Assert.True(asked >= 0);
+        Assert.Equal("subscription: couldn't send SIGINT to Claude Code (pid 1001), so it was killed instead", logged[asked + 1]);
+        Assert.Equal("subscription: Claude Code (pid 1001) exited with code 137 after the stop", logged[asked + 2]);
+        Assert.DoesNotContain(logged, l => l.Contains("killing"));
+        Assert.Equal(BrainStopReason.UserStop, (await rig.Stopped.Task.WaitAsync(Guard)).Reason);
     }
 
     [Fact]
@@ -903,6 +949,7 @@ file sealed class FakeLauncher : IProcessLauncher
 
     public Exception? Throws { get; set; }
     public bool IgnoreInterrupt { get; set; }
+    public bool NoSigInt { get; set; }
     public TaskCompletionSource<FakeChild> Running { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public ChildProcessSpec[] Specs
@@ -934,7 +981,7 @@ file sealed class FakeLauncher : IProcessLauncher
         FakeChild child;
         lock (_gate)
         {
-            child = new FakeChild(1000 + _started.Count) { ExitOnInterrupt = !IgnoreInterrupt };
+            child = new FakeChild(1000 + _started.Count) { ExitOnInterrupt = !IgnoreInterrupt, KillOnInterrupt = NoSigInt };
             _started.Add((spec, child));
             script = IsAuth(spec) ? Auth : _scripts.Count > 0 ? _scripts.Dequeue() : null;
         }
@@ -957,6 +1004,9 @@ file sealed class FakeChild(int id) : IChildProcess
     private int _disposed;
 
     public bool ExitOnInterrupt { get; init; } = true;
+
+    /// <summary>Interrupt kills instead, as ChildProcess does when SIGINT can't be sent.</summary>
+    public bool KillOnInterrupt { get; init; }
     public int Id => id;
     public ChannelReader<string> StandardOutput => _out.Reader;
     public ChannelReader<string> StandardError => _err.Reader;
@@ -975,11 +1025,17 @@ file sealed class FakeChild(int id) : IChildProcess
         _exited.TrySetResult(code);
     }
 
-    public void Interrupt()
+    public bool Interrupt()
     {
         _events.Enqueue("interrupt");
+        if (KillOnInterrupt)
+        {
+            Kill();
+            return false;
+        }
         if (ExitOnInterrupt)
             Exit(130);
+        return true;
     }
 
     public void Kill()
@@ -1084,7 +1140,7 @@ public class ChildProcessTests : IDisposable
         using var child = Sh("trap 'echo got-int; exit 42' INT; echo ready; while :; do sleep 0.1; done");
         Assert.Equal("ready", await Next(child.StandardOutput));
 
-        child.Interrupt();
+        Assert.True(child.Interrupt());
 
         Assert.Equal(42, await child.Exited.WaitAsync(Guard));
         Assert.Equal(["got-int"], await Rest(child.StandardOutput));

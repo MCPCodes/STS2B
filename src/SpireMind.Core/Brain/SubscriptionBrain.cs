@@ -26,8 +26,10 @@ public sealed record SubscriptionBrainOptions
     /// <summary>The port of the mod's HTTP bridge, whose <c>/mcp</c> endpoint Claude Code plays through.</summary>
     public required int Port { get; init; }
 
-    /// <summary>A full model id for <c>--model</c>, or null for Claude Code's own default.</summary>
-    public string? Model { get; init; }
+    /// <summary>The full model id for <c>--model</c>, read as each session starts (a resumed one
+    /// too), so a /model change reaches Claude Code at its next session. Null, or null from it,
+    /// leaves Claude Code's own default.</summary>
+    public Func<string?>? Model { get; init; }
 
     /// <summary>The home folder, for "~" in the places searched and in the paths above.</summary>
     public string HomeDirectory { get; init; } = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -51,7 +53,8 @@ public sealed record SubscriptionBrainOptions
 /// <list type="bullet">
 /// <item>The binary is found by absolute path (a game started from Steam has no shell PATH), and
 /// <c>claude auth status</c> must say it is signed in before anything else happens.</item>
-/// <item>Nothing starts until a run is in progress, so no subscription turns go to the menu.</item>
+/// <item>Nothing starts until a run is in progress, so no subscription turns go to the menu.
+/// <see cref="BrainController"/> stops it once a run has been over for a while.</item>
 /// <item>The child's environment loses the API key variables, so the CLI bills the
 /// subscription, never the API credit.</item>
 /// <item>Its stream-json output is logged (init, assistant text, the result, stderr). A session
@@ -400,7 +403,7 @@ public sealed class SubscriptionBrain : IPlayBrain, IDisposable
     /// <see cref="ResumePrompt"/>), the session id after <c>--session-id</c> or <c>--resume</c>,
     /// the mod's endpoint as the only MCP server, the built-in tools it may use, permissions that
     /// allow the game tools and edits under runs/ and strategy/ and refuse anything else instead
-    /// of asking, stream-json output, and the model when one is set.
+    /// of asking, stream-json output, and the model when one is set, as it stands now.
     /// </summary>
     private List<string> Arguments(string repo, string sessionId, bool resume)
     {
@@ -416,10 +419,10 @@ public sealed class SubscriptionBrain : IPlayBrain, IDisposable
             "--output-format", "stream-json",
             "--verbose",
         };
-        if (!string.IsNullOrWhiteSpace(_options.Model))
+        if (_options.Model?.Invoke() is { } model && !string.IsNullOrWhiteSpace(model))
         {
             arguments.Add("--model");
-            arguments.Add(_options.Model.Trim());
+            arguments.Add(model.Trim());
         }
         return arguments;
     }
@@ -661,7 +664,8 @@ public sealed class SubscriptionBrain : IPlayBrain, IDisposable
     }
 
     // Makes sure the child is gone: SIGINT and up to StopGrace to quit when graceful (and the
-    // brain isn't aborting), then a kill.
+    // brain isn't aborting), then a kill. A graceful stop logs how it went, so the log tells a
+    // working SIGINT from the kill it falls back to (exit code 137 on macOS and Linux).
     private async Task EndChildAsync(IChildProcess child, bool graceful, CancellationToken abort)
     {
         if (child.Exited.IsCompleted)
@@ -669,7 +673,8 @@ public sealed class SubscriptionBrain : IPlayBrain, IDisposable
         if (graceful && !abort.IsCancellationRequested)
         {
             Log(Invariant($"asking Claude Code (pid {child.Id}) to stop"));
-            child.Interrupt();
+            if (!child.Interrupt())
+                Log(Invariant($"couldn't send SIGINT to Claude Code (pid {child.Id}), so it was killed instead"));
             if (!child.Exited.IsCompleted)
             {
                 using var grace = CancellationTokenSource.CreateLinkedTokenSource(abort);
@@ -677,7 +682,10 @@ public sealed class SubscriptionBrain : IPlayBrain, IDisposable
                 grace.Cancel();
             }
             if (child.Exited.IsCompleted)
+            {
+                Log(Invariant($"Claude Code (pid {child.Id}) exited with code {await child.Exited} after the stop"));
                 return;
+            }
         }
         Log(Invariant($"killing Claude Code (pid {child.Id})"));
         child.Kill();

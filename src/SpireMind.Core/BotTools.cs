@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
@@ -68,10 +69,11 @@ public sealed partial class BotTools
             }, required: ["action_id"])),
         new("act_sequence",
             "Play several actions from one snapshot in order, typically a whole combat turn, then return what ran and the snapshot after. " +
-            "All ids come from the snapshot named by version; each later one is matched by its label, so shifting hand positions don't matter. " +
-            "It stops early when a label is gone, the screen changes, an action is refused or changes nothing, the game doesn't settle, " +
-            "a chat message arrives or you are paused. End a sequence after any card or potion that draws, discovers, creates or transforms " +
-            "cards, has a random result you need to see, or opens a choice, and plan the rest from the returned snapshot. Ending with end_turn is fine.",
+            "All ids come from the snapshot named by version; each later one is found again by its label (and copies of a card by their " +
+            "cost and text), so shifting hand positions don't matter. It stops early when a label is gone, the screen changes, your turn ends, " +
+            "an action is refused or changes nothing, the game doesn't settle, a chat message arrives or you are paused. End a sequence after " +
+            "any card or potion that draws, discovers, creates or transforms cards, has a random result you need to see, opens a choice or " +
+            "ends your turn, and plan the rest from the returned snapshot. end_turn can only be the last id; leave it out after a card that ends your turn.",
             Schema(new JsonObject
             {
                 ["version"] = new JsonObject { ["type"] = "integer", ["description"] = "snapshot.version the ids came from" },
@@ -214,6 +216,8 @@ public sealed partial class BotTools
             return new ToolOutcome(Error($"actions takes 1 to {MaxSequence} ids; you sent {ids.Count}."), IsError: true);
         if (SentVersion(args) is not { } version)
             return new ToolOutcome(Error("version is required"), IsError: true);
+        if (ids.IndexOf("end_turn") is var endTurn and >= 0 && endTurn < ids.Count - 1)
+            return new ToolOutcome(Error("end_turn can only be the last id, since the turn is over once it runs. Nothing was played."), IsError: true);
 
         var start = await _waiter.CaptureAsync(ct);
         if (CannotAct(start, version) is { } why)
@@ -231,7 +235,7 @@ public sealed partial class BotTools
             var id = ids[k];
             if (last is not null)
             {
-                stopped = WhyStop(last, start.Screen);
+                stopped = WhyStop(last, start);
                 var match = stopped is null ? FindAgain(id, start, current) : null;
                 if (match is null)
                 {
@@ -305,16 +309,20 @@ public sealed partial class BotTools
                 : null;
 
     /// <summary>Why act_sequence should stop after <paramref name="last"/> instead of running the
-    /// next id, or null to go on. <paramref name="screen"/> is the screen the sequence started on.</summary>
-    private string? WhyStop(Step last, string screen)
+    /// next id, or null to go on. <paramref name="start"/> is the snapshot the sequence started on.
+    /// A card that ends the turn (Void Form) leaves the screen on combat, and the settle wait runs
+    /// through the enemy turn, so a new turn number is the only sign of it.</summary>
+    private string? WhyStop(Step last, GameSnapshot start)
     {
         var now = last.After;
         if (now.Version == last.Before.Version)
             return $"Nothing changed after '{last.Label}'. The game may have ignored it; re-check the state before repeating it.";
-        if (now.Screen != screen)
+        if (now.Screen != start.Screen)
             return $"The screen changed to {now.Screen}.";
         if (!now.AwaitingDecision)
             return $"The game is still busy ({now.Waiting ?? "no decision yet"}). Call wait_for_decision before acting again.";
+        if (!SameTurn(start, now))
+            return $"Your turn ended after '{last.Label}'.";
         if (_chat.PausedBy is { } pausedBy)
             return $"Paused by {pausedBy}. Call wait_for_decision; you can still talk with say.";
         if (_chat.HasUnread)
@@ -322,25 +330,87 @@ public sealed partial class BotTools
         return null;
     }
 
+    /// <summary>Whether two snapshots are in the same combat turn: state.turn and state.round are
+    /// unchanged (both absent off combat).</summary>
+    private static bool SameTurn(GameSnapshot a, GameSnapshot b) =>
+        JsonNode.DeepEquals(a.State["turn"], b.State["turn"]) && JsonNode.DeepEquals(a.State["round"], b.State["round"]);
+
     /// <summary>
     /// The action in <paramref name="now"/> that does what <paramref name="id"/> did in
-    /// <paramref name="start"/>: the same id while its label is unchanged, else the first action
-    /// with that label (copies of a card are interchangeable, wherever they sit in the hand),
-    /// else, for an id with a target (">e1"), the action at the same target whose label matches
+    /// <paramref name="start"/>. An id with no index or target (confirm, end_turn, proceed) stays
+    /// the same action while it is offered, even when its label carries a count that moved on
+    /// ("Confirm selection (1 chosen)"). Any other id is found by its label: the actions with that
+    /// label, else, for an id with a target (">e1"), those at the same target whose label matches
     /// once a twin tag like " (e1)" is dropped from both; the tag comes and goes as a namesake
-    /// lives or dies. Null when nothing matches.
+    /// lives or dies. <see cref="PickCopy"/> chooses among several. Null when nothing matches.
     /// </summary>
     private static string? FindAgain(string id, GameSnapshot start, GameSnapshot now)
     {
+        if (!id.Any(char.IsAsciiDigit))
+            return Offers(now, id) ? id : null;
+
         var label = LabelOf(start, id);
-        if (now.Actions.Any(a => a.Id == id && a.Label == label))
-            return id;
-        if (now.Actions.FirstOrDefault(a => a.Label == label) is { } same)
-            return same.Id;
-        if (TargetOf(id) is not { } target)
+        var matches = now.Actions.Where(a => a.Label == label).ToList();
+        if (matches.Count == 0 && TargetOf(id) is { } target)
+        {
+            var bare = TwinTag().Replace(label, "");
+            matches = now.Actions.Where(a => TargetOf(a.Id) == target && TwinTag().Replace(a.Label, "") == bare).ToList();
+        }
+        return PickCopy(id, start, now, matches);
+    }
+
+    /// <summary>
+    /// Of <paramref name="matches"/>, all labelled alike, the one most likely to be the card
+    /// <paramref name="id"/> named in <paramref name="start"/>. A label names only the card, so
+    /// copies with another cost, enchantment or text look the same: those whose hand entry
+    /// equals the original's go first, compared with their text and then without it (a Strength
+    /// gain rewrites every attack's text). Of those left, the same id if it is there, else the
+    /// first. Null when there are none.
+    /// </summary>
+    private static string? PickCopy(string id, GameSnapshot start, GameSnapshot now, List<LegalAction> matches)
+    {
+        if (matches.Count > 1)
+        {
+            foreach (var withText in new[] { true, false })
+            {
+                if (HandEntry(start, id, withText) is not { } card)
+                    break;
+                var copies = matches.Where(a => JsonNode.DeepEquals(HandEntry(now, a.Id, withText), card)).ToList();
+                if (copies.Count > 0)
+                {
+                    matches = copies;
+                    break;
+                }
+            }
+        }
+        return (matches.FirstOrDefault(a => a.Id == id) ?? matches.FirstOrDefault())?.Id;
+    }
+
+    /// <summary>Keys of a hand entry that say where the card sits or what it can do right now,
+    /// not which card it is.</summary>
+    private static readonly string[] PlaceKeys = ["i", "playable", "unplayable", "vs", "selected", "selectable"];
+
+    /// <summary>The state.hand entry of the card a play or select id names ("play:2>e0" and
+    /// "select:2" both name hand card 2) without <see cref="PlaceKeys"/>, and without its text
+    /// unless <paramref name="withText"/>. Null for any other id.</summary>
+    private static JsonNode? HandEntry(GameSnapshot snap, string id, bool withText)
+    {
+        var colon = id.IndexOf(':');
+        if (colon < 0 || id[..colon] is not ("play" or "select"))
             return null;
-        var bare = TwinTag().Replace(label, "");
-        return now.Actions.FirstOrDefault(a => TargetOf(a.Id) == target && TwinTag().Replace(a.Label, "") == bare)?.Id;
+        var end = id.IndexOf('>');
+        if (!int.TryParse(id[(colon + 1)..(end < 0 ? id.Length : end)], NumberStyles.None, CultureInfo.InvariantCulture, out var i)
+            || snap.State["hand"] is not JsonArray hand || i >= hand.Count)
+            return null;
+        var entry = hand[i]?.DeepClone();
+        if (entry is JsonObject card)
+        {
+            foreach (var key in PlaceKeys)
+                card.Remove(key);
+            if (!withText)
+                card.Remove("text");
+        }
+        return entry;
     }
 
     private static string LabelOf(GameSnapshot snap, string id) => snap.Actions.First(a => a.Id == id).Label;

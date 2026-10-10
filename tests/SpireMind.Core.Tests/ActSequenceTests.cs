@@ -11,11 +11,25 @@ public class ActSequenceTests
     /// A scripted fight: a hand of named cards, enemies that can die, and hooks that run when an
     /// action reaches the game. Ids and labels follow CombatReader: "play:2>e0" labelled "Play
     /// Strike on Jaw Worm", with " (e1)" after an enemy's name while another living enemy shares
-    /// it. Played cards leave the hand at once, so every play is a new settled decision.
+    /// it, and hand entries with the card's name, cost and text. A card costs 1 unless it says
+    /// otherwise: "Strike/0" is a Strike that costs 0, labelled like any Strike. Played cards
+    /// leave the hand at once, so every play is a new settled decision.
     /// </summary>
     private sealed class ScriptedFight : IGameBridge
     {
         public List<string> Hand { get; } = [];
+
+        /// <summary>Cards that left the hand by being played, in order.</summary>
+        public List<string> Played { get; } = [];
+
+        /// <summary>Cards picked in a hand selection, out of the hand until confirm puts them back.</summary>
+        public List<string> Selected { get; } = [];
+
+        /// <summary>The hand selection may be confirmed with nothing picked (retain up to N).</summary>
+        public bool OptionalSelection { get; set; }
+
+        /// <summary>Goes into every card's text, as Strength does into an attack's.</summary>
+        public int Strength { get; set; }
         public List<(string Name, bool Alive)> Enemies { get; } = [("Jaw Worm", true)];
 
         /// <summary>Cards played at an enemy; the rest are played without a target.</summary>
@@ -48,6 +62,18 @@ public class ActSequenceTests
 
         public void Kill(int enemy) => Enemies[enemy] = (Enemies[enemy].Name, false);
 
+        /// <summary>The enemy turn passes and the next hand is dealt.</summary>
+        public void NextTurn()
+        {
+            Turn++;
+            Hand.Clear();
+            Hand.AddRange(["Strike", "Defend", "Strike"]);
+        }
+
+        public static string Name(string card) => card.Split('/')[0];
+
+        private static string Cost(string card) => card.Split('/') is [_, var cost] ? cost : "1";
+
         public Task<GameSnapshot> CaptureAsync(CancellationToken ct)
         {
             if (Busy)
@@ -57,20 +83,23 @@ public class ActSequenceTests
             if (Screen == "hand_select")
             {
                 for (var i = 0; i < Hand.Count; i++)
-                    actions.Add(new LegalAction($"select:{i}", $"Select {Hand[i]}"));
+                    actions.Add(new LegalAction($"select:{i}", $"Select {Name(Hand[i])}"));
+                if (OptionalSelection || Selected.Count > 0)
+                    actions.Add(new LegalAction("confirm", $"Confirm selection ({Selected.Count} chosen)"));
             }
             else if (Screen == "combat")
             {
                 for (var i = 0; i < Hand.Count; i++)
                 {
-                    if (!Attacks.Contains(Hand[i]))
+                    var name = Name(Hand[i]);
+                    if (!Attacks.Contains(name))
                     {
-                        actions.Add(new LegalAction($"play:{i}", $"Play {Hand[i]}"));
+                        actions.Add(new LegalAction($"play:{i}", $"Play {name}"));
                         continue;
                     }
                     for (var j = 0; j < Enemies.Count; j++)
                         if (Enemies[j].Alive)
-                            actions.Add(new LegalAction($"play:{i}>e{j}", $"Play {Hand[i]} on {EnemyLabel(j)}"));
+                            actions.Add(new LegalAction($"play:{i}>e{j}", $"Play {name} on {EnemyLabel(j)}"));
                 }
                 actions.Add(new LegalAction("end_turn", "End turn"));
             }
@@ -86,7 +115,10 @@ public class ActSequenceTests
                 State = new JsonObject
                 {
                     ["turn"] = Turn,
-                    ["hand"] = new JsonArray(Hand.Select(c => (JsonNode)JsonValue.Create(c)!).ToArray()),
+                    ["hand"] = new JsonArray(Hand.Select((c, i) => (JsonNode)new JsonObject
+                    {
+                        ["i"] = i, ["name"] = Name(c), ["cost"] = Cost(c), ["text"] = $"{Name(c)} with {Strength} Strength.", ["playable"] = true,
+                    }).ToArray()),
                     ["enemies"] = new JsonArray(Enemies.Select((e, j) => (JsonNode)new JsonObject
                     {
                         ["i"] = j, ["name"] = e.Name, ["alive"] = e.Alive,
@@ -104,15 +136,9 @@ public class ActSequenceTests
             if (actionId == "end_turn")
             {
                 if (EnemyTurnHolds)
-                {
                     Busy = true;
-                }
                 else
-                {
-                    Turn++;
-                    Hand.Clear();
-                    Hand.AddRange(["Strike", "Defend", "Strike"]);
-                }
+                    NextTurn();
                 return Task.FromResult(ActionResult.Success);
             }
 
@@ -120,14 +146,28 @@ public class ActSequenceTests
             {
                 var parts = actionId[5..].Split('>');
                 var card = Hand[int.Parse(parts[0])];
+                var name = Name(card);
                 int? target = parts.Length > 1 ? int.Parse(parts[1][1..]) : null;
-                if (Unaffordable.Contains(card))
+                if (Unaffordable.Contains(name))
                     return Task.FromResult(ActionResult.Fail("Not enough energy."));
-                if (Duds.Contains(card))
+                if (Duds.Contains(name))
                     return Task.FromResult(ActionResult.Success);
                 Hand.RemoveAt(int.Parse(parts[0]));
-                if (OnPlay.TryGetValue(card, out var effect))
+                Played.Add(card);
+                if (OnPlay.TryGetValue(name, out var effect))
                     effect(target);
+            }
+            else if (actionId.StartsWith("select:"))
+            {
+                var i = int.Parse(actionId[7..]);
+                Selected.Add(Hand[i]);
+                Hand.RemoveAt(i);
+            }
+            else if (actionId == "confirm")
+            {
+                Hand.AddRange(Selected);
+                Selected.Clear();
+                Screen = "combat";
             }
             return Task.FromResult(ActionResult.Success);
         }
@@ -213,6 +253,97 @@ public class ActSequenceTests
         Assert.Equal(["play:0>e0", "play:1>e0"], game.Executed);
         Assert.Equal(["Play Strike on Jaw Worm", "Play Strike on Jaw Worm"], DoneLabels(outcome));
         Assert.Equal(["Defend"], game.Hand);
+    }
+
+    [Fact]
+    public void Plays_the_copy_it_was_given_when_copies_differ()
+    {
+        // The model picked the cheap Strike. Once Defend is gone it sits at 1, and the plain one at 0.
+        var game = new ScriptedFight("Defend", "Strike", "Strike/0");
+        var (tools, _) = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), "play:0", "play:2>e0", "play:1>e0");
+
+        Assert.False(outcome.IsError);
+        Assert.Equal(["play:0", "play:1>e0", "play:0>e0"], game.Executed);
+        Assert.Equal(["Defend", "Strike/0", "Strike"], game.Played);
+    }
+
+    [Fact]
+    public void A_copy_that_shifts_into_the_planned_slot_is_not_played_for_the_one_that_left_it()
+    {
+        var game = new ScriptedFight("Strike", "Strike/0", "Strike");
+        var (tools, _) = Build(game);
+
+        // play:1>e0 is still offered after the first play, but it is now the plain Strike.
+        var outcome = Sequence(tools, Version(tools), "play:0>e0", "play:1>e0");
+
+        Assert.False(outcome.IsError);
+        Assert.Equal(["play:0>e0", "play:0>e0"], game.Executed);
+        Assert.Equal(["Strike", "Strike/0"], game.Played);
+    }
+
+    [Fact]
+    public void Copies_are_told_apart_by_cost_when_every_text_changed()
+    {
+        var game = new ScriptedFight("Inflame", "Strike", "Strike/0");
+        game.OnPlay["Inflame"] = _ => game.Strength += 2;
+        var (tools, _) = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), "play:0", "play:2>e0");
+
+        Assert.False(outcome.IsError);
+        Assert.Equal(["play:0", "play:1>e0"], game.Executed);
+        Assert.Equal(["Inflame", "Strike/0"], game.Played);
+    }
+
+    [Fact]
+    public void Confirm_is_found_again_though_its_count_moved_on()
+    {
+        var game = new ScriptedFight("Strike", "Defend", "Bash") { Screen = "hand_select", OptionalSelection = true };
+        var (tools, _) = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), "select:0", "select:1", "confirm");
+
+        Assert.False(outcome.IsError);
+        Assert.Equal(["select:0", "select:0", "confirm"], game.Executed);
+        Assert.Equal(["Select Strike", "Select Defend", "Confirm selection (2 chosen)"], DoneLabels(outcome));
+        Assert.Equal(["Bash", "Strike", "Defend"], game.Hand);
+        Assert.Equal("combat", outcome.Payload["next"]!["screen"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void Stops_when_a_card_ends_the_turn_before_a_trailing_end_turn()
+    {
+        var game = new ScriptedFight("Void Form", "Defend");
+        game.OnPlay["Void Form"] = _ => game.NextTurn();
+        var (tools, _) = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), "play:0", "end_turn");
+
+        Assert.False(outcome.IsError);
+        Assert.Equal(["play:0"], game.Executed);
+        Assert.Equal("Your turn ended after 'Play Void Form'.", Stopped(outcome));
+        Assert.Equal(["end_turn"], NotRun(outcome));
+        Assert.Equal(2, outcome.Payload["next"]!["state"]!["turn"]!.GetValue<int>());
+        Assert.Equal(2, game.Turn);
+    }
+
+    [Fact]
+    public void Stops_when_a_card_ends_the_turn_mid_plan()
+    {
+        // The next hand has a Strike too, but it was never planned for.
+        var game = new ScriptedFight("Void Form", "Strike");
+        game.OnPlay["Void Form"] = _ => game.NextTurn();
+        var (tools, _) = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), "play:0", "play:1>e0");
+
+        Assert.False(outcome.IsError);
+        Assert.Equal(["play:0"], game.Executed);
+        Assert.Equal("Your turn ended after 'Play Void Form'.", Stopped(outcome));
+        Assert.Equal(["play:1>e0"], NotRun(outcome));
+        Assert.Equal(["Strike", "Defend", "Strike"], game.Hand);
     }
 
     [Fact]
@@ -430,6 +561,7 @@ public class ActSequenceTests
     [InlineData("""{"version": V, "actions": "end_turn"}""", "actions must be a list of action ids")]
     [InlineData("""{"version": V, "actions": ["end_turn", 3]}""", "actions must be a list of action ids")]
     [InlineData("""{"actions": ["end_turn"]}""", "version is required")]
+    [InlineData("""{"version": V, "actions": ["end_turn", "play:0>e0"]}""", "end_turn can only be the last id, since the turn is over once it runs. Nothing was played.")]
     public void Bad_arguments_are_refused_before_anything_runs(string json, string error)
     {
         var game = new ScriptedFight("Strike");

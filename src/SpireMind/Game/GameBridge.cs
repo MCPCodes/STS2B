@@ -10,8 +10,13 @@ namespace SpireMind.Game;
 internal sealed class GameBridge : IGameBridge
 {
     private readonly MainThreadQueue _main;
+    private volatile bool _multiplayer;
 
     public GameBridge(MainThreadQueue main) => _main = main;
+
+    /// <summary>Whether the last snapshot was taken in a co-op run. Safe to read from any
+    /// thread: the API brain checks it on its own task, where the game can't be touched.</summary>
+    public bool IsMultiplayer => _multiplayer;
 
     public Task<GameSnapshot> CaptureAsync(CancellationToken ct) =>
         _main.Run(() =>
@@ -19,6 +24,7 @@ internal sealed class GameBridge : IGameBridge
             try
             {
                 var ctx = GameContext.Capture();
+                _multiplayer = ctx.IsMultiplayer;
                 ActionTracker.Poll(ctx);
 
                 if (ActionTracker.Pending is { } pending)
