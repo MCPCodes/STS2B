@@ -84,7 +84,7 @@ ApiBrain (background task)                      BotTools (same instance the MCP 
 
 ## Subscription fallback
 
-`SubscriptionBrain` lives in Core with everything else: it starts processes through `IProcessLauncher`, which is `ProcessLauncher` (around `System.Diagnostics.Process`) in the mod and a fake in the tests. It runs Claude Code in the repo folder. Mark's Mac has the CLI from Homebrew (v2.1.287 on 2026-10-09). The arguments, as built:
+`SubscriptionBrain` lives in Core with everything else: it starts processes through `IProcessLauncher`, which is `ProcessLauncher` (around `System.Diagnostics.Process`) in the mod and a fake in the tests. It runs Claude Code in the repo folder. Mark's Mac has the CLI from Homebrew (v2.1.287 on 2026-10-09). Haiku 5.5 needs Claude Code 2.1.293 or newer: older versions take its full id but report a 200K context and a guessed cost, and read the short name `haiku` as Haiku 4.5 (the brain always passes the full id). Homebrew's `claude-code` cask follows the stable channel and can lag behind; `claude-code@latest` follows the newest release. The arguments, as built:
 
 ```
 claude -p "/play the whole run" --session-id <uuid> --strict-mcp-config

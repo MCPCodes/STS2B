@@ -24,8 +24,8 @@ public class ModelPricesTests
     [Theory]
     // in*4 + 5m*5 + 1h*8 + read*0.20 + out*20 (per million)
     [InlineData("claude-opus-5-5", "0.488")]
-    // in*2 + 5m*2.5 + 1h*4 + read*0.20 + out*10
-    [InlineData("claude-sonnet-5-5", "0.248")]
+    // in*2 + 5m*2.5 + 1h*4 + read*0.10 + out*10
+    [InlineData("claude-sonnet-5-5", "0.244")]
     // in*0.10 + 5m*0.125 + 1h*0.20 + read*0.01 + out*0.50
     [InlineData("claude-haiku-5-5", "0.0124")]
     // in*10 + 5m*12.5 + 1h*20 + read*0.25 + out*50
