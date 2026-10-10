@@ -14,13 +14,13 @@ Slay the Spire 2 (macOS)
             ├─ /act     run one action, for curl debugging
             └─ /chat    post to or read the in-game chat, for curl debugging
 Claude Code (signed in with the Max plan)
-  └─ .mcp.json points at /mcp → tools: get_state, wait_for_decision, act, say, get_deck, get_persona
+  └─ .mcp.json points at /mcp → tools: get_state, wait_for_decision, act, act_sequence, say, get_deck, get_persona
   └─ /play command + strategy/ notes = the brain
 ```
 
 The mod turns whatever screen is up into a **snapshot**: the screen name, the facts needed to decide (hand, energy, enemies and their intents, map, rewards, shop stock...) and a list of **legal actions** with short ids. The model only ever picks one of those ids, so it can't click something that doesn't exist. Every snapshot has a version; acting on a stale version is rejected instead of misfiring.
 
-`act` waits for the game to settle (animations, enemy turn) and returns the next decision, so a typical turn is one tool call per card. `say` puts a line in the in-game chat, `get_deck` returns the full deck with card and relic text for build decisions, and `get_persona` describes the character the bot plays.
+`act` waits for the game to settle (animations, enemy turn) and returns the next decision. `act_sequence` plays several actions from one snapshot the same way, so a typical fight turn is one tool call. `say` puts a line in the in-game chat, `get_deck` returns the full deck with card and relic text for build decisions, and `get_persona` describes the character the bot plays.
 
 ## Layout
 

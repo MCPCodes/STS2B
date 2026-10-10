@@ -70,9 +70,12 @@ Both brains get `act_sequence {version, actions: [id, ...]}` to play several act
 - the label is no longer offered,
 - the screen is no longer the one the sequence started on (a hand selection opened, the fight ended),
 - the game doesn't settle into a decision,
+- an action is refused by the game or changes nothing,
 - a chat message arrives or the bot is paused.
 
-`play.md` tells the model to end a sequence after any card that draws, discovers or creates cards, so it sees what it got before planning further.
+A target's label has " (e1)" after the enemy's name only while another living enemy shares it, so when a twin dies the tool also accepts the action at the same target whose label matches once that tag is dropped. Before anything runs, every id must be legal in the snapshot, the version must match and the game must be waiting on the bot; otherwise it is refused like `act`, and nothing runs. It takes 1 to 12 ids. The result lists what ran, then why it stopped and which ids didn't run, then the snapshot: `{"done": [{"id", "label"}, ...], "stopped", "not_run", "warning", "next"}`, with `stopped` and `not_run` only when it stopped early. It is an error only when nothing ran.
+
+`play.md` tells the model to end a sequence after any card or potion that draws, discovers, creates or transforms cards, has a random result it needs to see, or opens a choice, so it sees what it got before planning further.
 
 ## Cost
 
