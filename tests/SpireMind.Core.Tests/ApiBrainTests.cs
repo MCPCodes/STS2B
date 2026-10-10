@@ -742,7 +742,7 @@ public class ApiBrainTests
         Assert.Equal("""{"type":"ephemeral"}""", request["cache_control"]!.ToJsonString());
 
         var tools = request["tools"]!.AsArray().Select(t => t!.AsObject()).ToArray();
-        Assert.Equal(["get_state", "wait_for_decision", "act", "nested", "notes_read", "notes_write", "notes_append"], tools.Select(t => t["name"]!.GetValue<string>()));
+        Assert.Equal(["get_state", "wait_for_decision", "act", "nested", "notes_read", "notes_write", "notes_append", "notes_list"], tools.Select(t => t["name"]!.GetValue<string>()));
         Assert.All(tools, t =>
         {
             Assert.True(t["strict"]!.GetValue<bool>());
@@ -1129,6 +1129,33 @@ public class ApiBrainTests
     }
 
     [Fact]
+    public async Task The_wiki_is_indexed_in_the_prompt_and_its_tools_run_in_process()
+    {
+        using var rig = new Rig();
+        rig.WriteFile("strategy/wiki/enemies/jaw-worm.md", "# Jaw Worm\nAn Act 1 brute.\n\n## Facts (game files, v0.107.1)\n- FACT-BODY\n\n## Lessons\n");
+        rig.Api.Then(Reply("tool_use", null,
+            ToolUse("toolu_1", "notes_list"),
+            ToolUse("toolu_2", "notes_append", new JsonObject
+            {
+                ["file"] = "strategy/wiki/enemies/jaw-worm.md", ["content"] = "- (Ironclad, 2026-10-10) NEW-LESSON",
+            })));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        var system = SystemText(rig.Api[0]);
+        Assert.Contains("\nstrategy/wiki/enemies/jaw-worm.md: An Act 1 brute.\n", system);
+        Assert.DoesNotContain("FACT-BODY", system);
+
+        var results = rig.Api[1]["messages"]![2]!["content"]!.AsArray();
+        var listed = JsonNode.Parse(results[0]!["content"]!.GetValue<string>())!;
+        Assert.Equal("Jaw Worm", listed["wiki"]![0]!["title"]!.GetValue<string>());
+        Assert.False(results[1]!["is_error"]!.GetValue<bool>());
+        Assert.EndsWith("## Lessons\n- (Ironclad, 2026-10-10) NEW-LESSON\n", File.ReadAllText(Path.Combine(rig.Dir, "strategy", "wiki", "enemies", "jaw-worm.md")));
+        Assert.DoesNotContain(rig.Host.Calls, c => c.Name.StartsWith("notes_", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Plays_through_the_real_bot_tools()
     {
         var game = new FakeGame { ActionDelay = TimeSpan.Zero };
@@ -1142,7 +1169,7 @@ public class ApiBrainTests
         await rig.Api.Exhausted.Task.WaitAsync(Guard);
 
         var names = rig.Api[0]["tools"]!.AsArray().Select(t => t!["name"]!.GetValue<string>());
-        Assert.Equal(tools.Specs.Select(s => s.Name).Concat(["notes_read", "notes_write", "notes_append"]), names);
+        Assert.Equal(tools.Specs.Select(s => s.Name).Concat(["notes_read", "notes_write", "notes_append", "notes_list"]), names);
         Assert.Contains("\"id\":\"play:0>e0\"", Text(rig.Api[0]["messages"]![0]!));
 
         var result = rig.Api[1]["messages"]![2]!["content"]![0]!;
@@ -1308,7 +1335,8 @@ public class PromptBuilderTests : IDisposable
         var solo = PromptBuilder.Build(_dir, null, multiplayer: false);
         Assert.Empty(solo.Files);
         Assert.DoesNotContain("## Strategy notes", solo.Text);
-        Assert.StartsWith("## Playing from inside the game", solo.Text);
+        Assert.StartsWith("## Wiki index\n\nThe wiki is empty", solo.Text);
+        Assert.Contains("\n\n## Playing from inside the game", solo.Text);
 
         var coop = PromptBuilder.Build(_dir, "Necrobinder", multiplayer: true);
         Assert.Contains("COOP-NOTES", coop.Text);
@@ -1328,6 +1356,113 @@ public class PromptBuilderTests : IDisposable
         var prompt = PromptBuilder.Build(_dir, null, false, notes);
         Assert.Contains("NEW-LESSONS", prompt.Text);
         Assert.DoesNotContain("OLD-LESSONS", prompt.Text);
+    }
+
+    [Fact]
+    public void The_rules_sheet_follows_the_general_notes_and_is_labelled()
+    {
+        Write("strategy/general.md", "GENERAL-NOTES");
+        Write("strategy/rules.md", "# Rules\nRULES-SHEET\n");
+        Write("strategy/bosses-and-elites.md", "BOSS-NOTES");
+        Write("strategy/learned.md", "LEARNED-NOTES");
+
+        var prompt = PromptBuilder.Build(_dir, null, multiplayer: false);
+
+        Assert.Contains($"<file path=\"strategy/rules.md\" about=\"{PromptBuilder.RulesLabel}\">\n# Rules\nRULES-SHEET\n</file>", prompt.Text);
+        Assert.Contains("<file path=\"strategy/general.md\">\nGENERAL-NOTES\n</file>", prompt.Text);
+        var order = new[] { "GENERAL-NOTES", "RULES-SHEET", "BOSS-NOTES", "LEARNED-NOTES" }.Select(t => prompt.Text.IndexOf(t, StringComparison.Ordinal)).ToArray();
+        Assert.DoesNotContain(-1, order);
+        Assert.Equal(order.OrderBy(i => i), order);
+        Assert.Equal(["general.md", "rules.md", "bosses-and-elites.md", "learned.md"], prompt.Files.Select(Path.GetFileName));
+    }
+
+    [Fact]
+    public void A_missing_rules_sheet_is_skipped()
+    {
+        Write("strategy/general.md", "GENERAL-NOTES");
+        Write("strategy/bosses-and-elites.md", "BOSS-NOTES");
+
+        var prompt = PromptBuilder.Build(_dir, null, multiplayer: false);
+
+        Assert.DoesNotContain("<file path=\"strategy/rules.md\"", prompt.Text);
+        Assert.DoesNotContain(PromptBuilder.RulesLabel, prompt.Text);
+        Assert.Equal(["general.md", "bosses-and-elites.md"], prompt.Files.Select(Path.GetFileName));
+    }
+
+    [Fact]
+    public void An_empty_wiki_says_so()
+    {
+        Write("strategy/wiki/README.md", "# Wiki conventions\nFor humans.\n");
+
+        var prompt = PromptBuilder.Build(_dir, null, multiplayer: false);
+
+        Assert.Contains("## Wiki index\n\nThe wiki is empty: no pages under `strategy/wiki/` yet.\n\n## Playing from inside the game", prompt.Text);
+        Assert.DoesNotContain("For humans", prompt.Text);
+    }
+
+    [Fact]
+    public void The_wiki_index_lists_each_page_with_its_summary_but_not_its_text()
+    {
+        Write("strategy/general.md", "GENERAL-NOTES");
+        Write("strategy/learned.md", "LEARNED-NOTES");
+        Write("strategy/wiki/README.md", "# Conventions\nHUMANS-ONLY\n");
+        Write("strategy/wiki/potions.md", "# Potions\nEvery potion, with exact numbers.\n\n## Facts (game files, v0.107.1)\n- POTION-FACT\n\n## Lessons\n");
+        Write("strategy/wiki/enemies/jaw-worm.md", "# Jaw Worm\nAn Act 1 brute.\n\n## Facts (game files, v0.107.1)\n- WORM-FACT\n");
+        Write("strategy/wiki/lessons/no-summary.md", "# No summary\n## Lessons\n- (Ironclad, 2026-10-10) LESSON-LINE\n");
+        Write("strategy/wiki/enemies/Bad-Name.md", "# Bad\nNot a page.\n");
+
+        var prompt = PromptBuilder.Build(_dir, null, multiplayer: false);
+
+        Assert.Contains(
+            "## Wiki index\n\nPages under `strategy/wiki/` when this prompt was built, with their summaries (`notes_list` also shows newer ones):\n\n" +
+            "strategy/wiki/enemies/jaw-worm.md: An Act 1 brute.\n" +
+            "strategy/wiki/lessons/no-summary.md\n" +
+            "strategy/wiki/potions.md: Every potion, with exact numbers.\n\n" +
+            "## Playing from inside the game", prompt.Text);
+        foreach (var body in new[] { "HUMANS-ONLY", "POTION-FACT", "WORM-FACT", "LESSON-LINE", "Not a page", "Bad-Name" })
+            Assert.DoesNotContain(body, prompt.Text);
+        Assert.True(prompt.Text.IndexOf("LEARNED-NOTES", StringComparison.Ordinal) < prompt.Text.IndexOf("## Wiki index", StringComparison.Ordinal));
+        Assert.DoesNotContain(prompt.Files, f => f.Contains("wiki", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void The_wiki_index_comes_from_the_notes_folder_when_given()
+    {
+        Write("strategy/wiki/staged.md", "# Staged\nA copy in the prompt folder.\n");
+        var notes = Path.Combine(_dir, "notes");
+        Directory.CreateDirectory(Path.Combine(notes, "strategy", "wiki", "lessons"));
+        File.WriteAllText(Path.Combine(notes, "strategy", "wiki", "lessons", "written.md"), "# Written\nA page the brain wrote.\n");
+
+        Assert.Contains("strategy/wiki/staged.md: A copy in the prompt folder.", PromptBuilder.Build(_dir, null, false).Text);
+        var prompt = PromptBuilder.Build(_dir, null, false, notes);
+        Assert.Contains("strategy/wiki/lessons/written.md: A page the brain wrote.", prompt.Text);
+        Assert.DoesNotContain("staged.md", prompt.Text);
+    }
+
+    [Fact]
+    public void The_wiki_index_stops_at_its_limit()
+    {
+        var count = PromptBuilder.WikiIndexLimit + 5;
+        for (var i = 0; i < count; i++)
+            Write($"strategy/wiki/lessons/page-{i:D3}.md", $"# Page {i}\nSummary {i}.\n");
+
+        var index = PromptBuilder.WikiIndex(_dir);
+
+        var lines = index.Split('\n').Where(l => l.StartsWith("strategy/wiki/", StringComparison.Ordinal)).ToArray();
+        Assert.Equal(PromptBuilder.WikiIndexLimit, lines.Length);
+        Assert.Equal("strategy/wiki/lessons/page-000.md: Summary 0.", lines[0]);
+        Assert.Equal("strategy/wiki/lessons/page-199.md: Summary 199.", lines[^1]);
+        Assert.EndsWith("\nstrategy/wiki/lessons/page-199.md: Summary 199.\n5 more pages; `notes_list` shows them all.", index);
+        Assert.Contains(index, PromptBuilder.Build(_dir, null, false).Text);
+    }
+
+    [Fact]
+    public void The_harness_notes_cover_the_wiki_tools()
+    {
+        foreach (var text in new[] { "notes_list", "strategy/wiki/<slug>.md", "strategy/wiki/<folder>/<slug>.md", "## Lessons" })
+            Assert.Contains(text, PromptBuilder.HarnessNotes);
+        // rules.md can be missing, so the notes don't promise it is above.
+        Assert.DoesNotContain("strategy/rules.md", PromptBuilder.HarnessNotes);
     }
 
     [Theory]
@@ -1530,15 +1665,273 @@ public class NotesToolsTests : IDisposable
     [Fact]
     public void Specs_are_strict_ready()
     {
-        Assert.Equal(["notes_read", "notes_write", "notes_append"], _notes.Specs.Select(s => s.Name));
+        Assert.Equal(["notes_read", "notes_write", "notes_append", "notes_list"], _notes.Specs.Select(s => s.Name));
         Assert.All(_notes.Specs, s => Assert.True(_notes.Handles(s.Name)));
-        foreach (var spec in _notes.Specs.Skip(1))
+        foreach (var spec in _notes.Specs.Take(3))
         {
-            var file = spec.InputSchema["properties"]!["file"]!;
-            Assert.Equal(["runs/current.md", "strategy/learned.md"], file["enum"]!.AsArray().Select(e => e!.GetValue<string>()));
-            Assert.Equal(["file", "content"], spec.InputSchema["required"]!.AsArray().Select(e => e!.GetValue<string>()));
+            // Wiki pages can't be an enum and strict schemas take no pattern, so the forms are described.
+            var file = spec.InputSchema["properties"]!["file"]!.AsObject();
+            Assert.Equal("string", file["type"]!.GetValue<string>());
+            Assert.False(file.ContainsKey("enum"));
+            Assert.False(file.ContainsKey("pattern"));
+            Assert.Contains(NotesTools.FileForms, file["description"]!.GetValue<string>());
+            Assert.Equal(spec.Name == "notes_read" ? ["file"] : ["file", "content"],
+                spec.InputSchema["required"]!.AsArray().Select(e => e!.GetValue<string>()));
         }
         Assert.Contains("32 KB", _notes.Specs[1].Description);
+
+        var list = _notes.Specs[3].InputSchema;
+        Assert.Empty(list["properties"]!.AsObject());
+        Assert.False(list.ContainsKey("required"));
+        Assert.False(ApiBrain.StrictSchema(list)["additionalProperties"]!.GetValue<bool>());
+    }
+
+    // ---- Wiki pages ----
+
+    private string Disk(string file) => Path.Combine(_dir, file.Replace('/', Path.DirectorySeparatorChar));
+
+    [Theory]
+    [InlineData("strategy/wiki/potions.md")]
+    [InlineData("strategy/wiki/enemies/jaw-worm.md")]
+    [InlineData("strategy/wiki/encounters/act1-overgrowth.md")]
+    [InlineData("strategy/wiki/lessons/new-folder-page.md")]
+    [InlineData("strategy/wiki/2nd/a1-b2-c3.md")]
+    [InlineData("strategy/wiki/lessons/con-artist.md")]
+    [InlineData("strategy/wiki/com10.md")]
+    public void Wiki_pages_can_be_written_appended_and_read(string file)
+    {
+        Assert.False(Write(file, "# Old name\nAn older summary.\n\n## Lessons\n").IsError);
+        // A new first line is a new run only for the journal: pages are never archived.
+        var written = Write(file, "# Page\nWhat it covers.\n\n## Lessons\n");
+        Assert.False(written.IsError, written.Payload.ToJsonString());
+        Assert.Null(written.Payload["archived_previous_as"]);
+        Assert.False(Call("notes_append", new JsonObject { ["file"] = file, ["content"] = "- (Ironclad, 2026-10-10) A lesson." }).IsError);
+
+        const string expected = "# Page\nWhat it covers.\n\n## Lessons\n- (Ironclad, 2026-10-10) A lesson.\n";
+        var read = Call("notes_read", new JsonObject { ["file"] = file });
+        Assert.True(read.Payload["exists"]!.GetValue<bool>());
+        Assert.Equal(expected, read.Payload["content"]!.GetValue<string>());
+        Assert.Equal(expected, File.ReadAllText(Disk(file)));
+        Assert.Equal(expected, _notes.ReadText(file));
+        Assert.Single(Directory.GetFiles(Path.GetDirectoryName(Disk(file))!));
+    }
+
+    [Fact]
+    public void A_missing_wiki_page_reads_empty_and_an_append_creates_it_with_its_folder()
+    {
+        var read = Call("notes_read", new JsonObject { ["file"] = "strategy/wiki/lessons/shops.md" });
+        Assert.False(read.IsError);
+        Assert.False(read.Payload["exists"]!.GetValue<bool>());
+
+        Assert.False(Call("notes_append", new JsonObject { ["file"] = "strategy/wiki/lessons/shops.md", ["content"] = "# Shops" }).IsError);
+        Assert.Equal("# Shops\n", File.ReadAllText(Disk("strategy/wiki/lessons/shops.md")));
+    }
+
+    [Theory]
+    [InlineData("strategy/wiki/../learned.md")]
+    [InlineData("strategy/wiki/enemies/../../learned.md")]
+    [InlineData("strategy/wiki/./potions.md")]
+    [InlineData("./strategy/wiki/potions.md")]
+    [InlineData("/strategy/wiki/potions.md")]
+    [InlineData("/etc/wiki/potions.md")]
+    [InlineData("C:\\strategy\\wiki\\potions.md")]
+    [InlineData("strategy\\wiki\\potions.md")]
+    [InlineData("strategy/wiki/enemies\\jaw-worm.md")]
+    [InlineData("strategy/wiki/README.md")]
+    [InlineData("strategy/wiki/readme.md")]
+    [InlineData("strategy/wiki/enemies/readme.md")]
+    [InlineData("strategy/wiki/readme/jaw-worm.md")]
+    [InlineData("strategy/wiki/nul.md")]
+    [InlineData("strategy/wiki/lessons/con.md")]
+    [InlineData("strategy/wiki/aux.md")]
+    [InlineData("strategy/wiki/prn.md")]
+    [InlineData("strategy/wiki/com1.md")]
+    [InlineData("strategy/wiki/enemies/lpt9.md")]
+    [InlineData("strategy/wiki/nul/jaw-worm.md")]
+    [InlineData("strategy/wiki/com3/x.md")]
+    [InlineData("strategy/wiki/Potions.md")]
+    [InlineData("strategy/wiki/Enemies/jaw-worm.md")]
+    [InlineData("strategy/wiki/potions.MD")]
+    [InlineData("Strategy/wiki/potions.md")]
+    [InlineData("strategy/wiki/enemies/act1/jaw-worm.md")]
+    [InlineData("strategy/wiki/potions")]
+    [InlineData("strategy/wiki/potions.txt")]
+    [InlineData("strategy/wiki/potions.md.md")]
+    [InlineData("strategy/wiki/.md")]
+    [InlineData("strategy/wiki/enemies/.md")]
+    [InlineData("strategy/wiki//jaw-worm.md")]
+    [InlineData("strategy/wiki/")]
+    [InlineData("strategy/wiki/jaw--worm.md")]
+    [InlineData("strategy/wiki/-jaw-worm.md")]
+    [InlineData("strategy/wiki/jaw-worm-.md")]
+    [InlineData("strategy/wiki/enemies-/jaw-worm.md")]
+    [InlineData("strategy/wiki/jaw_worm.md")]
+    [InlineData("strategy/wiki/jaw worm.md")]
+    [InlineData("strategy/wiki/caf\u00e9.md")]
+    [InlineData("strategy/wiki/potions.md ")]
+    [InlineData("strategy/wiki/potions.md\n")]
+    [InlineData("strategy/wiki.md")]
+    [InlineData("strategy/wikis/potions.md")]
+    [InlineData("runs/wiki/potions.md")]
+    public void Other_wiki_paths_are_refused(string file)
+    {
+        var outcomes = new[]
+        {
+            Write(file, "x"),
+            Call("notes_append", new JsonObject { ["file"] = file, ["content"] = "x" }),
+            Call("notes_read", new JsonObject { ["file"] = file }),
+        };
+        foreach (var outcome in outcomes)
+        {
+            Assert.True(outcome.IsError);
+            var error = outcome.Payload["error"]!.GetValue<string>();
+            Assert.Contains("strategy/wiki/<folder>/<slug>.md", error);
+            Assert.Contains("readme and Windows device names", error);
+        }
+        Assert.Throws<ArgumentException>(() => _notes.ReadText(file));
+        Assert.Empty(Directory.GetFileSystemEntries(_dir));
+    }
+
+    [Fact]
+    public void An_absolute_path_to_a_page_is_refused()
+    {
+        var file = Disk("strategy/wiki/potions.md");
+        Assert.True(Write(file, "x").IsError);
+        Assert.True(Call("notes_read", new JsonObject { ["file"] = file }).IsError);
+        Assert.Empty(Directory.GetFileSystemEntries(_dir));
+    }
+
+    [Fact]
+    public void Wiki_pages_have_the_same_size_limit()
+    {
+        const string page = "strategy/wiki/cards/ironclad.md";
+        Assert.False(Write(page, new string('a', NotesTools.MaxBytes)).IsError);
+        Assert.True(Write(page, new string('b', NotesTools.MaxBytes + 1)).IsError);
+        Assert.True(Call("notes_append", new JsonObject { ["file"] = page, ["content"] = "x" }).IsError);
+        Assert.Equal(new string('a', NotesTools.MaxBytes), File.ReadAllText(Disk(page)));
+    }
+
+    private const string FactsPage =
+        "# Jaw Worm\nAn Act 1 brute.\n\n## Facts (game files, v0.107.1)\n- 40-44 HP.\n- Chomp: 11 damage.\n\n## Lessons\n- (Ironclad, 2026-10-09) Old lesson.\n";
+
+    [Fact]
+    public void A_rewrite_of_a_page_with_facts_may_change_only_its_lessons()
+    {
+        const string page = "strategy/wiki/enemies/jaw-worm.md";
+        Assert.False(Write(page, FactsPage).IsError);
+
+        // Same facts, with the line endings and trailing spaces a model might change; new lessons.
+        var kept = "# Jaw Worm  \r\nAn Act 1 brute.\r\n\r\n## Facts (game files, v0.107.1)\r\n- 40-44 HP. \r\n- Chomp: 11 damage.\r\n\r\n\r\n" +
+                   "## Lessons\r\n- (Ironclad, 2026-10-10) Corrected lesson.\r\n";
+        Assert.False(Write(page, kept).IsError);
+        Assert.Equal(kept, File.ReadAllText(Disk(page)));
+        Assert.False(Write(page, FactsPage).IsError);
+
+        foreach (var changed in new[]
+                 {
+                     FactsPage.Replace("Chomp: 11", "Chomp: 12", StringComparison.Ordinal),
+                     FactsPage.Replace("- 40-44 HP.\n", "", StringComparison.Ordinal),
+                     FactsPage.Replace("An Act 1 brute.", "A brute.", StringComparison.Ordinal),
+                     "Prepended.\n" + FactsPage,
+                     FactsPage.Replace("## Lessons\n", "", StringComparison.Ordinal),
+                     "# Jaw Worm\nAn Act 1 brute.\n\n## Lessons\n- (Ironclad, 2026-10-10) Facts gone.\n",
+                     "",
+                 })
+        {
+            var outcome = Write(page, changed);
+            Assert.True(outcome.IsError, changed);
+            Assert.Contains("Facts section", outcome.Payload["error"]!.GetValue<string>());
+        }
+        Assert.Equal(FactsPage, File.ReadAllText(Disk(page)));
+
+        // Appending stays open: it can't touch the facts.
+        Assert.False(Call("notes_append", new JsonObject { ["file"] = page, ["content"] = "- (Ironclad, 2026-10-10) New." }).IsError);
+    }
+
+    [Fact]
+    public void A_page_without_facts_can_be_rewritten_freely()
+    {
+        const string page = "strategy/wiki/lessons/shops.md";
+        Assert.False(Write(page, "# Shops\nWhat shops cost.\n\n## Lessons\n- (Ironclad, 2026-10-10) x\n").IsError);
+        Assert.False(Write(page, "# Shop prices\nWhat each shop item cost in Act 1.\n\n## Lessons\n").IsError);
+
+        // The journal and learned.md aren't pages, so a Facts heading there means nothing.
+        Assert.False(Write("strategy/learned.md", "## Facts\n- a\n").IsError);
+        Assert.False(Write("strategy/learned.md", "## Facts\n- b\n").IsError);
+    }
+
+    [Theory]
+    [InlineData("# A\n## Facts\n- 1\n## Lessons\n- x\n", "# A\n## Facts\n- 1\n## Lessons\n- y\n", true)]
+    [InlineData("# A\n## Facts\n- 1\n", "# A\n## Facts\n- 1\n\n## Lessons\n- y\n", true)]
+    [InlineData("# A\n## Facts\n- 1\n", "# A\n## Facts\n- 2\n", false)]
+    [InlineData("# A\n## facts\n- 1\n## lessons\n", "# A\n## facts\n- 2\n## lessons\n", false)]
+    [InlineData("# A\n## Lessons\n- x\n", "# B\n", true)]
+    [InlineData("# A\nNo sections.\n", "Anything.", true)]
+    public void Keeps_facts_compares_the_part_above_the_lessons(string oldPage, string newPage, bool kept) =>
+        Assert.Equal(kept, NotesTools.KeepsFacts(oldPage, newPage));
+
+    [Fact]
+    public void Notes_list_shows_the_pages_with_title_and_summary_and_the_fixed_files()
+    {
+        Write("strategy/learned.md", "# Lessons\n");
+        Write("strategy/wiki/potions.md", "# Potions\nEvery potion, with exact numbers.\n\n## Facts (game files, v0.107.1)\n- x\n\n## Lessons\n");
+        Write("strategy/wiki/enemies/jaw-worm.md", "\n# Jaw Worm \n\n  An Act 1 brute.  \n## Lessons\n");
+        Write("strategy/wiki/lessons/no-summary.md", "# No summary\n\n## Lessons\n- (Ironclad, 2026-10-10) x\n");
+        Write("strategy/wiki/lessons/no-heading.md", "Just a line.\nAnother.\n");
+        Write("strategy/wiki/lessons/empty.md", "");
+        Write("strategy/wiki/run/long.md", "# Long\n" + new string('w', 300) + "\n");
+        foreach (var other in new[]
+                 {
+                     "strategy/wiki/README.md", "strategy/wiki/Notes.md", "strategy/wiki/draft.txt", "strategy/wiki/.potions.md.0123.tmp",
+                     "strategy/wiki/enemies/act1/deep.md", "strategy/wiki/Drafts/caps.md", "strategy/wiki/enemies/jaw_worm.md", "strategy/general.md",
+                 })
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(Disk(other))!);
+            File.WriteAllText(Disk(other), "# Not a page\nHidden.\n");
+        }
+
+        var outcome = Call("notes_list", new JsonObject());
+
+        Assert.False(outcome.IsError);
+        var wiki = outcome.Payload["wiki"]!.AsArray().Select(p => p!.AsObject()).ToArray();
+        Assert.Equal(
+        [
+            "strategy/wiki/enemies/jaw-worm.md", "strategy/wiki/lessons/empty.md", "strategy/wiki/lessons/no-heading.md",
+            "strategy/wiki/lessons/no-summary.md", "strategy/wiki/potions.md", "strategy/wiki/run/long.md",
+        ], wiki.Select(p => p["file"]!.GetValue<string>()));
+        string? Field(int i, string key) => wiki[i][key]?.GetValue<string>();
+
+        Assert.Equal("Jaw Worm", Field(0, "title"));
+        Assert.Equal("An Act 1 brute.", Field(0, "summary"));
+        Assert.Equal(new FileInfo(Disk("strategy/wiki/enemies/jaw-worm.md")).Length, wiki[0]["bytes"]!.GetValue<long>());
+        Assert.Equal(0, wiki[1]["bytes"]!.GetValue<long>());
+        Assert.False(wiki[1].ContainsKey("title"));
+        Assert.False(wiki[1].ContainsKey("summary"));
+        Assert.Null(Field(2, "title"));
+        Assert.Equal("Just a line.", Field(2, "summary"));
+        Assert.Equal("No summary", Field(3, "title"));
+        Assert.Null(Field(3, "summary"));
+        Assert.Equal("Potions", Field(4, "title"));
+        Assert.Equal("Every potion, with exact numbers.", Field(4, "summary"));
+        Assert.Equal(200, Field(5, "summary")!.Length);
+        Assert.EndsWith("...", Field(5, "summary"));
+
+        var files = outcome.Payload["files"]!.AsArray();
+        Assert.Equal("runs/current.md", files[0]!["file"]!.GetValue<string>());
+        Assert.False(files[0]!["exists"]!.GetValue<bool>());
+        Assert.Equal("strategy/learned.md", files[1]!["file"]!.GetValue<string>());
+        Assert.True(files[1]!["exists"]!.GetValue<bool>());
+        Assert.Equal(10, files[1]!["bytes"]!.GetValue<long>());
+    }
+
+    [Fact]
+    public void Notes_list_without_a_wiki_is_empty()
+    {
+        var outcome = Call("notes_list", new JsonObject());
+        Assert.False(outcome.IsError);
+        Assert.Empty(outcome.Payload["wiki"]!.AsArray());
+        Assert.All(outcome.Payload["files"]!.AsArray(), f => Assert.False(f!["exists"]!.GetValue<bool>()));
+        Assert.Empty(Directory.GetFileSystemEntries(_dir));
     }
 }
 

@@ -76,9 +76,10 @@ public sealed class SubscriptionBrain : IPlayBrain, IDisposable
     /// <summary>The name of the mod's MCP server in the <c>--mcp-config</c> Claude Code gets.</summary>
     public const string McpServerName = "spiremind";
 
-    /// <summary>The built-in tools Claude Code may use besides the game's: reading and editing
-    /// the run journal and strategy notes, and finding the MCP tools.</summary>
-    public const string BuiltInTools = "Read,Edit,Write,ToolSearch";
+    /// <summary>The built-in tools Claude Code may use besides the game's: reading the strategy
+    /// notes, listing the wiki's pages (Glob, read-only like Read), editing the run journal and
+    /// strategy notes, and finding the MCP tools.</summary>
+    public const string BuiltInTools = "Read,Glob,Edit,Write,ToolSearch";
 
     /// <summary>The stop line when no Claude Code binary was found.</summary>
     public const string NoClaude = "Can't find Claude Code on this Mac, so your subscription can't take over. Install it (brew install --cask claude-code) or set claude_path in ~/.config/spiremind/config.json.";
@@ -413,8 +414,9 @@ public sealed class SubscriptionBrain : IPlayBrain, IDisposable
     /// The arguments of a session: <c>-p</c> with the prompt (a resumed session gets
     /// <see cref="ResumePrompt"/>), the session id after <c>--session-id</c> or <c>--resume</c>,
     /// the mod's endpoint as the only MCP server, the built-in tools it may use, permissions that
-    /// allow the game tools and edits under runs/ and strategy/ and refuse anything else instead
-    /// of asking, stream-json output, and the model when one is set, as it stands now.
+    /// allow the game tools and edits under runs/ and strategy/ (the wiki included) and refuse
+    /// anything else instead of asking, stream-json output, and the model when one is set, as it
+    /// stands now.
     /// </summary>
     private List<string> Arguments(string repo, string sessionId, bool resume)
     {
@@ -849,6 +851,13 @@ public sealed class SubscriptionBrain : IPlayBrain, IDisposable
             text = string.Join(" ", new[] { text }.Concat(errors.Select(Str).OfType<string>())).Trim();
 
         Log(Invariant($"claude: result {subtype}, is_error {(isError ? "true" : "false")}, {turns} turns, {seconds:0.0} s: {Cut(text, LogCut)}"));
+        // The tools dontAsk refused, by name only: their inputs can hold game text. The tool
+        // results that say so are in "user" events, which aren't read.
+        if (json["permission_denials"] is JsonArray denials && denials.Count > 0)
+        {
+            var names = denials.OfType<JsonObject>().Select(d => Str(d["tool_name"]) ?? "?").Distinct().ToList();
+            Log($"claude: permission denied for {string.Join(", ", names)}");
+        }
         watch.Result(isError);
         // A result that isn't an error is the model's own last message, where these words can be game talk.
         if (isError)

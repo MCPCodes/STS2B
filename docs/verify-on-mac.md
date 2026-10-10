@@ -177,4 +177,5 @@ Written and unit tested on Linux; the game-side wiring was only compiled against
 - The usage-limit wording of CLI 2.1.287, when it comes up, matches `SubscriptionBrain`'s pattern (the chat then says the subscription hit its limit).
 - In a fight, `/stop` while the bot is thinking over a move (the "..." cloud is up) takes the cloud down at once.
 - The API brain's first `runs/current.md` starts `# <Character>, started <today's date>, Neow: ...`, and the next run archives it as `runs/<that date>-<character>.md`.
+- Rules sheet and wiki, once `strategy/rules.md` and `strategy/wiki/` are in: the API brain's "system prompt built" log line lists `rules.md`. With the subscription playing, the log shows `claude calls Glob` and no `claude: permission denied for` line naming Glob or Edit under `dontAsk`, and a lesson Claude Code adds to a wiki page lands in the file.
 - Speech hold: when the bot says a line and moves on outside a fight (a map node, a reward, an event option), the move comes 1.5 to 3 s after the line, and the bubble can be read before the room changes. In a fight it plays on at once.

@@ -31,7 +31,7 @@ The mod turns whatever screen is up into a **snapshot**: the screen name, the fa
 | `src/SpireMind` | The mod itself: entry point and per-screen readers against the game's assemblies |
 | `src/SpireMind.DevHost` | Runs the bridge on a fake fight so the Claude Code side can be tried without the game, or lets the API brain play it as a smoke test |
 | `tests/SpireMind.Core.Tests` | Unit and HTTP tests for the bridge |
-| `strategy/` | What the bot reads before playing: general rules, per-character notes, co-op, lessons learned |
+| `strategy/` | What the bot reads before playing: general rules, the verified rules sheet, per-character notes, co-op, lessons learned, and a wiki of enemy, card and event pages with facts from the game files and lessons from runs |
 | `runs/` | Run journals the bot writes |
 | `scripts/` | build, install, dev host, tests (macOS paths by default) |
 

@@ -10,13 +10,14 @@ public sealed record SystemPrompt(string Text, IReadOnlyList<string> Files);
 /// Builds the brain's system text from the same files Claude Code's <c>/play</c> uses, so both
 /// brains behave alike: the play prompt, then the strategy notes the prompt tells the model to
 /// read and the boss and elite notes general.md points to (included here, since the brain has
-/// no file access), then a short appendix about this harness. Missing files are skipped. See
-/// docs/brain.md.
+/// no file access beyond the notes tools), then an index of the wiki's pages, then a short
+/// appendix about this harness. Missing files are skipped. See docs/brain.md.
 /// </summary>
 public static partial class PromptBuilder
 {
     public const string PlayPrompt = ".claude/commands/play.md";
     public const string GeneralNotes = "strategy/general.md";
+    public const string RulesNotes = "strategy/rules.md";
     public const string BossNotes = "strategy/bosses-and-elites.md";
     public const string LearnedNotes = "strategy/learned.md";
     public const string CoopNotes = "strategy/coop.md";
@@ -24,15 +25,26 @@ public static partial class PromptBuilder
     /// <summary>What <c>$ARGUMENTS</c> in the play prompt becomes: the brain always plays on.</summary>
     public const string Scope = "the whole run";
 
+    /// <summary>What <see cref="RulesNotes"/> is, on its file tag in the prompt.</summary>
+    public const string RulesLabel = "The verified rules for this game version";
+
+    /// <summary>The most wiki pages the index lists; a last line says how many more there are.</summary>
+    public const int WikiIndexLimit = 200;
+
     /// <summary>The appendix for this harness, after the notes.</summary>
     public const string HarnessNotes =
         "## Playing from inside the game\n\n" +
         "You run inside the game itself, through the SpireMind mod, not in Claude Code. Only tool calls do anything: " +
         "text you write outside `say` is seen by nobody, so keep it short.\n\n" +
-        "- The strategy notes the prompt asks you to read are already included above under Strategy notes. Don't try to read strategy files.\n" +
-        "- `runs/current.md` and `strategy/learned.md` are the only files you can use: read them with `notes_read`, add a line " +
-        "with `notes_append` (use it for each floor's log line) and replace them with `notes_write` (the whole file, for the " +
-        "Build plan, Orders or the post-mortem). There is no other file access.\n" +
+        "- The strategy notes the prompt asks you to read are already above under Strategy notes. Don't try to read them.\n" +
+        "- The wiki's pages are listed above under Wiki index but not included: read one with `notes_read` when the prompt says to. " +
+        "The index stands in for globbing; call `notes_list` only to find pages made since this prompt was built. " +
+        "`strategy/wiki/README.md` isn't readable here; the prompt gives its conventions.\n" +
+        "- Your only files are `runs/current.md`, `strategy/learned.md` and the wiki's pages, `strategy/wiki/<slug>.md` or " +
+        "`strategy/wiki/<folder>/<slug>.md` in lowercase words joined by hyphens: read one with `notes_read`, add a line " +
+        "with `notes_append` (each floor's log line, a dated lesson at the end of a page) and replace one with `notes_write` " +
+        "(the whole file, for the Build plan, Orders, the post-mortem, a new or corrected page; on a page with Facts it refuses " +
+        "any change above `## Lessons`). There is no other file access.\n" +
         "- `runs/README.md` isn't readable here. The header line it describes goes in exactly this form: " +
         "`# Ironclad, started YYYY-MM-DD, Neow: <what you picked>`, with your character and the date the journal starts, " +
         "which is today's date from the conversation's first message. Archiving is automatic: when you " +
@@ -53,7 +65,8 @@ public static partial class PromptBuilder
     /// <param name="multiplayer">Adds <c>strategy/coop.md</c>.</param>
     /// <param name="notesFolder">Where the brain writes its notes, when that isn't
     /// <paramref name="folder"/>. <c>strategy/learned.md</c> is read from there when it exists
-    /// there, so lessons written in fallback mode reach the next prompt.</param>
+    /// there, so lessons written in fallback mode reach the next prompt, and the wiki index
+    /// lists the pages there, the ones the notes tools can read.</param>
     public static SystemPrompt Build(string folder, string? character, bool multiplayer, string? notesFolder = null)
     {
         var files = new List<string>();
@@ -65,33 +78,57 @@ public static partial class PromptBuilder
             text.Append(StripFrontmatter(play).Replace("$ARGUMENTS", Scope).Trim()).Append("\n\n");
         }
 
-        var notes = new List<(string Name, string Path)>
+        var notes = new List<(string Name, string Path, string? About)>
         {
-            (GeneralNotes, Path.Combine(folder, GeneralNotes)),
-            (BossNotes, Path.Combine(folder, BossNotes)),
+            (GeneralNotes, Path.Combine(folder, GeneralNotes), null),
+            (RulesNotes, Path.Combine(folder, RulesNotes), RulesLabel),
+            (BossNotes, Path.Combine(folder, BossNotes), null),
         };
         if (CharacterFile(character) is { } characterFile)
-            notes.Add((characterFile, Path.Combine(folder, characterFile)));
+            notes.Add((characterFile, Path.Combine(folder, characterFile), null));
         var learned = notesFolder is not null && File.Exists(Path.Combine(notesFolder, LearnedNotes))
             ? Path.Combine(notesFolder, LearnedNotes)
             : Path.Combine(folder, LearnedNotes);
-        notes.Add((LearnedNotes, learned));
+        notes.Add((LearnedNotes, learned, null));
         if (multiplayer)
-            notes.Add((CoopNotes, Path.Combine(folder, CoopNotes)));
+            notes.Add((CoopNotes, Path.Combine(folder, CoopNotes), null));
 
         var section = new StringBuilder();
-        foreach (var (name, path) in notes)
+        foreach (var (name, path, about) in notes)
         {
             if (TryRead(path) is not { } content || content.Trim().Length == 0)
                 continue;
             files.Add(Path.GetFullPath(path));
-            section.Append($"<file path=\"{name}\">\n").Append(content.Trim()).Append("\n</file>\n\n");
+            var label = about is null ? "" : $" about=\"{about}\"";
+            section.Append($"<file path=\"{name}\"{label}>\n").Append(content.Trim()).Append("\n</file>\n\n");
         }
         if (section.Length > 0)
             text.Append("## Strategy notes\n\n").Append(section);
 
+        text.Append(WikiIndex(notesFolder ?? folder)).Append("\n\n");
         text.Append(HarnessNotes).Append('\n');
         return new SystemPrompt(text.ToString(), files);
+    }
+
+    /// <summary>
+    /// The Wiki index section: one line per page under <paramref name="root"/>, its path and summary
+    /// (the path alone when it has none), sorted by path, at most <see cref="WikiIndexLimit"/>
+    /// of them. Page text isn't included. The prompt is only rebuilt for a new run or character,
+    /// so its cache holds, which makes this the wiki as it stood then.
+    /// </summary>
+    public static string WikiIndex(string root)
+    {
+        var pages = NotesTools.ListWiki(root);
+        var text = new StringBuilder("## Wiki index\n\n");
+        if (pages.Count == 0)
+            return text.Append($"The wiki is empty: no pages under `{NotesTools.WikiFolder}/` yet.").ToString();
+
+        text.Append($"Pages under `{NotesTools.WikiFolder}/` when this prompt was built, with their summaries (`notes_list` also shows newer ones):\n\n");
+        foreach (var page in pages.Take(WikiIndexLimit))
+            text.Append(page.Summary is null ? page.File : $"{page.File}: {page.Summary}").Append('\n');
+        if (pages.Count > WikiIndexLimit)
+            text.Append($"{pages.Count - WikiIndexLimit} more pages; `notes_list` shows them all.\n");
+        return text.ToString().TrimEnd();
     }
 
     /// <summary>The play prompt without its leading YAML frontmatter (a block between two
