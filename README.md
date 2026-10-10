@@ -79,7 +79,7 @@ The bot plays as its character and answers in that character's voice, taken from
 
 - Address the bot by its character's name: "Ironclad, go for Strength", "hey Silent", "@Defect". With one bot, a message without a name reaches it too. A message that starts with another character's name is left for that bot. At character select it answers to the character you just picked; with nothing picked (or Random), and on the other menus, every message reaches it.
 - It sees your message on its next tool call, answers in a line or two and follows orders. Standing orders go under Orders in `runs/current.md` and last the whole run.
-- Its lines show in the chat log and as the game's own speech bubbles over its character. While it is thinking over a move in combat, a thought cloud shows over it.
+- Its lines show in the chat log and as the game's own speech bubbles: over its character in a fight, beside its figure or the top-bar portrait elsewhere. Off combat it waits a moment after speaking before it moves on, so you can read the line. While it is thinking over a move in combat, a thought cloud shows over it.
 - Commands take effect at once in the mod, without waiting for the model:
   - `/pause` stops the bot so you can play by hand. Chat keeps working.
   - `/resume` hands control back.

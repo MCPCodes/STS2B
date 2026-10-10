@@ -41,6 +41,7 @@ public sealed partial class ChatHub
     private string? _pausedBy;
     private JsonObject? _persona;
     private DateTime? _thinkingSince;
+    private DateTime _speechHoldUntil = DateTime.MinValue;
     private long _seq;
 
     /// <param name="clock">Time source for tests; defaults to <see cref="DateTime.UtcNow"/>.</param>
@@ -95,6 +96,13 @@ public sealed partial class ChatHub
     /// decided. Above BotTools' longest wait, since a model that hasn't called a tool in that
     /// long isn't deciding.</summary>
     public TimeSpan ThinkingStaleAfter { get; init; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>The shortest and longest a spoken line holds back the bot's next move off
+    /// combat, so its bubble can be read before the screen changes. See <see cref="SpeechHold"/>.</summary>
+    public static readonly TimeSpan MinSpeechHold = TimeSpan.FromSeconds(1.5);
+
+    /// <inheritdoc cref="MinSpeechHold"/>
+    public static readonly TimeSpan MaxSpeechHold = TimeSpan.FromSeconds(3);
 
     public bool Paused
     {
@@ -201,8 +209,9 @@ public sealed partial class ChatHub
 
     /// <summary>
     /// The bot speaks. Whitespace is collapsed and long text cut to <see cref="MaxSayLength"/>
-    /// with "...". Throws <see cref="ArgumentException"/> on empty text and
-    /// <see cref="InvalidOperationException"/> past the burst limit, so the model slows down.
+    /// with "...". The line holds back the next move off combat for <see cref="SpeechHold"/>
+    /// (see <see cref="SpeechHoldLeft"/>). Throws <see cref="ArgumentException"/> on empty text
+    /// and <see cref="InvalidOperationException"/> past the burst limit, so the model slows down.
     /// </summary>
     public ChatLine Say(string text)
     {
@@ -227,9 +236,35 @@ public sealed partial class ChatHub
                     $"Too many chat lines: at most {BurstLines} in {BurstWindow.TotalSeconds:0} seconds. Slow down: wait a little and keep it brief.");
             _recentSays.Enqueue(now);
             line = AddLine(ChatLineKind.Bot, _botName ?? "Bot", said);
+            var holdUntil = now + SpeechHold(said);
+            if (holdUntil > _speechHoldUntil) _speechHoldUntil = holdUntil;
         }
         LineAdded?.Invoke(line);
         return line;
+    }
+
+    /// <summary>
+    /// How long a spoken line holds back the bot's next move off combat: half a second plus
+    /// 0.05 s per character that isn't whitespace, between <see cref="MinSpeechHold"/> and
+    /// <see cref="MaxSpeechHold"/>. The bot often says something and moves on in the same
+    /// breath, and outside a fight the move changes the room under the bubble.
+    /// </summary>
+    public static TimeSpan SpeechHold(string text)
+    {
+        var letters = (text ?? "").Count(c => !char.IsWhiteSpace(c));
+        var hold = TimeSpan.FromMilliseconds(500 + 50 * letters);
+        return hold < MinSpeechHold ? MinSpeechHold : hold > MaxSpeechHold ? MaxSpeechHold : hold;
+    }
+
+    /// <summary>What is left of the hold set by the bot's spoken lines (<see cref="SpeechHold"/>
+    /// from each), or zero. BotTools waits it out before an action off combat.</summary>
+    public TimeSpan SpeechHoldLeft()
+    {
+        lock (_gate)
+        {
+            var left = _speechHoldUntil - _clock();
+            return left > TimeSpan.Zero ? left : TimeSpan.Zero;
+        }
     }
 
     /// <summary>

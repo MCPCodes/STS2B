@@ -15,6 +15,8 @@ public sealed record ToolOutcome(JsonNode Payload, bool IsError = false);
 /// snapshot, so there is no per-screen tool zoo to learn. Every result carries a "chat" key
 /// when the human has written or paused the bot, and results that hand over a decision mark
 /// the bot as thinking, for the thought cloud over its character (see docs/chat.md).
+/// Calls come from HTTP worker threads and the brain's task, never Godot's main thread, so
+/// waiting here (for the game, or for a spoken line to be read) never holds up the game.
 /// </summary>
 public sealed partial class BotTools
 {
@@ -32,6 +34,10 @@ public sealed partial class BotTools
 
     public TimeSpan ActSettleTimeout { get; init; } = TimeSpan.FromSeconds(20);
     public TimeSpan MaxWait { get; init; } = TimeSpan.FromSeconds(240);
+
+    /// <summary>How act and act_sequence wait out a spoken line's hold
+    /// (<see cref="ChatHub.SpeechHoldLeft"/>); tests replace it.</summary>
+    public Func<TimeSpan, CancellationToken, Task> Delay { get; init; } = Task.Delay;
 
     public BotTools(IGameBridge game, DecisionWaiter waiter, SnapshotVersioner versioner, ChatHub chat)
     {
@@ -89,8 +95,9 @@ public sealed partial class BotTools
         new("say",
             "Say something in the game's chat. This is how you talk to the human playing with you: answer what they " +
             "wrote in chat.messages, or call out a big moment. Speak in character as the character you play " +
-            "(chat.you_are, get_persona), briefly, a sentence or two. The line also shows as a speech bubble over your " +
-            "character, about 100 characters a bubble, so short lines read best. Long lines are cut at 280 characters " +
+            "(chat.you_are, get_persona), briefly, a sentence or two. The line also shows as a speech bubble: over your " +
+            "character in fights and on the rewards after one, elsewhere beside your figure or your portrait in the top bar. " +
+            "A bubble holds about 100 characters, so short lines read best. Long lines are cut at 280 characters " +
             "and more than 6 lines in 10 seconds are refused.",
             Schema(new JsonObject
             {
@@ -184,11 +191,20 @@ public sealed partial class BotTools
         if (string.IsNullOrWhiteSpace(actionId))
             return new ToolOutcome(Error("action_id is required"), IsError: true);
 
+        var version = SentVersion(args);
+        string? Check(GameSnapshot snap) =>
+            CannotAct(snap, version) ?? (Offers(snap, actionId) ? null : $"'{actionId}' is not a legal action now.");
+
         var before = await _waiter.CaptureAsync(ct);
-        if (CannotAct(before, SentVersion(args)) is { } why)
+        if (Check(before) is { } why)
             return Rejected(why, before);
-        if (!Offers(before, actionId))
-            return Rejected($"'{actionId}' is not a legal action now.", before);
+        if (await WaitOutSpeechAsync(before, ct))
+        {
+            // Checked again after the pause, like any stale id.
+            before = await _waiter.CaptureAsync(ct);
+            if (Check(before) is { } stale)
+                return Rejected(stale, before);
+        }
 
         var step = await StepAsync(actionId, before, ct);
         if (step.Refusal is { } refusal)
@@ -219,11 +235,20 @@ public sealed partial class BotTools
         if (ids.IndexOf("end_turn") is var endTurn and >= 0 && endTurn < ids.Count - 1)
             return new ToolOutcome(Error("end_turn can only be the last id, since the turn is over once it runs. Nothing was played."), IsError: true);
 
+        string? Check(GameSnapshot snap) =>
+            CannotAct(snap, version)
+            ?? (ids.FirstOrDefault(id => !Offers(snap, id)) is { } illegal ? $"'{illegal}' is not a legal action now, so nothing was played." : null);
+
         var start = await _waiter.CaptureAsync(ct);
-        if (CannotAct(start, version) is { } why)
+        if (Check(start) is { } why)
             return Rejected(why, start);
-        if (ids.FirstOrDefault(id => !Offers(start, id)) is { } illegal)
-            return Rejected($"'{illegal}' is not a legal action now, so nothing was played.", start);
+        if (await WaitOutSpeechAsync(start, ct))
+        {
+            // Checked again after the pause, like any stale id.
+            start = await _waiter.CaptureAsync(ct);
+            if (Check(start) is { } stale)
+                return Rejected(stale, start);
+        }
 
         var done = new JsonArray();
         var current = start;
@@ -285,6 +310,25 @@ public sealed partial class BotTools
         if (!result.Ok)
             return new Step(actionId, before, await _waiter.CaptureAsync(ct), result.Error ?? "The game refused the action.");
         return new Step(actionId, before, await _waiter.WaitAsync(before.Version, ActSettleTimeout, ct), null);
+    }
+
+    /// <summary>
+    /// Waits out what is left of the bot's last spoken line (<see cref="ChatHub.SpeechHoldLeft"/>)
+    /// before an action on <paramref name="snap"/>, so the bubble can be read: the model often
+    /// calls say and act in one reply, and off combat the action changes the room under the
+    /// bubble. In a fight (combat, hand_select) the bubble sits over the character and stays
+    /// through the move, so nothing waits. True when it waited, and the caller checks the
+    /// game again.
+    /// </summary>
+    private async Task<bool> WaitOutSpeechAsync(GameSnapshot snap, CancellationToken ct)
+    {
+        if (snap.Screen is "combat" or "hand_select")
+            return false;
+        var left = _chat.SpeechHoldLeft();
+        if (left <= TimeSpan.Zero)
+            return false;
+        await Delay(left, ct);
+        return true;
     }
 
     /// <summary>Why no action can run on <paramref name="current"/>: paused, the model's version is
