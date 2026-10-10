@@ -26,8 +26,13 @@ public enum BrainStopReason
     /// <summary>The mod's own monthly cap (<c>monthly_budget_usd</c>) was reached.</summary>
     MonthlyCap,
 
-    /// <summary><see cref="ApiBrain.StopAsync"/> was called.</summary>
+    /// <summary><see cref="IPlayBrain.StopAsync"/> or <see cref="IPlayBrain.Abort"/> was called.</summary>
     UserStop,
+
+    /// <summary>The game run ended and the brain stepped back until a controller starts one
+    /// again. Never announced. <see cref="ApiBrain"/> doesn't raise it (it idles between runs);
+    /// the subscription fallback does, since its Claude Code session ends with the run.</summary>
+    RunEnded,
 
     /// <summary>Something the brain can't recover from: a refusal, a request the API rejects,
     /// replies that keep hitting max_tokens, a model that won't play, another client playing
@@ -290,6 +295,15 @@ public sealed class ApiBrain : IPlayBrain
         if (CurrentLoop.Value == this)
             return;
         await loop.ConfigureAwait(false);
+    }
+
+    /// <summary>Cancels the loop without waiting for it, for when the game quits.</summary>
+    public void Abort()
+    {
+        CancellationTokenSource? cts;
+        lock (_gate) cts = _cts;
+        try { cts?.Cancel(); }
+        catch (ObjectDisposedException) { /* the loop already ended */ }
     }
 
     /// <summary>The tools as the API takes them: <c>{name, description, input_schema, strict: true}</c>

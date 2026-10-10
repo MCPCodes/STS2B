@@ -18,6 +18,10 @@ public interface IPlayBrain
     /// it only asks the brain to stop.</summary>
     Task StopAsync();
 
+    /// <summary>Stop at once without waiting, for when the game quits: cancel whatever is in
+    /// flight and kill any child process. Safe from any thread and returns quickly.</summary>
+    void Abort();
+
     /// <summary>Raised once per start when the brain stops, with the reason and a line saying
     /// why. A brain announces its own stops in the chat itself, so a handler shouldn't post the
     /// line again; <see cref="BrainStopReason.UserStop"/> is never announced.</summary>
