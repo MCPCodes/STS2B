@@ -4,7 +4,7 @@ The mod can play by itself: it calls the Claude Messages API directly with Mark'
 
 ## What the player does
 
-1. Once: create an API key in the Claude Console and save it to `~/.config/spiremind/api_key` (one line, `chmod 600`; the README has the Terminal commands). The mod never writes the key anywhere and never logs it. `ANTHROPIC_API_KEY` in the game's environment works too, but the file wins.
+1. Once: create an API key in the Claude Console and save it to `~/.config/spiremind/api_key` (one line, `chmod 600`; the README has the Terminal commands). The mod never writes the key anywhere and never logs it. `ANTHROPIC_API_KEY` in the game's environment works too, but the file wins. Then run `scripts/dev-host.sh --brain` to check the key and the API calls without the game (Smoke test, below).
 2. In game, type `/start` in the chat. The bot plays from wherever the run stands. `/stop` stops it (no more API calls, and Claude Code is told to quit). The choice is remembered: after `/start`, the bot starts by itself the next time a run is in progress, also after a restart of the game, until `/stop`.
 3. Chat works as in `docs/chat.md`. `/pause` and `/resume` still mean "hands off for a moment" and work with either brain.
 4. More commands, each answered with a line in the chat:
@@ -128,6 +128,18 @@ It stops early, returning what it did and the current snapshot, when:
 A target's label has " (e1)" after the enemy's name only while another living enemy shares it, so when a twin dies the tool also accepts the action at the same target whose label matches once that tag is dropped. Before anything runs, every id must be legal in the snapshot, `end_turn` may only be the last id, the version must match and the game must be waiting on the bot; otherwise it is refused like `act`, and nothing runs. It takes 1 to 12 ids. The result lists what ran, then why it stopped and which ids didn't run, then the snapshot: `{"done": [{"id", "label"}, ...], "stopped", "not_run", "warning", "next"}`, with `stopped` and `not_run` only when it stopped early. It is an error only when nothing ran.
 
 `play.md` tells the model to end a sequence after any card or potion that draws, discovers, creates or transforms cards, has a random result it needs to see, opens a choice or ends its turn, so it sees what it got before planning further, and to leave out `end_turn` after a card that ends the turn.
+
+## Smoke test
+
+`scripts/dev-host.sh --brain` proves the real API calls work before the first in-game `/start`, with no game running. The real `ApiBrain` plays the dev host's fake fight (one Jaw Worm, the same `FakeGame` the tests use) through the real `BotTools` and chat, with the key from `~/.config/spiremind/api_key`, the effort from config.json and the real spend tracker, so what it costs counts in `/budget`. Three things differ from the game:
+
+- The model is `--model <name>` for this run only (default haiku, to keep it cheap; config.json isn't changed). `scripts/dev-host.sh --brain --model sonnet` tries another.
+- The notes and the transcript go to a fresh temp folder, never the repo's `runs/` or `strategy/`, so the live run journal isn't touched. The system prompt is still built from the repo's play prompt and strategy notes.
+- At most `--max-requests` requests are sent (default 6, at most 50). The next one is refused, which stops the brain.
+
+It prints each request's model, stop reason, tool calls, tokens (fresh input, cache reads, cache writes with their 1 hour part, output) and cost, then the totals and this month's spend. It ends with PASSED (exit code 0) when the brain stopped at the cap or because it won the fight, and FAILED (exit code 1) when it stopped for any other reason, a request failed, nothing came back, or Ctrl+C or a 10 minute limit cut it short.
+
+What to expect on haiku: a few requests (usually the persona and notes first, then a turn or two of the fight), a cache write of the whole prompt (the system text and tools, over 10k tokens) on the first, cache reads of about that much on every one after, and about a cent in all. No 400s. If the second request reads 0 cached tokens, the start of the prompt is changing between requests, which would cost real money in the game; the script prints a warning for it. A 400 prints the API's own message and means the request (tools, caching, effort) needs fixing before `/start`. The transcript in the temp folder has every exchange.
 
 ## Cost
 

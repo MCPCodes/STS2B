@@ -12,5 +12,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/SpireMind.Core/SpireMind.Core.csproj" />
+    <!-- For the dev host's argument parsing and brain smoke test, which run without the network. -->
+    <ProjectReference Include="../../src/SpireMind.DevHost/SpireMind.DevHost.csproj" />
   </ItemGroup>
 </Project>
