@@ -47,16 +47,24 @@ internal static class Describe
     /// A hand card, plus "vs": its text against each of <paramref name="enemies"/> where that
     /// differs from the text at rest. Hand text counts the player's own modifiers (Strength,
     /// Weak) but not the target's (Vulnerable and the like), which the game only shows while the
-    /// card hovers an enemy. Only cards aimed at enemies are rendered per enemy.
+    /// card hovers an enemy. Only cards aimed at enemies are rendered per enemy. Main thread only.
     /// </summary>
     public static JsonObject HandCard(CardModel card, IEnumerable<(string Id, Creature Enemy)> enemies)
     {
-        // Against each enemy first and at rest last, so the card is left previewing no target,
-        // as it does on screen when nothing hovers.
+        // GetDescriptionForPile with a target only formats the card's stored preview numbers,
+        // which the UI refreshes for the creature the card hovers. So each enemy's preview is
+        // computed here first, as NCard does on hover, and the at-rest preview (no target) is
+        // put back last, as it is on screen when nothing hovers.
         var versus = new List<(string Id, string Text)>();
         if (card.TargetType is TargetType.AnyEnemy or TargetType.AllEnemies)
+        {
             foreach (var (id, enemy) in enemies)
+            {
+                Preview(card, enemy);
                 versus.Add((id, SafeText(() => card.GetDescriptionForPile(PileType.Hand, enemy))));
+            }
+            Preview(card, null);
+        }
 
         var json = Card(card, PileType.Hand);
         var atRest = (string?)json["text"] ?? "";
@@ -66,6 +74,18 @@ internal static class Describe
                 (vs ??= new JsonObject())[id] = text;
         if (vs is not null) json["vs"] = vs;
         return json;
+    }
+
+    // The card's preview numbers against target (null: none), as the UI computes them. A card
+    // whose preview throws keeps the numbers it had; its text is then simply the same as at rest.
+    private static void Preview(CardModel card, Creature? target)
+    {
+        try
+        {
+            card.DynamicVars.ClearPreview();
+            card.UpdateDynamicVarPreview(CardPreviewMode.Normal, target, card.DynamicVars);
+        }
+        catch { }
     }
 
     /// <summary>A card's name for action labels. CardModel.Title already ends in "+" (or "+N") when upgraded.</summary>
