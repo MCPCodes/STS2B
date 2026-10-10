@@ -95,13 +95,6 @@ public sealed class ApiBrain : IPlayBrain
     // billed for literally. This text never goes into HTML.
     private static readonly JsonSerializerOptions ModelJson = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
-    // Screens that only exist during a run. "menu" and "game_over" are outside one; anything
-    // else (a modal, which can also be up at the menu, an error, an unknown screen) says nothing.
-    private static readonly HashSet<string> RunScreens = new(StringComparer.Ordinal)
-    {
-        "combat", "hand_select", "map", "rewards", "card_reward", "card_select", "shop", "rest", "event", "treasure", "crystal_sphere",
-    };
-
     // Tools that move the game on. Only these reset the end-turn guard: a get_state or say
     // between two ended turns doesn't make them play.
     private static readonly HashSet<string> ForwardTools = new(StringComparer.Ordinal) { "act", "act_sequence", "wait_for_decision" };
@@ -869,12 +862,7 @@ public sealed class ApiBrain : IPlayBrain
     {
         if (snapshot["in_run"] is JsonValue flag && flag.TryGetValue<bool>(out var inRun))
             return inRun;
-        return Str(snapshot["screen"]) switch
-        {
-            { } screen when RunScreens.Contains(screen) => true,
-            "menu" or "game_over" => false,
-            _ => null,
-        };
+        return RunScreens.InRun(Str(snapshot["screen"]));
     }
 
     private static bool HasChatMessages(JsonNode payload) =>
