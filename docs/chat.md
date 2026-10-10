@@ -68,13 +68,13 @@ Game-agnostic and unit tested. All members are safe to call from any thread.
 A tool call can outlive its client: Esc in Claude Code drops the request, but the server-side wait would run on and take the next message for an answer nobody reads. Two things stop that. `McpEndpoint` cancels a call when the client sends `notifications/cancelled` for its id (answering the dropped request with JSON-RPC error -32800). And only one `wait_for_decision` runs at a time: a new one cancels the one before.
 
 - `wait_for_decision` returns as soon as an unread message arrives, with whatever the game shows at that moment (possibly `awaiting_decision: false`). While paused it never reports a decision: it waits for a message or the timeout, then returns the snapshot with `awaiting_decision` forced to false, `waiting: "paused by Mark"` and no actions.
-- `act` while paused is rejected: "Paused by Mark. Call wait_for_decision; you can still talk with say."
+- `act` and `act_sequence` while paused are rejected: "Paused by Mark. Call wait_for_decision; you can still talk with say." A pause or an unread message for the bot also ends an `act_sequence` before its next step.
 - `get_state` while paused shows the real state but with `awaiting_decision` false and no actions, same as above, so the model doesn't plan moves it can't make.
 - `say {text}` returns `{"said": "<text as shown>"}` (plus `chat` when there are new messages). Errors from ChatHub become tool errors. The tool description tells the model its lines show as bubbles of about 100 characters.
 - `get_deck` returns the run's full deck with card text, relics with text, potions, HP and gold, for build decisions. It goes through `IGameBridge.DescribeDeckAsync`.
 - `get_persona` returns `ChatHub.Persona`, or the error `"no character yet; call get_persona again once the run has started"`, with the usual `chat` key. The play prompt calls it once at the start and after context compaction, and again once the run has started if it had no character yet or the character changed.
 
-Thinking, for the thought cloud: when `get_state` or `wait_for_decision` hands back a snapshot with `awaiting_decision` true and actions, or `act` hands back one (its `next`, or the `current` it was refused against), BotTools calls `MarkThinking(true)`; any other result of those three clears it. `act` clears it as soon as it starts. Paused snapshots never await a decision, so they clear it. `say`, `get_deck` and `get_persona` leave it alone, since the model calls them mid-decision.
+Thinking, for the thought cloud: when `get_state` or `wait_for_decision` hands back a snapshot with `awaiting_decision` true and actions, or `act` or `act_sequence` hands back one (its `next`, or the `current` it was refused against), BotTools calls `MarkThinking(true)`; any other result of those four clears it. `act` and `act_sequence` clear it as soon as they start. Paused snapshots never await a decision, so they clear it. `say`, `get_deck` and `get_persona` leave it alone, since the model calls them mid-decision.
 
 ### HTTP
 

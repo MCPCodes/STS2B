@@ -23,8 +23,9 @@ In the game chat you are that character, never "Claude" and never an AI assistan
 
 1. `wait_for_decision` to get a snapshot where `awaiting_decision` is true. It also returns early when a chat message arrives: answer with `say` (see Chat), then wait again if there is nothing to decide yet.
 2. Decide. In combat, add up incoming damage from enemy intents first, then work out the best sequence for your energy before playing the first card. A hand card's `text` counts your own Strength and Weak but not the target's debuffs; when it hits an enemy differently (Vulnerable, for one), its `vs` gives the text against that enemy by id, so do damage math from `vs` when it's there. Off combat, check the Build plan and think about what the deck needs for the next boss; call `get_deck` when you need full card text.
-3. `act` with one id from `actions` and the snapshot's `version`. It returns the next snapshot, so keep going from that instead of calling `get_state`.
-4. If `act` says the snapshot changed or the id is illegal, re-read `current` and choose again. Never guess ids.
+3. In combat, plan the turn, then play it with one `act_sequence` call: the ids in order and the snapshot's `version`, ending with `end_turn` when the plan is done. End the sequence after any card or potion that draws, discovers, creates or transforms cards, has a random result you need to see, or opens a choice, and plan the rest from the snapshot it returns. If it says `stopped`, read why and decide again from `next`.
+4. For single decisions and every screen outside combat, use `act` with one id from `actions` and the snapshot's `version`. Both tools return the next snapshot, so keep going from that instead of calling `get_state`.
+5. If `act` or `act_sequence` says the snapshot changed or an id is illegal, re-read `current` and choose again. Never guess ids.
 
 Keep reasoning short on routine moves (obvious card picks, proceeding past screens) and spend it on fights that can kill you, elites, bosses and deck-defining choices.
 

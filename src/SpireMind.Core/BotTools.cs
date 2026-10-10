@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace SpireMind.Core;
 
@@ -8,13 +9,13 @@ public sealed record ToolOutcome(JsonNode Payload, bool IsError = false);
 
 /// <summary>
 /// The small tool surface the model plays through. Kept deliberately narrow: read the
-/// state, wait for your turn, do one legal action, talk to the human, look at the deck, ask
-/// who you are. Everything the model needs to decide is in the snapshot, so there is no
-/// per-screen tool zoo to learn. Every result carries a "chat" key when the human has written
-/// or paused the bot, and results that hand over a decision mark the bot as thinking, for the
-/// thought cloud over its character (see docs/chat.md).
+/// state, wait for your turn, do one legal action (or a planned run of them), talk to the
+/// human, look at the deck, ask who you are. Everything the model needs to decide is in the
+/// snapshot, so there is no per-screen tool zoo to learn. Every result carries a "chat" key
+/// when the human has written or paused the bot, and results that hand over a decision mark
+/// the bot as thinking, for the thought cloud over its character (see docs/chat.md).
 /// </summary>
-public sealed class BotTools
+public sealed partial class BotTools
 {
     private readonly IGameBridge _game;
     private readonly DecisionWaiter _waiter;
@@ -24,6 +25,9 @@ public sealed class BotTools
     /// <summary>The wait_for_decision in progress. A newer one cancels it, so a wait whose
     /// client went away (Esc in Claude Code) can't take chat messages nobody will read.</summary>
     private CancellationTokenSource? _liveWait;
+
+    /// <summary>Most ids one act_sequence takes.</summary>
+    public const int MaxSequence = 12;
 
     public TimeSpan ActSettleTimeout { get; init; } = TimeSpan.FromSeconds(20);
     public TimeSpan MaxWait { get; init; } = TimeSpan.FromSeconds(240);
@@ -62,6 +66,24 @@ public sealed class BotTools
                 ["action_id"] = new JsonObject { ["type"] = "string", ["description"] = "An id from snapshot.actions" },
                 ["version"] = new JsonObject { ["type"] = "integer", ["description"] = "snapshot.version the id came from" },
             }, required: ["action_id"])),
+        new("act_sequence",
+            "Play several actions from one snapshot in order, typically a whole combat turn, then return what ran and the snapshot after. " +
+            "All ids come from the snapshot named by version; each later one is matched by its label, so shifting hand positions don't matter. " +
+            "It stops early when a label is gone, the screen changes, an action is refused or changes nothing, the game doesn't settle, " +
+            "a chat message arrives or you are paused. End a sequence after any card or potion that draws, discovers, creates or transforms " +
+            "cards, has a random result you need to see, or opens a choice, and plan the rest from the returned snapshot. Ending with end_turn is fine.",
+            Schema(new JsonObject
+            {
+                ["version"] = new JsonObject { ["type"] = "integer", ["description"] = "snapshot.version the ids came from" },
+                ["actions"] = new JsonObject
+                {
+                    ["type"] = "array",
+                    ["items"] = new JsonObject { ["type"] = "string" },
+                    ["minItems"] = 1,
+                    ["maxItems"] = MaxSequence,
+                    ["description"] = "Ids from snapshot.actions, in the order to play them",
+                },
+            }, required: ["version", "actions"])),
         new("say",
             "Say something in the game's chat. This is how you talk to the human playing with you: answer what they " +
             "wrote in chat.messages, or call out a big moment. Speak in character as the character you play " +
@@ -106,6 +128,7 @@ public sealed class BotTools
                 "get_state" => new ToolOutcome(Present(await _waiter.CaptureAsync(ct))),
                 "wait_for_decision" => await WaitAsync(args, ct),
                 "act" => await ActAsync(args, ct),
+                "act_sequence" => await ActSequenceAsync(args, ct),
                 "say" => Say(args),
                 "get_deck" => new ToolOutcome(await _game.DescribeDeckAsync(ct)),
                 "get_persona" => Persona(),
@@ -160,30 +183,193 @@ public sealed class BotTools
             return new ToolOutcome(Error("action_id is required"), IsError: true);
 
         var before = await _waiter.CaptureAsync(ct);
-
-        if (_chat.PausedBy is { } pausedBy)
-            return Rejected($"Paused by {pausedBy}. Call wait_for_decision; you can still talk with say.", before);
-
-        if (args["version"] is JsonValue vv && vv.TryGetValue<long>(out var expected) && expected != before.Version)
-            return Rejected($"Snapshot changed (you sent version {expected}, current is {before.Version}). Pick from the current actions.", before);
-
-        if (!before.AwaitingDecision)
-            return Rejected($"Not your decision right now ({before.Waiting ?? before.Screen}). Call wait_for_decision.", before);
-
-        if (before.Actions.All(a => a.Id != actionId))
+        if (CannotAct(before, SentVersion(args)) is { } why)
+            return Rejected(why, before);
+        if (!Offers(before, actionId))
             return Rejected($"'{actionId}' is not a legal action now.", before);
 
+        var step = await StepAsync(actionId, before, ct);
+        if (step.Refusal is { } refusal)
+            return Rejected(refusal, step.After);
+
+        var reply = new JsonObject { ["done"] = actionId, ["next"] = Present(step.After) };
+        if (Warning(step) is { } warning)
+            reply["warning"] = warning;
+        return new ToolOutcome(reply);
+    }
+
+    /// <summary>
+    /// Several actions from one snapshot, in order (docs/brain.md, act_sequence). Every id is
+    /// checked against that snapshot before anything runs. The first runs as act runs it; each
+    /// later one is found again by its label (<see cref="FindAgain"/>). It stops early, keeping what
+    /// ran, when the game or the human changes the picture (<see cref="WhyStop"/>).
+    /// </summary>
+    private async Task<ToolOutcome> ActSequenceAsync(JsonObject args, CancellationToken ct)
+    {
+        _chat.MarkThinking(false);
+
+        if (ActionIds(args["actions"]) is not { } ids)
+            return new ToolOutcome(Error("actions must be a list of action ids"), IsError: true);
+        if (ids.Count is 0 or > MaxSequence)
+            return new ToolOutcome(Error($"actions takes 1 to {MaxSequence} ids; you sent {ids.Count}."), IsError: true);
+        if (SentVersion(args) is not { } version)
+            return new ToolOutcome(Error("version is required"), IsError: true);
+
+        var start = await _waiter.CaptureAsync(ct);
+        if (CannotAct(start, version) is { } why)
+            return Rejected(why, start);
+        if (ids.FirstOrDefault(id => !Offers(start, id)) is { } illegal)
+            return Rejected($"'{illegal}' is not a legal action now, so nothing was played.", start);
+
+        var done = new JsonArray();
+        var current = start;
+        Step? last = null;
+        string? stopped = null;
+        var k = 0;
+        for (; k < ids.Count; k++)
+        {
+            var id = ids[k];
+            if (last is not null)
+            {
+                stopped = WhyStop(last, start.Screen);
+                var match = stopped is null ? FindAgain(id, start, current) : null;
+                if (match is null)
+                {
+                    stopped ??= $"'{LabelOf(start, id)}' is no longer offered.";
+                    break;
+                }
+                id = match;
+            }
+
+            last = await StepAsync(id, current, ct);
+            current = last.After;
+            if (last.Refusal is { } refusal)
+            {
+                // It didn't run, so it stays with the ids not run.
+                stopped = $"The game refused '{last.Label}': {refusal}";
+                break;
+            }
+            done.Add(new JsonObject { ["id"] = id, ["label"] = last.Label });
+        }
+
+        var reply = new JsonObject { ["done"] = done };
+        if (stopped is not null)
+        {
+            reply["stopped"] = stopped;
+            reply["not_run"] = new JsonArray(ids.Skip(k).Select(i => (JsonNode)JsonValue.Create(i)!).ToArray());
+        }
+        else if (Warning(last!) is { } warning)
+        {
+            reply["warning"] = warning;
+        }
+        reply["next"] = Present(current);
+        return new ToolOutcome(reply, IsError: done.Count == 0);
+    }
+
+    /// <summary>One action run: the snapshot it ran on, the snapshot after, and the game's
+    /// refusal when it wouldn't take it (After is then simply the state at that moment).</summary>
+    private sealed record Step(string Id, GameSnapshot Before, GameSnapshot After, string? Refusal)
+    {
+        public string Label => LabelOf(Before, Id);
+    }
+
+    /// <summary>Start one action and wait, up to <see cref="ActSettleTimeout"/>, for the game to
+    /// settle into a newer decision. Shared by act and every step of act_sequence.</summary>
+    private async Task<Step> StepAsync(string actionId, GameSnapshot before, CancellationToken ct)
+    {
         var result = await _game.ExecuteAsync(actionId, ct);
         if (!result.Ok)
-            return Rejected(result.Error ?? "The game refused the action.", await _waiter.CaptureAsync(ct));
+            return new Step(actionId, before, await _waiter.CaptureAsync(ct), result.Error ?? "The game refused the action.");
+        return new Step(actionId, before, await _waiter.WaitAsync(before.Version, ActSettleTimeout, ct), null);
+    }
 
-        var next = await _waiter.WaitAsync(before.Version, ActSettleTimeout, ct);
-        var reply = new JsonObject { ["done"] = actionId, ["next"] = Present(next) };
-        if (next.Version == before.Version)
-            reply["warning"] = "Nothing changed after this action. The game may have ignored it; re-check the state before repeating it.";
-        else if (!next.AwaitingDecision)
-            reply["warning"] = "The game is still busy. Call wait_for_decision before acting again.";
-        return new ToolOutcome(reply);
+    /// <summary>Why no action can run on <paramref name="current"/>: paused, the model's version is
+    /// stale, or it isn't the bot's decision. Null when one can.</summary>
+    private string? CannotAct(GameSnapshot current, long? version)
+    {
+        if (_chat.PausedBy is { } pausedBy)
+            return $"Paused by {pausedBy}. Call wait_for_decision; you can still talk with say.";
+        if (version is { } expected && expected != current.Version)
+            return $"Snapshot changed (you sent version {expected}, current is {current.Version}). Pick from the current actions.";
+        if (!current.AwaitingDecision)
+            return $"Not your decision right now ({current.Waiting ?? current.Screen}). Call wait_for_decision.";
+        return null;
+    }
+
+    /// <summary>What act says about a step that went through but didn't land where expected.</summary>
+    private static string? Warning(Step step) =>
+        step.After.Version == step.Before.Version
+            ? "Nothing changed after this action. The game may have ignored it; re-check the state before repeating it."
+            : !step.After.AwaitingDecision
+                ? "The game is still busy. Call wait_for_decision before acting again."
+                : null;
+
+    /// <summary>Why act_sequence should stop after <paramref name="last"/> instead of running the
+    /// next id, or null to go on. <paramref name="screen"/> is the screen the sequence started on.</summary>
+    private string? WhyStop(Step last, string screen)
+    {
+        var now = last.After;
+        if (now.Version == last.Before.Version)
+            return $"Nothing changed after '{last.Label}'. The game may have ignored it; re-check the state before repeating it.";
+        if (now.Screen != screen)
+            return $"The screen changed to {now.Screen}.";
+        if (!now.AwaitingDecision)
+            return $"The game is still busy ({now.Waiting ?? "no decision yet"}). Call wait_for_decision before acting again.";
+        if (_chat.PausedBy is { } pausedBy)
+            return $"Paused by {pausedBy}. Call wait_for_decision; you can still talk with say.";
+        if (_chat.HasUnread)
+            return "A chat message arrived.";
+        return null;
+    }
+
+    /// <summary>
+    /// The action in <paramref name="now"/> that does what <paramref name="id"/> did in
+    /// <paramref name="start"/>: the same id while its label is unchanged, else the first action
+    /// with that label (copies of a card are interchangeable, wherever they sit in the hand),
+    /// else, for an id with a target (">e1"), the action at the same target whose label matches
+    /// once a twin tag like " (e1)" is dropped from both; the tag comes and goes as a namesake
+    /// lives or dies. Null when nothing matches.
+    /// </summary>
+    private static string? FindAgain(string id, GameSnapshot start, GameSnapshot now)
+    {
+        var label = LabelOf(start, id);
+        if (now.Actions.Any(a => a.Id == id && a.Label == label))
+            return id;
+        if (now.Actions.FirstOrDefault(a => a.Label == label) is { } same)
+            return same.Id;
+        if (TargetOf(id) is not { } target)
+            return null;
+        var bare = TwinTag().Replace(label, "");
+        return now.Actions.FirstOrDefault(a => TargetOf(a.Id) == target && TwinTag().Replace(a.Label, "") == bare)?.Id;
+    }
+
+    private static string LabelOf(GameSnapshot snap, string id) => snap.Actions.First(a => a.Id == id).Label;
+
+    private static bool Offers(GameSnapshot snap, string id) => snap.Actions.Any(a => a.Id == id);
+
+    /// <summary>The target part of an id, ">e0" of "play:2>e0", or null when it has none.</summary>
+    private static string? TargetOf(string id) => id.LastIndexOf('>') is var at and >= 0 ? id[at..] : null;
+
+    /// <summary>The " (e1)" or " (p0)" the game side adds to a target's name while another
+    /// enemy or player shares it.</summary>
+    [GeneratedRegex(@" \([ep]\d+\)$")]
+    private static partial Regex TwinTag();
+
+    private static long? SentVersion(JsonObject args) =>
+        args["version"] is JsonValue v && v.TryGetValue<long>(out var version) ? version : null;
+
+    private static List<string>? ActionIds(JsonNode? node)
+    {
+        if (node is not JsonArray array)
+            return null;
+        var ids = new List<string>(array.Count);
+        foreach (var item in array)
+        {
+            if (item is not JsonValue v || !v.TryGetValue<string>(out var id))
+                return null;
+            ids.Add(id);
+        }
+        return ids;
     }
 
     private ToolOutcome Say(JsonObject args)
@@ -229,9 +415,10 @@ public sealed class BotTools
 
     /// <summary>
     /// Keeps <see cref="ChatHub.ThinkingSince"/> on whether the model holds a decision: set when
-    /// the snapshot a result hands back awaits one with actions (act's next, or the current one
-    /// it was refused against), cleared when it doesn't. Paused snapshots never await one. say,
-    /// get_deck and get_persona leave it alone, since the model may call them mid-decision.
+    /// the snapshot a result hands back awaits one with actions (act's or act_sequence's next, or
+    /// the current one it was refused against), cleared when it doesn't. Paused snapshots never
+    /// await one. say, get_deck and get_persona leave it alone, since the model may call them
+    /// mid-decision.
     /// </summary>
     private void TrackThinking(string tool, JsonNode payload)
     {
@@ -241,7 +428,7 @@ public sealed class BotTools
             case "get_state" or "wait_for_decision":
                 snapshot = payload;
                 break;
-            case "act":
+            case "act" or "act_sequence":
                 snapshot = payload is JsonObject reply ? reply["next"] ?? reply["current"] : null;
                 break;
             default:
