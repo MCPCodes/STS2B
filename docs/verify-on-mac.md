@@ -165,6 +165,7 @@ Line numbers are as of this commit. Items checked in one place but used in sever
 
 Written and unit tested on Linux; the game-side wiring was only compiled against GodotSharp 4.5.0 without the game's assemblies. To check on the Mac:
 
+- Smoke test, before the first in-game `/start`: `scripts/dev-host.sh --brain` (optionally `--model sonnet`) ends with PASSED. Expected: a few requests, a cache write on the first and cache reads on every one after (a second request reading 0 cached tokens means the prompt prefix is changing), about a cent in all on haiku, no 400s. `docs/brain.md` (Smoke test) has the details.
 - The mod builds against v0.107.1 with the brain in it (`src/SpireMind.Core/Brain/`, `src/SpireMind/Game/BrainWiring.cs`). A name that clashes with a game type gets a file-level alias, as in the other Brain files.
 - ModEntry.cs `// VERIFY`: `typeof(ModEntry).Assembly.Location` is set for the mod the game loads. The log line `brain: repo ... (from the mod's brain/repo_path)` shows it worked without `repo` in config.json. When it is empty the brain still runs, but only `repo` in config.json finds the checkout.
 - The game loads the mod with the extra `brain/` folder next to the DLL (staged by `scripts/build.sh`).

@@ -29,7 +29,7 @@ The mod turns whatever screen is up into a **snapshot**: the screen name, the fa
 | --- | --- |
 | `src/SpireMind.Core` | Game-agnostic bridge: HTTP server, MCP endpoint, snapshot versioning, decision waiter, chat, the in-game brain, a fake game for tests |
 | `src/SpireMind` | The mod itself: entry point and per-screen readers against the game's assemblies |
-| `src/SpireMind.DevHost` | Runs the bridge on a fake fight so the Claude Code side can be tried without the game |
+| `src/SpireMind.DevHost` | Runs the bridge on a fake fight so the Claude Code side can be tried without the game, or lets the API brain play it as a smoke test |
 | `tests/SpireMind.Core.Tests` | Unit and HTTP tests for the bridge |
 | `strategy/` | What the bot reads before playing: general rules, per-character notes, co-op, lessons learned |
 | `runs/` | Run journals the bot writes |
@@ -40,9 +40,10 @@ The mod turns whatever screen is up into a **snapshot**: the screen name, the fa
 Needs the .NET 9 SDK (`brew install dotnet@9`) since the game runs on .NET 9.
 
 ```bash
-scripts/test.sh            # bridge tests, no game needed
-scripts/dev-host.sh        # fake game on :17772; then in another terminal: claude, /play this fight
-scripts/install.sh         # build against the installed game and copy into its mods folder
+scripts/test.sh               # bridge tests, no game needed
+scripts/dev-host.sh           # fake game on :17772; then in another terminal: claude, /play this fight
+scripts/dev-host.sh --brain   # the API brain plays the fake fight with your key (see below)
+scripts/install.sh            # build against the installed game and copy into its mods folder
 curl -s http://127.0.0.1:17772/health
 ```
 
@@ -61,6 +62,8 @@ chmod 600 ~/.config/spiremind/api_key
 ```
 
 Never paste the key anywhere else: not in the game chat, config.json, a commit or a message to Claude. The mod reads it from that file and never logs or writes it. (Your shell may keep that printf line in its history. To avoid that, copy the key and run `printf '%s\n' "$(pbpaste)" > ~/.config/spiremind/api_key` instead.)
+
+Before the first game, check the key and the API calls with `scripts/dev-host.sh --brain`: the brain plays a fake fight for a few requests (about a cent) and the script ends with PASSED or FAILED. `docs/brain.md` (Smoke test) says what the output should look like.
 
 Then, in game, open the chat (T) and type:
 
