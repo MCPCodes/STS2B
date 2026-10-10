@@ -862,7 +862,7 @@ public class BrainControllerTests
         Assert.Equal("The effort is medium; high (the default) in elite rooms and high (the default) in boss rooms. " + Options, rig.Post("/effort"));
         Assert.Equal("The effort in boss rooms is high (the default). " + Options, rig.Post("/effort boss"));
 
-        Assert.Equal("The effort in boss rooms is now xhigh. It applies from the next request in a boss room.", rig.Post("/effort Boss XHIGH"));
+        Assert.Equal("The effort in boss rooms is now xhigh. It applies from the next request in a boss room." + BrainController.HighEffortCaution, rig.Post("/effort Boss XHIGH"));
         Assert.Equal("xhigh", rig.Controller.Settings.BossEffort);
         Assert.Equal("xhigh", rig.Saved[^1].BossEffort);
         Assert.Null(rig.Saved[^1].EliteEffort);
@@ -883,6 +883,13 @@ public class BrainControllerTests
         Assert.Equal("Effort set to xhigh. It applies from the next request." + BrainController.HighEffortCaution, rig.Post("/effort xhigh"));
         Assert.Equal("xhigh", rig.Controller.Settings.EffortFor(BrainSettings.BossRoom));
         Assert.Contains(rig.Logged, l => l == "brain: boss effort set to xhigh by Mark");
+
+        // Below high, the reply says the fight rooms keep their own.
+        Assert.Equal("Effort set to low. It applies from the next request, except in boss rooms, which stay at high.", rig.Post("/effort low"));
+        rig.Post("/effort elite default");
+        Assert.Equal("Effort set to medium. It applies from the next request, except in elite and boss rooms, which stay at high.", rig.Post("/effort medium"));
+        rig.Post("/effort boss max");
+        Assert.Equal("Effort set to low. It applies from the next request, except in elite rooms (high) and boss rooms (max).", rig.Post("/effort low"));
     }
 
     [Fact]

@@ -249,9 +249,10 @@ public class BrainSettingsTests : IDisposable
         Assert.Equal("Boss", RunScreens.FightRoom(null, Snap("combat", "boss")));
         Assert.Null(RunScreens.FightRoom(null, Snap("combat", "Monster")));
         Assert.Null(RunScreens.FightRoom("Elite", Snap("combat", "Monster")));
-        foreach (var screen in new[] { "combat", "hand_select", "rewards", "card_reward", "card_select", "treasure", "modal", "unknown" })
+        foreach (var screen in new[] { "combat", "hand_select", "rewards", "card_reward", "card_select", "modal", "unknown" })
             Assert.Equal("Elite", RunScreens.FightRoom("Elite", Snap(screen)));
-        foreach (var screen in new[] { "map", "shop", "rest", "event", "crystal_sphere", "menu", "game_over" })
+        // The treasure screen is a Treasure room's (in co-op the bot may not see the map in between).
+        foreach (var screen in new[] { "map", "shop", "rest", "event", "treasure", "crystal_sphere", "menu", "game_over" })
             Assert.Null(RunScreens.FightRoom("Boss", Snap(screen)));
         Assert.Null(RunScreens.FightRoom("Boss", Snap("game_over", "Boss", inState: true)));
         Assert.Null(RunScreens.FightRoom(null, Snap("rewards")));

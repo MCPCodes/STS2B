@@ -13,10 +13,11 @@ public static class RunScreens
     };
 
     // Screens that belong to another room, or to leaving one: the map is where the bot picks
-    // the next room, and an act's first room after a boss is an event.
+    // the next room, an act's first room after a boss is an event, and the treasure screen is a
+    // Treasure room's own (in co-op a teammate can pick the next room without the bot seeing the map).
     private static readonly HashSet<string> LeftFight = new(StringComparer.Ordinal)
     {
-        "map", "shop", "rest", "event", "crystal_sphere", "menu", "game_over",
+        "map", "shop", "rest", "event", "treasure", "crystal_sphere", "menu", "game_over",
     };
 
     /// <summary>True on a run screen, false at the menu or game over, null when the screen
@@ -33,8 +34,8 @@ public static class RunScreens
     /// was in before (<paramref name="current"/>): <see cref="BrainSettings.EliteRoom"/>,
     /// <see cref="BrainSettings.BossRoom"/> or null. Only combat (and game over) snapshots name
     /// their room (run.room, or room), so a fight room holds through the room's own later screens
-    /// (rewards, card picks, a hand or card select, treasure, a modal) until a snapshot names
-    /// another room or shows a screen of leaving it (map, shop, rest, event, crystal_sphere, menu,
+    /// (rewards, card picks, a hand or card select, a modal) until a snapshot names another room
+    /// or shows a screen of leaving it (map, shop, rest, event, treasure, crystal_sphere, menu,
     /// game_over).
     /// </summary>
     public static string? FightRoom(string? current, JsonObject snapshot)

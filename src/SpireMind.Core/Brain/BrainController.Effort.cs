@@ -26,6 +26,23 @@ public sealed partial class BrainController
         return elite == boss ? $", {elite} in elite and boss rooms" : $", {elite} in elite rooms and {boss} in boss rooms";
     }
 
+    // When a /effort <level> reply says the new normal effort applies: from the next request, except
+    // in elite and boss rooms whose own effort differs from it.
+    private static string NormalEffortApplies(BrainSettings settings)
+    {
+        var elite = settings.EffortFor(BrainSettings.EliteRoom);
+        var boss = settings.EffortFor(BrainSettings.BossRoom);
+        var except = (elite != settings.Effort, boss != settings.Effort) switch
+        {
+            (true, true) when elite == boss => $", except in elite and boss rooms, which stay at {elite}",
+            (true, true) => $", except in elite rooms ({elite}) and boss rooms ({boss})",
+            (true, false) => $", except in elite rooms, which stay at {elite}",
+            (false, true) => $", except in boss rooms, which stay at {boss}",
+            _ => "",
+        };
+        return $"It applies from the next request{except}.";
+    }
+
     // "high", "medium (the normal effort)" or "high (the default)".
     private static string FightEffort(BrainSettings settings, string room)
     {
@@ -78,6 +95,7 @@ public sealed partial class BrainController
         // Claude Code isn't told an effort, so only the API brain uses it.
         return subscription
             ? $"{line} Only the API brain uses it, so Claude Code playing now isn't affected.{saved}"
-            : $"{line} It applies from the next request in {(room == BrainSettings.EliteRoom ? "an" : "a")} {name} room.{saved}";
+            : $"{line} It applies from the next request in {(room == BrainSettings.EliteRoom ? "an" : "a")} {name} room." +
+              $"{(settings.EffortFor(room) is "xhigh" or "max" ? HighEffortCaution : "")}{saved}";
     }
 }

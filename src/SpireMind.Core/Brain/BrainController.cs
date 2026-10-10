@@ -42,8 +42,8 @@ public sealed partial class BrainController
     /// <summary>The reply to /start while another MCP client (Claude Code's /play) is calling the game tools.</summary>
     public const string OtherClientLine = "Claude Code is playing through the mod right now. Stop it there, then type /start again.";
 
-    /// <summary>Added to the /effort reply for xhigh and max while the API brain is the one that uses it.</summary>
-    public const string HighEffortCaution = " Replies are capped at 16,000 tokens including thinking, so a hard turn may be cut off at this level.";
+    /// <summary>Added to the /effort reply (/effort elite and boss too) for xhigh and max while the API brain is the one that uses it.</summary>
+    public const string HighEffortCaution = " Turns at this level think much longer, so each one costs more and can take minutes.";
 
     private const string NoKeyReason = "there's no API key";
     private const string BudgetReason = "this month's API budget is used up";
@@ -372,7 +372,7 @@ public sealed partial class BrainController
         // Claude Code isn't told an effort, so only the API brain uses it.
         return subscription
             ? $"Effort set to {effort}. Only the API brain uses it, so Claude Code playing now isn't affected.{saved}"
-            : $"Effort set to {effort}. It applies from the next request.{(effort is "xhigh" or "max" ? HighEffortCaution : "")}{saved}";
+            : $"Effort set to {effort}. {NormalEffortApplies(settings)}{(effort is "xhigh" or "max" ? HighEffortCaution : "")}{saved}";
     }
 
     // Starts the brain the settings call for unless one plays, and says what happened: the

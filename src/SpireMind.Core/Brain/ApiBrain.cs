@@ -52,9 +52,10 @@ public enum BrainStopReason
 /// is rebuilt only when a new run starts or the character (or co-op) changes.</item>
 /// <item>Long conversations are replaced by a fresh one that holds the run journal, the recent
 /// chat and the current state; so is the conversation after a model switch or a new run.</item>
-/// <item>Elite and boss rooms have an effort of their own (<see cref="BrainSettings.EffortFor"/>);
-/// entering or leaving one changes effort with an effort-only system message where the model takes
-/// one, so the conversation and its cache carry on (see <see cref="SupportsPerMessageEffort"/>).</item>
+/// <item>Elite and boss rooms have an effort of their own (<see cref="BrainSettings.EffortFor"/>).
+/// A switch to a higher effort starts a fresh conversation at that effort; a switch to a lower one
+/// keeps the conversation and lowers it with an effort-only system message where the model takes one
+/// (see <see cref="SupportsPerMessageEffort"/>).</item>
 /// <item>Spend is added up from each response's usage and checked against the monthly cap
 /// before every request.</item>
 /// </list>
@@ -87,13 +88,16 @@ public sealed class ApiBrain : IPlayBrain
     /// messages, so a short start is cheaper than the old history.</summary>
     public const string ModelChanged = "The model or effort changed, so the conversation starts over.";
 
-    /// <summary>Opens a conversation after the bot entered or left an elite or boss room whose effort
-    /// differs, on a model that can't change effort inside a conversation (see <see cref="SupportsPerMessageEffort"/>).</summary>
+    /// <summary>Opens a conversation after the bot entered or left an elite or boss room and the effort
+    /// went up, or went down on a model that can't lower it inside a conversation (see <see cref="SwitchRoomEffort"/>).</summary>
     public const string RoomEffortChanged = "The thinking effort changed with the room (elite and boss rooms have their own), so the conversation starts over.";
 
     /// <summary>The beta that lets an effort-only system message change effort inside a conversation
     /// without restarting its cache. Sent only on requests whose conversation holds such a message.</summary>
     public const string PerMessageEffortBeta = "mid-conversation-output-config-2026-07-01";
+
+    /// <summary>Said once in the game chat when the API turns down an effort-only system message.</summary>
+    public const string PerMessageEffortRefused = "Claude turned down the in-conversation effort change, so leaving an elite or boss room starts a fresh conversation until the next /start. The details are in the log.";
 
     /// <summary>Ends every opening message.</summary>
     public const string CarryOn = "Carry on from here.";
@@ -161,6 +165,7 @@ public sealed class ApiBrain : IPlayBrain
     private string? _effortRoom; // the fight room the last request was built for
     private string? _fightRoom; // the elite or boss room the bot is in (RunScreens.FightRoom), or null
     private bool _effortMessages; // the conversation holds an effort-only system message
+    private bool _effortMessageUnsent; // the newest one hasn't been in a request the API answered yet
     private bool _perMessageEffortRefused; // the API refused one, so room switches start fresh conversations
     private int _endTurnsInRow;
     private int _cutOffsInRow;
@@ -245,9 +250,10 @@ public sealed class ApiBrain : IPlayBrain
     /// <summary>
     /// True when <paramref name="model"/> takes an effort-only system message
     /// (<c>{"role": "system", "content": [], "output_config": {"effort": ...}}</c>, beta
-    /// <see cref="PerMessageEffortBeta"/>), which changes effort from the next user turn on without
-    /// touching the cached prefix or the thinking blocks. On other models a room's effort change
-    /// starts a fresh conversation instead (a top-level change would restart the messages cache anyway).
+    /// <see cref="PerMessageEffortBeta"/>), which changes effort from the next user turn with new input
+    /// on without touching the cached prefix or the thinking blocks. The brain uses it only to lower
+    /// effort (see <see cref="SwitchRoomEffort"/>); on other models that starts a fresh conversation
+    /// too (a top-level change would restart the messages cache anyway).
     /// </summary>
     public static bool SupportsPerMessageEffort(string? model) =>
         model is not null && PerMessageEffortModels.Contains(model);
@@ -539,9 +545,8 @@ public sealed class ApiBrain : IPlayBrain
         }
         if (_messages.Count <= 1)
         {
-            // A conversation's first request fixes its top-level effort.
+            // A conversation's first request fixes its top-level effort, a fight room's included.
             _conversationEffort = effort;
-            _effortMessages = false;
         }
         _conversationModel = model;
         _currentEffort = effort;
@@ -564,9 +569,11 @@ public sealed class ApiBrain : IPlayBrain
             // The API turned down the per-message effort beta: change effort the old way from now on.
             _perMessageEffortRefused = true;
             Log("brain: the API refused the per-message effort change; starting a fresh conversation, and fresh ones for room effort changes from now on");
+            Announce(PerMessageEffortRefused);
             StartConversation(RoomEffortChanged);
             return;
         }
+        _effortMessageUnsent = false;
         if (sent is not { } response)
         {
             // The API said the prompt is over the context window.
@@ -722,20 +729,32 @@ public sealed class ApiBrain : IPlayBrain
 
     /// <summary>
     /// The bot entered or left an elite or boss room whose effort differs from the one in effect.
-    /// On a model that takes per-message effort, an effort-only system message goes in just before
-    /// the user message about to be sent, so the conversation stays append-only: its cache (the top-level
-    /// effort is unchanged) and its thinking blocks stay valid, and the model keeps what it was
-    /// doing in mind. Elsewhere a top-level change would restart the messages cache anyway, so a
-    /// fresh conversation (the run journal and the state) is the cheaper start and steers the model
-    /// to the new effort more reliably than a history written at the old one.
+    /// <list type="bullet">
+    /// <item>Higher: a fresh conversation (the run journal and the state) at the new top-level
+    /// effort, the way the benchmark behind fight efforts played each fight. Raising effort with an
+    /// effort-only message works best for large jumps, and medium to high is the smallest; a model
+    /// reading a history written at the old effort tends to stay at it; and the short history is
+    /// cheaper to re-read through a fight than the old one.</item>
+    /// <item>Lower, on a model that takes per-message effort: an effort-only system message just
+    /// before the user message about to be sent, which gets a short note so it counts as new input
+    /// (a user turn of tool results alone doesn't, and the change would wait for one that does). The
+    /// conversation stays append-only, so its cache (the top-level effort is unchanged) and its
+    /// thinking blocks stay valid, and the model keeps the room's rewards in mind. The docs call
+    /// lowering this way reliable.</item>
+    /// <item>Lower elsewhere: a fresh conversation, since a top-level change would restart the
+    /// messages cache anyway.</item>
+    /// </list>
     /// </summary>
     private void SwitchRoomEffort(string model, string? room, string? effort)
     {
         var where = room is null ? $"left the {_effortRoom ?? "fight"} room" : $"entered the {room} room";
-        if (effort is not null && SupportsPerMessageEffort(model) && !_perMessageEffortRefused
-            && _messages[^1]["role"]?.GetValue<string>() == "user")
+        if (Lower(effort, _currentEffort) && SupportsPerMessageEffort(model) && !_perMessageEffortRefused
+            && _messages[^1]["role"]?.GetValue<string>() == "user" && _messages[^1]["content"] is JsonArray content)
         {
-            Log($"brain: {where}; effort {_currentEffort ?? "default"} to {effort}, keeping the conversation");
+            Log($"brain: {where}; effort {_currentEffort} to {effort}, keeping the conversation");
+            content.Add(TextBlock(room is null
+                ? $"(You left the {_effortRoom ?? "fight"} room, so the thinking effort is back to {effort}.)"
+                : $"({room} rooms are played at {effort} effort, so the thinking effort is now {effort}.)"));
             _messages.Insert(_messages.Count - 1, new JsonObject
             {
                 ["role"] = "system",
@@ -743,11 +762,30 @@ public sealed class ApiBrain : IPlayBrain
                 ["output_config"] = new JsonObject { ["effort"] = effort },
             });
             _effortMessages = true;
+            _effortMessageUnsent = true;
             return;
         }
         Log($"brain: {where}; effort {_currentEffort ?? "default"} to {effort ?? "default"}, starting a fresh conversation");
         StartConversation(RoomEffortChanged);
     }
+
+    // True when both are levels and effort is below than.
+    private static bool Lower(string? effort, string? than)
+    {
+        if (effort is null || than is null)
+            return false;
+        var levels = BrainSettings.Efforts.ToList();
+        var rank = levels.IndexOf(effort);
+        return rank >= 0 && rank < levels.IndexOf(than);
+    }
+
+    // A 400 on a request holding an effort-only message is taken for a refusal of the beta only on
+    // the first request that carries the newest such message, or when the API's words name it;
+    // any other 400 stops the brain as before.
+    private bool EffortMessageRefused(ClaudeApiException ex) =>
+        _effortMessages && (_effortMessageUnsent
+                            || ex.ApiMessage.Contains("output_config", StringComparison.OrdinalIgnoreCase)
+                            || ex.ApiMessage.Contains("effort", StringComparison.OrdinalIgnoreCase));
 
     // HardRefreshTokens, or LongPromptMargin below the model's long-prompt tier when that comes first.
     private long HardRefreshLimit() =>
@@ -789,6 +827,8 @@ public sealed class ApiBrain : IPlayBrain
 
         _messages.Clear();
         _messages.Add(new JsonObject { ["role"] = "user", ["content"] = new JsonArray(TextBlock(text.ToString())) });
+        _effortMessages = false;
+        _effortMessageUnsent = false;
         _unseenChat.Clear();
         _conversationBaseTokens = null;
         _endTurnsInRow = 0;
@@ -892,7 +932,7 @@ public sealed class ApiBrain : IPlayBrain
                         break;
                     case ClaudeErrorKind.InvalidRequest when ex.PromptTooLong:
                         return null;
-                    case ClaudeErrorKind.InvalidRequest when _effortMessages:
+                    case ClaudeErrorKind.InvalidRequest when EffortMessageRefused(ex):
                         // Most likely the per-message effort beta; a fresh conversation without
                         // effort messages either works or fails again and stops the brain below.
                         Log($"brain: request rejected ({ex.Kind}) with an effort message in it: {ex.Message}");
