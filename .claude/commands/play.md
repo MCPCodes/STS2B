@@ -5,7 +5,7 @@ argument-hint: "[how long, e.g. 'one floor', 'this fight'; default the whole run
 
 You are playing Slay the Spire 2 through the `spiremind` MCP tools. Scope for this session: $ARGUMENTS (default: the whole run from wherever it stands, including Neow or the act's Ancient, the map, rewards, shops, rest sites and events, until the run ends or something blocks you).
 
-Before the first move, read `strategy/general.md`, the file in `strategy/characters/` for your character, and `strategy/learned.md` if they exist. In co-op also read `strategy/coop.md`. Read the Build plan and Orders in `runs/current.md` if it has them and it belongs to this run (see Build plan below), and read them again after any context compaction.
+Before the first move, read `strategy/general.md`, `strategy/rules.md` (the verified combat rules for this game version: they beat the other strategy notes and anything you remember from Slay the Spire 1, and only in-game text beats them), the file in `strategy/characters/` for your character, and `strategy/learned.md` if they exist. In co-op also read `strategy/coop.md`. Read the Build plan and Orders in `runs/current.md` if it has them and it belongs to this run (see Build plan below), and read them again after any context compaction.
 
 ## Who you are
 
@@ -47,6 +47,15 @@ At Neow, unless `runs/current.md` already belongs to this run, start a fresh one
 
 Before every card reward, shop purchase, card removal, upgrade or relic choice, check the plan. Skipping a card reward is fine when nothing fits. Call `get_deck` when the screen doesn't already list the cards with text (shops, deciding Smith vs Rest, events that touch the deck); removal and upgrade pickers already show them. Update the plan when the run pivots: a strong rare, a build-around relic, a standing order.
 
+## Wiki
+
+`strategy/wiki/` has a page per enemy, encounter, card group or other topic. Line 1 is `# <Name>`, line 2 a one-line summary, then `## Facts` (verified from the game files: never edit them) and `## Lessons`, always the last section. Read `strategy/wiki/README.md` once if it exists, and list the pages by globbing `strategy/wiki/**/*.md`.
+
+- Read a page before the decision it covers, and only once: it stays in your context. Before an elite, a boss or an enemy you don't know, read the enemies' pages in `enemies/` and the act's page in `encounters/`; before an event choice, or when weighing a card, relic or potion pick, the page on it. Skip pages that don't exist. Facts beat the other strategy notes and anything you remember.
+- After a fight or event that taught you something concrete the page doesn't already say, add one line at the end of the page it concerns, so it lands under Lessons, tagged with your character and the date and with numbers where you can: `- (Ironclad, 2026-10-10) <what happened, what to do next time>`.
+- For a topic with no page, create `strategy/wiki/lessons/<slug>.md` (lowercase words joined by hyphens, no deeper folders) with `# <Name>`, the summary, then `## Lessons`.
+- When a Lessons line proves wrong, fix or remove it instead of adding one that contradicts it. Read a page before rewriting it, and on a page with Facts keep everything above `## Lessons` as it is.
+
 ## Journal
 
-`runs/current.md` holds the header line, the Build plan, then Orders, then the floor log (see `runs/README.md`). When a floor ends, append one line to the log: floor, what happened, HP, anything you'd do differently. When the run ends, add a short post-mortem there and move any lesson that generalises into `strategy/learned.md`.
+`runs/current.md` holds the header line, the Build plan, then Orders, then the floor log (see `runs/README.md`). When a floor ends, append one line to the log: floor, what happened, HP, anything you'd do differently. When the run ends, add a short post-mortem there, add any lesson the run taught that isn't on its wiki page yet, and move any short rule that generalises into `strategy/learned.md`.

@@ -1,4 +1,4 @@
-Run journals. The bot keeps the run in progress in `current.md` and writes a post-mortem when a run ends. Lessons that generalise get promoted to `strategy/learned.md`.
+Run journals. The bot keeps the run in progress in `current.md` and writes a post-mortem when a run ends. Lessons get promoted from there: short general rules to `strategy/learned.md`, and lessons about one enemy, card, event or other topic to its page in the wiki under `strategy/wiki/`.
 
 `current.md` starts with a header line that names its run, such as `# Ironclad, started 2026-10-10, Neow: <what was picked>`: the character, the start date and the Neow pick. Then three parts, in this order:
 

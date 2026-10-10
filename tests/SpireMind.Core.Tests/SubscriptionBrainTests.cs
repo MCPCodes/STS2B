@@ -37,7 +37,7 @@ public class SubscriptionBrainTests
             "--session-id", id,
             "--strict-mcp-config",
             "--mcp-config", "{\"mcpServers\":{\"spiremind\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:8765/mcp/own\"}}}",
-            "--tools", "Read,Edit,Write,ToolSearch",
+            "--tools", "Read,Glob,Edit,Write,ToolSearch",
             "--permission-mode", "dontAsk",
             "--allowedTools", "mcp__spiremind", "mcp__spiremind__*", $"Edit(/{rig.Repo}/runs/**)", $"Edit(/{rig.Repo}/strategy/**)",
             "--output-format", "stream-json",
@@ -45,6 +45,9 @@ public class SubscriptionBrainTests
         ], spec.Arguments);
         Assert.StartsWith("Edit(//", spec.Arguments[14]);
         Assert.DoesNotContain("///", spec.Arguments[14]);
+        // Glob lists the wiki's pages; writing them falls under the strategy/** rule.
+        Assert.Contains("Glob", spec.Arguments[8].Split(','));
+        Assert.EndsWith("/strategy/**)", spec.Arguments[15]);
     }
 
     [Fact]
@@ -510,6 +513,32 @@ public class SubscriptionBrainTests
 
         Assert.Contains(rig.Logged, l => l.Contains("spiremind connected"));
         Assert.DoesNotContain(rig.Logged, l => l.Contains("warning"));
+    }
+
+    [Fact]
+    public async Task Permission_denials_are_logged_by_tool_name_only()
+    {
+        using var rig = new SubRig();
+        rig.InRunAnswers = [true, false];
+        rig.Launcher.Then(c =>
+        {
+            var result = JsonNode.Parse(Result("success", false, "Run over."))!.AsObject();
+            result["permission_denials"] = new JsonArray(
+                new JsonObject { ["tool_name"] = "Glob", ["tool_use_id"] = "toolu_1", ["tool_input"] = new JsonObject { ["pattern"] = "SECRET-PATTERN" } },
+                new JsonObject { ["tool_name"] = "Edit", ["tool_use_id"] = "toolu_2", ["tool_input"] = new JsonObject() },
+                new JsonObject { ["tool_name"] = "Glob", ["tool_use_id"] = "toolu_3", ["tool_input"] = new JsonObject() });
+            c.Out(Json(result));
+            c.Out(Result("success", false, "No denials here.", turns: 7));
+            c.Out(Json(new JsonObject { ["type"] = "result", ["subtype"] = "success", ["permission_denials"] = new JsonArray() }));
+            c.Exit(0);
+        });
+
+        rig.Brain.Start();
+        await rig.Stopped.Task.WaitAsync(Guard);
+
+        var denied = Assert.Single(rig.Logged, l => l.Contains("permission denied"));
+        Assert.EndsWith("claude: permission denied for Glob, Edit", denied);
+        Assert.DoesNotContain(rig.Logged, l => l.Contains("SECRET-PATTERN"));
     }
 
     // ---- Usage limits ----

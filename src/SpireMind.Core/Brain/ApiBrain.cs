@@ -156,8 +156,9 @@ public sealed class ApiBrain : IPlayBrain
 
     /// <param name="api">The Messages API (<see cref="ClaudeClient"/>).</param>
     /// <param name="tools">The game tools: <see cref="BotToolsHost"/> around the <see cref="BotTools"/> instance the MCP endpoint uses.</param>
-    /// <param name="notes">notes_read, notes_write and notes_append; their root is also where a fresher
-    /// strategy/learned.md is looked for when the prompt is built.</param>
+    /// <param name="notes">notes_read, notes_write, notes_append and notes_list; their root is also
+    /// where a fresher strategy/learned.md is looked for, and where the wiki index's pages come
+    /// from, when the prompt is built.</param>
     /// <param name="promptFolder">The repo, or the fallback folder with the same layout, that
     /// <see cref="PromptBuilder"/> reads.</param>
     /// <param name="settings">Read before every request, so /model and /effort apply at once.</param>
