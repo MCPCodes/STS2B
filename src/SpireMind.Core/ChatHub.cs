@@ -18,22 +18,25 @@ public sealed record PostResult(PostOutcome Outcome, string? Reply = null);
 
 /// <summary>
 /// The in-game chat between the human and the bot: the line log the overlay shows, the
-/// messages the model hasn't read yet, the pause switch, who the bot is playing and whether
-/// it is deciding. The overlay posts on the main thread and the tools read on HTTP worker
-/// threads, so one lock guards everything and <see cref="LineAdded"/> is raised only after
-/// it is released. See docs/chat.md.
+/// messages the model hasn't read yet, the pause switch, the chat commands, who the bot is
+/// playing and whether it is deciding. The overlay posts on the main thread and the tools read
+/// on HTTP worker threads, so one lock guards everything, and <see cref="LineAdded"/> and
+/// command handlers run only after it is released. See docs/chat.md.
 /// </summary>
 public sealed partial class ChatHub
 {
     private const int MaxLines = 200;
     private const int BurstLines = 6;
     private static readonly TimeSpan BurstWindow = TimeSpan.FromSeconds(10);
+    private const int MaxFailureLength = 160;
+    private static readonly string[] BuiltIns = ["pause", "resume", "help"];
 
     private readonly object _gate = new();
     private readonly Func<DateTime> _clock;
     private readonly List<ChatLine> _lines = [];
     private readonly List<ChatMessage> _unread = [];
     private readonly Queue<DateTime> _recentSays = new();
+    private readonly List<Command> _commands = [];
     private string? _botName;
     private string? _pausedBy;
     private JsonObject? _persona;
@@ -119,9 +122,12 @@ public sealed partial class ChatHub
     public event Action<ChatLine>? LineAdded;
 
     /// <summary>
-    /// A line typed by a human. /pause, /resume and /help (the whole message, any case) are
-    /// handled here at once and answered with a system line. Anything else is logged, and
-    /// queued for the model unless it starts with another character's name.
+    /// A line typed by a human. A message whose first word is "/name" (any case) is a command,
+    /// handled here at once and answered with a system line: /pause, /resume and /help are
+    /// built in (anything after them is ignored), the rest come from <see cref="AddCommand"/>,
+    /// and an unknown one gets a line pointing at /help. Commands are never queued for the
+    /// model. Anything else is logged, and queued for the model unless it starts with another
+    /// character's name.
     /// </summary>
     public PostResult PostFromHuman(string from, string text)
     {
@@ -130,25 +136,67 @@ public sealed partial class ChatHub
         if (said.Length == 0)
             return new PostResult(PostOutcome.Empty);
 
+        if (SplitCommand(said) is { } command)
+            return RunCommand(who, command.Name, command.Args);
+
         ChatLine line;
         PostResult result;
         lock (_gate)
         {
-            if (CommandReply(who, said) is { } reply)
-            {
-                line = AddLine(ChatLineKind.System, "", reply);
-                result = new PostResult(PostOutcome.Command, reply);
-            }
-            else
-            {
-                line = AddLine(ChatLineKind.Human, who, said);
-                var forMe = IsForThisBot(said);
-                if (forMe) _unread.Add(new ChatMessage(who, said, line.At));
-                result = new PostResult(forMe ? PostOutcome.Queued : PostOutcome.NotForMe);
-            }
+            line = AddLine(ChatLineKind.Human, who, said);
+            var forMe = IsForThisBot(said);
+            if (forMe) _unread.Add(new ChatMessage(who, said, line.At));
+            result = new PostResult(forMe ? PostOutcome.Queued : PostOutcome.NotForMe);
         }
         LineAdded?.Invoke(line);
         return result;
+    }
+
+    /// <summary>
+    /// Adds a chat command, or replaces the one with the same name. <paramref name="name"/> is
+    /// the word after the slash ("model"; a leading slash is dropped), matched in any case.
+    /// <paramref name="usage"/> is the argument hint /help shows after the name ("[low|high]",
+    /// or empty), and <paramref name="help"/> a short phrase saying what it does ("shows or
+    /// sets the effort"). The built-in /pause, /resume and /help can't be replaced.
+    /// <para><paramref name="handler"/> gets who typed it and the rest of the message, trimmed,
+    /// and returns the system line to show (empty for none). It runs on the posting thread,
+    /// often Godot's main thread, outside the hub's lock, so it may use the hub but must return
+    /// quickly and never wait for the main thread. If it throws, a short system line says so.</para>
+    /// </summary>
+    public void AddCommand(string name, string usage, string help, Func<string, string, string> handler)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+        var bare = (name ?? "").Trim();
+        if (bare.StartsWith('/')) bare = bare[1..];
+        if (bare.Length == 0 || bare.Any(char.IsWhiteSpace) || !char.IsLetterOrDigit(bare[0]))
+            throw new ArgumentException($"'{name}' can't be a command name: use one word that starts with a letter or digit.", nameof(name));
+        if (BuiltIns.Contains(bare, StringComparer.OrdinalIgnoreCase))
+            throw new ArgumentException($"/{bare} is built in and can't be replaced.", nameof(name));
+
+        var command = new Command(bare, usage?.Trim() ?? "", help?.Trim() ?? "", handler);
+        lock (_gate)
+        {
+            var index = _commands.FindIndex(c => c.Name.Equals(bare, StringComparison.OrdinalIgnoreCase));
+            if (index >= 0) _commands[index] = command;
+            else _commands.Add(command);
+        }
+    }
+
+    /// <summary>
+    /// A system line from the mod itself ("Switching to your Claude subscription..."), shown in
+    /// the log like a command's reply. Whitespace is collapsed; there is no length cap or burst
+    /// limit. Throws <see cref="ArgumentException"/> on empty text.
+    /// </summary>
+    public ChatLine Announce(string text)
+    {
+        var said = Whitespace().Replace(text ?? "", " ").Trim();
+        if (said.Length == 0)
+            throw new ArgumentException("Nothing to announce: text is empty.");
+
+        ChatLine line;
+        lock (_gate) line = AddLine(ChatLineKind.System, "", said);
+        LineAdded?.Invoke(line);
+        return line;
     }
 
     /// <summary>
@@ -233,32 +281,95 @@ public sealed partial class ChatHub
     private DateTime? FreshThinking() =>
         _thinkingSince is { } since && _clock() - since < ThinkingStaleAfter ? since : null;
 
-    // Caller holds _gate. Null when the text isn't a command.
-    private string? CommandReply(string from, string text)
+    // A built-in /pause, /resume or /help, a command from AddCommand, or an unknown one. The
+    // built-ins change state and log their line under one lock; an added command's handler runs
+    // with the lock released, so it can use the hub (and take its time) without blocking it.
+    private PostResult RunCommand(string from, string name, string args)
+    {
+        // Added commands can't take a built-in's name, so the order doesn't matter.
+        Command? added;
+        lock (_gate) added = _commands.Find(c => c.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+
+        ChatLine line;
+        if (added is null)
+        {
+            lock (_gate)
+                line = AddLine(ChatLineKind.System, "", BuiltInReply(from, name) ?? $"There's no /{name} command. Type /help to see them.");
+        }
+        else
+        {
+            var reply = RunHandler(added, from, args);
+            if (reply.Length == 0)
+                return new PostResult(PostOutcome.Command);
+            lock (_gate) line = AddLine(ChatLineKind.System, "", reply);
+        }
+
+        LineAdded?.Invoke(line);
+        return new PostResult(PostOutcome.Command, line.Text);
+    }
+
+    // An added command's reply, trimmed, or a short line saying it failed. Never throws.
+    private static string RunHandler(Command command, string from, string args)
+    {
+        try
+        {
+            return command.Handler(from, args)?.Trim() ?? "";
+        }
+        catch (Exception ex)
+        {
+            var why = Whitespace().Replace(ex.Message, " ").Trim();
+            if (why.Length > MaxFailureLength)
+                why = why[..(MaxFailureLength - 3)].TrimEnd() + "...";
+            return why.Length > 0 ? $"That didn't work: {why}" : $"That didn't work ({ex.GetType().Name}).";
+        }
+    }
+
+    // Caller holds _gate. The reply of a built-in command, or null when name isn't one.
+    private string? BuiltInReply(string from, string name)
     {
         var bot = _botName ?? "The bot";
-        switch (text.ToLowerInvariant())
+        switch (name.ToLowerInvariant())
         {
-            case "/pause":
+            case "pause":
                 if (_pausedBy is not null)
                     return $"{bot} is already paused by {_pausedBy}. Type /resume to hand back control.";
                 _pausedBy = from;
                 _thinkingSince = null; // it can't act on the decision it was handed
                 return $"{bot} paused. Type /resume to hand back control.";
 
-            case "/resume":
+            case "resume":
                 if (_pausedBy is null)
                     return $"{bot} isn't paused.";
                 _pausedBy = null;
                 return $"{bot} has control again.";
 
-            case "/help":
-                return "Commands: /pause stops the bot so you can play by hand, /resume hands control back, /help shows this. " +
-                       "Start a message with a character's name to talk to that bot only.";
+            case "help":
+                var entries = new List<string> { "/pause holds the bot so you can play by hand", "/resume hands control back" };
+                foreach (var c in _commands)
+                {
+                    var entry = "/" + c.Name;
+                    if (c.Usage.Length > 0) entry += " " + c.Usage;
+                    var help = c.Help.TrimEnd('.', ' ');
+                    if (help.Length > 0) entry += " " + help;
+                    entries.Add(entry);
+                }
+                entries.Add("/help shows this");
+                return $"Commands: {string.Join(", ", entries)}. Start a message with a character's name to talk to that bot only.";
 
             default:
                 return null;
         }
+    }
+
+    // The command name and arguments when the first word is "/name", else null. A lone "/" or
+    // a slash before a space or punctuation is ordinary text.
+    private static (string Name, string Args)? SplitCommand(string text)
+    {
+        if (text.Length < 2 || text[0] != '/' || !char.IsLetterOrDigit(text[1]))
+            return null;
+        var end = 1;
+        while (end < text.Length && !char.IsWhiteSpace(text[end])) end++;
+        return (text[1..end], text[end..].Trim());
     }
 
     // Caller holds _gate. With no bot name (between runs, before a character is picked) every
@@ -279,4 +390,6 @@ public sealed partial class ChatHub
 
     [GeneratedRegex(@"\s+")]
     private static partial Regex Whitespace();
+
+    private sealed record Command(string Name, string Usage, string Help, Func<string, string, string> Handler);
 }
