@@ -12,27 +12,19 @@ internal static class ChatTheme
     private const string NameFontPath = "res://themes/kreon_bold_shared.tres";
 
     /// <summary>On the main thread, once the game is up (the overlay asks when it first attaches).</summary>
-    // VERIFY: StsColors is in the global usings and cream and gold are static Godot Colors.
     public static ChatStyle Load(Action<string>? logError = null) => new(
         LoadFont(BodyFontPath, logError),
         LoadFont(NameFontPath, logError),
         Read(() => StsColors.cream, "cream", logError),
         Read(() => StsColors.gold, "gold", logError));
 
-    /// <summary>The font a .tres holds, or its default font if it turns out to be a whole theme.</summary>
+    /// <summary>The font a .tres holds: both of the game's are FontVariations over a Kreon font file.</summary>
     private static Font? LoadFont(string path, Action<string>? logError)
     {
         try
         {
             // Exists first: Load on a missing path prints an engine error of its own.
-            var font = ResourceLoader.Exists(path)
-                ? ResourceLoader.Load(path) switch
-                {
-                    Font f => f,
-                    Theme theme => theme.DefaultFont,
-                    _ => null,
-                }
-                : null;
+            var font = ResourceLoader.Exists(path) ? ResourceLoader.Load(path) as Font : null;
             if (font is null) logError?.Invoke($"chat: no font in {path}, keeping the default");
             return font;
         }

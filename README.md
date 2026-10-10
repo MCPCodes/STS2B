@@ -58,7 +58,7 @@ The bot plays as its character and answers in that character's voice, taken from
   - `/pause` stops the bot so you can play by hand. Chat keeps working.
   - `/resume` hands control back.
   - `/help` lists the commands.
-- `SPIREMIND_CHAT_KEY` picks another hotkey (a Godot `Key` name such as `Y`; Enter and Escape fall back to T). `SPIREMIND_HUMAN_NAME` sets the name on your lines; it defaults to your OS user name, capitalised. Set them in the game's Steam launch options, e.g. `SPIREMIND_HUMAN_NAME=Mark %command%`.
+- `SPIREMIND_CHAT_KEY` picks another hotkey (a Godot `Key` name such as `Y`; Enter and Escape fall back to T). A key the game uses itself (a bound hotkey, F2, the dev console keys, V in co-op) will not open the chat; the log says so. `SPIREMIND_HUMAN_NAME` sets the name on your lines; it defaults to your OS user name, capitalised. Set them in the game's Steam launch options, e.g. `SPIREMIND_HUMAN_NAME=Mark %command%`.
 
 The same chat works from a terminal, which helps when testing without the overlay:
 

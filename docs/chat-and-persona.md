@@ -16,7 +16,7 @@ Findings for the in-game chat feature (Mark types in the game; the bot answers i
 
 - `static NSpeechBubbleVfx? Create(string text, Creature speaker, double secondsToDisplay, VfxColor vfxColor = White)`: positions above the creature. **Combat only**: outside combat (no creature node) it lands at (0,0). Player side gives `DialogueSide.Left`.
 - `static NSpeechBubbleVfx? Create(string text, DialogueSide side, Vector2 globalPosition, double secondsToDisplay, VfxColor vfxColor = White)`: absolute position, works anywhere.
-- Neither factory parents the node: call `AddChildSafely` yourself. `Task AnimOut()` fades and frees it (check `IsInstanceValid` and `IsInsideTree` first).
+- Neither factory parents the node: call `AddChildSafely` yourself. `Task AnimOut()` fades and frees it (check `IsInstanceValid` and `IsInsideTree` first). `AnimOut` and `GoAway` are async Tasks, so a failure shows up in the returned task, not as an exception at the call site.
 - Text goes into a `MegaRichTextLabel` wrapped in `[center][fly_in]...`, so BBCode is live. Escape `[` (`text.EscapeBbcodeTags()` or `[lb]`); an unbalanced closing tag throws in the auto-size parser.
 - Fixed 280x130 px text box, font 24 to 18 pt: keep each bubble to about 100 characters and split longer replies into a sequence. On screen for about 0.5 + max(secs-1, 1) + 0.4 s. Duration like the game's `TalkCmd`: about 0.12 s per non-space character. Nothing queues bubbles, so keep one per speaker and dismiss the previous one.
 - Bubbles ignore the mouse and never take focus.
@@ -28,7 +28,7 @@ Where to put a bubble over the local player (main thread):
 | Where | Anchor | Parent |
 |---|---|---|
 | Combat (incl. an event's embedded fight) | `Create(text, me.Creature, secs, me.Character.SpeechBubbleColor)` | `NCombatRoom.Instance.CombatVfxContainer` (= `me.Creature.GetVfxContainer()`) |
-| Rest site | `NRestSiteRoom.Instance.GetCharacterForPlayer(me)`; its `%ThoughtBubbleLeft`/`%ThoughtBubbleRight` control (index < 2 uses Left) | the room, or the character node (renders at 0.76 scale) |
+| Rest site | `NRestSiteRoom.Instance.GetCharacterForPlayer(me)`; its `%ThoughtBubbleLeft`/`%ThoughtBubbleRight` control (seat = index in `NRestSiteRoom.Characters`; seats below 2 use Left). The bubble side follows the game's rule: `DialogueSide.Right` for seat 0 or 3, Left otherwise | the room, or the character node (renders at 0.76 scale) |
 | Shop | `NMerchantRoom.Instance.PlayerVisuals[0]` (the local player) plus an offset to tune, starting near (+60,-250) | `NMerchantRoom.Instance` |
 | Anywhere else in a run (map, events, Neow, treasure, rewards, card select) | next to the top-bar portrait: `GlobalUi.TopBar.Portrait` + (110, height+170) | `NRun.Instance.GlobalUi.AboveTopBarVfxContainer` (full screen, ignores the mouse, lives for the run) |
 | Menu, character select | any position | `NGame.Instance` or the character select screen |
@@ -82,7 +82,7 @@ Colours: Ironclad Red, Silent Swamp, Defect Blue, Regent Orange. The Necrobinder
 - **Player names**: `PlatformUtil.GetPlayerNameRaw(platform, netId)`. ENet lobbies are `PlatformType.None` (`mp_names.json` in the working directory, else Test Host / Test Client N). The bot instance has no Steam, so pass Mark's name through config.
 - **The game's own voice text**, for the persona prompt. Read it on the main thread after `LocManager.Instance != null`, which happens after mods load, so defer to the menu or `RunStarted`.
   - `characters` table, keys `<ID>.description`, `goldMonologue`, `aromaPrinciple`, `eventDeathPrevention`, `banter.alive.endTurnPing`, `banter.dead.endTurnPing`. Read with `LocManager.Instance.GetTable("characters").GetRawText(key)`, guarding with `LocString.Exists`.
-  - `ancients` table, keys `<ANCIENT>.talk.<ID>.<i>-<j>.char`: the character's lines to each Ancient. `THE_ARCHITECT` holds the confrontation lines.
+  - `ancients` table, keys `<ANCIENT>.talk.<ID>.<i>-<j>[r].char` (optional `r` for repeating dialogues; the numbers have gaps wherever the Ancient speaks, so list them with `GetLocStringsWithPrefix` rather than probing): the character's lines to each Ancient. `THE_ARCHITECT` holds the confrontation lines.
   - Epoch lore: `EpochModel.Get("<ID><n>_EPOCH").Description`. Gate it on `SaveManager.Instance.Progress.IsEpochRevealed` to avoid spoilers.
 - **Tone, paraphrased** from the game's data:
   - Ironclad: a terse, grim soldier.

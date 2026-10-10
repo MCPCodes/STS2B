@@ -10,8 +10,9 @@ namespace SpireMind.Patches;
 /// there wasn't used by the focused LineEdit. With the box closed, a fresh press of the chat
 /// hotkey opens it and isn't typed into it; with the box open, every key that gets there is
 /// kept from the game (Cmd or Ctrl plus a digit picks cards whatever has focus, F-keys, key
-/// releases). <see cref="ChatOverlay.TakeUnhandledKey"/> decides; this marks the event handled
-/// and skips the game's handler.
+/// releases). The game turns releases into hotkeys too, so once the box has closed, the release
+/// of a key it took is kept back as well. <see cref="ChatOverlay.TakeUnhandledKey"/> decides;
+/// this marks the event handled and skips the game's handler.
 /// </summary>
 [HarmonyPatch]
 internal static class ChatHotkeyPatch
@@ -19,7 +20,6 @@ internal static class ChatHotkeyPatch
     private static bool _failed;
 
     /// <summary>The handler NInputManager declares itself, not Node's empty virtual.</summary>
-    // VERIFY: NInputManager overrides _UnhandledKeyInput(InputEvent) and is in the global usings.
     internal static MethodBase? Target() =>
         AccessTools.DeclaredMethod(typeof(NInputManager), "_UnhandledKeyInput", [typeof(InputEvent)]);
 
@@ -53,12 +53,12 @@ internal static class ChatHotkeyPatch
 
 /// <summary>
 /// F2 opens the game's feedback screen from NFeedbackScreenOpener._Input, which runs before the
-/// GUI, so the chat box can't take the key first. Skipped while typing.
+/// GUI, so the chat box can't take the key first. Skipped while typing; the handler does nothing
+/// else.
 /// </summary>
 [HarmonyPatch]
 internal static class FeedbackKeyPatch
 {
-    // VERIFY: NFeedbackScreenOpener overrides _Input(InputEvent) and its namespace is in the global usings.
     private static MethodBase TargetMethod() =>
         AccessTools.DeclaredMethod(typeof(NFeedbackScreenOpener), "_Input", [typeof(InputEvent)])
         ?? throw new MissingMethodException(nameof(NFeedbackScreenOpener), "_Input");

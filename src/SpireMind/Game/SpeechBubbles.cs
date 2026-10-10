@@ -1,5 +1,5 @@
-// NSpeechBubbleVfx and NThoughtBubbleVfx come from MegaCrit.Sts2.Core.Nodes.Vfx, in the global
-// usings. VERIFY: VfxColor and DialogueSide live there too.
+// NSpeechBubbleVfx, NThoughtBubbleVfx and VfxColor come from MegaCrit.Sts2.Core.Nodes.Vfx, and
+// DialogueSide from MegaCrit.Sts2.Core.Nodes.Vfx.Utilities; both are in the global usings.
 
 namespace SpireMind.Game;
 
@@ -190,12 +190,12 @@ internal static class SpeechBubbles
         return Adopt(layer, bubble);
     }
 
-    /// <summary>Anywhere else: the factory that takes a screen position. The player's bubbles point from the left.</summary>
+    /// <summary>Anywhere else: the factory that takes a screen position and the side the bubble opens from.</summary>
     private static NSpeechBubbleVfx? Place(Spot? spot, string text, double secs, VfxColor color)
     {
         if (spot is not { } s) return null;
         NSpeechBubbleVfx? bubble;
-        try { bubble = NSpeechBubbleVfx.Create(text, DialogueSide.Left, s.At, secs, color); }
+        try { bubble = NSpeechBubbleVfx.Create(text, s.Side, s.At, secs, color); }
         catch (Exception ex)
         {
             LogOnce("NSpeechBubbleVfx.Create at a position", ex);
@@ -212,8 +212,10 @@ internal static class SpeechBubbles
         if (bubble is null || !GodotObject.IsInstanceValid(bubble) || bubble.IsQueuedForDeletion()) return;
         try
         {
-            if (bubble.IsInsideTree()) bubble.AnimOut();
-            else bubble.QueueFree(); // its deferred add hasn't happened yet
+            // AnimOut makes a tween, which needs the tree. Out of it, the bubble's room is being
+            // swapped out (and frees it at the end of the frame) or its deferred add hasn't happened.
+            if (bubble.IsInsideTree()) Fading("AnimOut", bubble, bubble.AnimOut());
+            else bubble.QueueFree();
         }
         catch (Exception ex)
         {
@@ -231,8 +233,11 @@ internal static class SpeechBubbles
 
     // ---------- where ----------
 
-    /// <summary>Where a bubble goes: a parent node and a position in screen coordinates.</summary>
-    private readonly record struct Spot(Node Parent, Vector2 At);
+    /// <summary>
+    /// Where a bubble goes: a parent node, a position in screen coordinates, and the side it
+    /// opens from. Left, the player's side in a fight, opens up and to the right of the position.
+    /// </summary>
+    private readonly record struct Spot(Node Parent, Vector2 At, DialogueSide Side = DialogueSide.Left);
 
     /// <summary>The run and room the local player is in, (null, null) outside a run. Bubbles outlive neither.</summary>
     private static (object? Run, object? Room) CurrentPlace()
@@ -270,9 +275,11 @@ internal static class SpeechBubbles
     {
         try
         {
-            if (me.Creature is not { IsAlive: true }) return null;
+            if (me.Creature is not { IsAlive: true } creature) return null;
             var room = NCombatRoom.Instance;
-            return Nodes.Alive(room) && room.CombatVfxContainer is Node layer && Nodes.Alive(layer) ? layer : null;
+            // Without a creature node the factories put the bubble at the screen's top left corner.
+            if (!Nodes.Alive(room) || !Nodes.Alive(room.GetCreatureNode(creature))) return null;
+            return room.CombatVfxContainer is Node layer && Nodes.Alive(layer) ? layer : null;
         }
         catch (Exception ex)
         {
@@ -281,22 +288,21 @@ internal static class SpeechBubbles
         }
     }
 
-    /// <summary>Rest site: where the game puts the character's own thought bubble, parented to the room.</summary>
+    /// <summary>Rest site: where and how the game puts the character's own thought bubble, parented to the room.</summary>
     private static Spot? RestSiteSpot(GameContext ctx)
     {
         try
         {
             var room = NRestSiteRoom.Instance;
             if (!Nodes.Alive(room) || ctx.Me is not { } me) return null;
-            // VERIFY: returns the character's node, the owner of its %ThoughtBubble controls.
-            if (room.GetCharacterForPlayer(me) is not Node character || !Nodes.Alive(character)) return null;
-            // The first two seats use the left-hand bubble. VERIFY: the seat is the index in Players.
-            var seat = ctx.Run?.Players.ToList().IndexOf(me) ?? 0;
-            var (first, second) = seat < 2
-                ? ("%ThoughtBubbleLeft", "%ThoughtBubbleRight")
-                : ("%ThoughtBubbleRight", "%ThoughtBubbleLeft");
-            var marker = Nodes.Get<Node>(character, first) ?? Nodes.Get<Node>(character, second);
-            return ScreenPosition(marker) is { } at ? new Spot(room, at) : null;
+            if (room.GetCharacterForPlayer(me) is not { } character || !Nodes.Alive(character)) return null;
+            // Seats are in the run's player order, and the first two use the left-hand marker.
+            // Odd seats are mirrored, which puts the marker in use on the figure's left for seats
+            // 0 and 3: there the bubble opens leftwards, away from the figure, as the game's does.
+            var seat = room.Characters.IndexOf(character);
+            var marker = Nodes.Get<Control>(character, seat < 2 ? "%ThoughtBubbleLeft" : "%ThoughtBubbleRight");
+            var side = seat is 0 or 3 ? DialogueSide.Right : DialogueSide.Left;
+            return ScreenPosition(marker) is { } at ? new Spot(room, at, side) : null;
         }
         catch (Exception ex)
         {
@@ -312,8 +318,8 @@ internal static class SpeechBubbles
         {
             var room = NMerchantRoom.Instance;
             if (!Nodes.Alive(room) || room.Inventory?.IsOpen == true) return null;
-            // PlayerVisuals[0] is the local player. VERIFY: its elements are Node2D or Control.
-            return ScreenPosition(room.PlayerVisuals[0]) is { } at ? new Spot(room, at + ShopOffset) : null;
+            // The local player's figure comes first. It has no talk marker, hence the offset.
+            return ScreenPosition(room.PlayerVisuals.FirstOrDefault()) is { } at ? new Spot(room, at + ShopOffset) : null;
         }
         catch (Exception ex)
         {
@@ -329,11 +335,8 @@ internal static class SpeechBubbles
         {
             var ui = NRun.Instance?.GlobalUi;
             if (ui?.AboveTopBarVfxContainer is not Node layer || !Nodes.Alive(layer)) return null;
-            var portrait = ui.TopBar?.Portrait;
-            if (ScreenPosition(portrait) is not { } at) return null;
-            // VERIFY: the portrait is a Control; else its height counts as 0.
-            var height = (object?)portrait is Control c ? c.Size.Y : 0f;
-            return new Spot(layer, at + PortraitOffset + new Vector2(0, height));
+            if (ui.TopBar?.Portrait is not { } portrait || !Nodes.Alive(portrait)) return null;
+            return new Spot(layer, portrait.GlobalPosition + PortraitOffset + new Vector2(0, portrait.Size.Y));
         }
         catch (Exception ex)
         {
@@ -376,7 +379,7 @@ internal static class SpeechBubbles
         if (node is null) return null;
         try
         {
-            // VERIFY: an extension on Node in a globally imported namespace (Nodes.GodotExtensions?).
+            // The game's own (Helpers): adds at once when the parent is ready, else deferred.
             parent.AddChildSafely(node);
             return node;
         }
@@ -395,6 +398,17 @@ internal static class SpeechBubbles
             Free(node);
             return null;
         }
+    }
+
+    /// <summary>
+    /// AnimOut and GoAway are async: what they throw while setting up the fade lands in the task
+    /// they return, not in the caller. A fade that failed that way would leave the node up, so it is freed.
+    /// </summary>
+    private static void Fading(string what, Node node, Task fade)
+    {
+        if (!fade.IsFaulted) return;
+        LogOnce(what, fade.Exception?.GetBaseException() ?? new InvalidOperationException("the fade failed"));
+        Free(node);
     }
 
     private static void Free(Node node)
@@ -420,8 +434,7 @@ internal static class SpeechBubbles
     {
         try
         {
-            // VERIFY: SpeechBubbleColor is a plain VfxColor.
-            if (me?.Character is { } ch) return ColorFor(ch.Id.Entry, ch.SpeechBubbleColor);
+            if (me?.Character is { } ch) return ColorFor(ch);
         }
         catch (Exception ex)
         {
@@ -436,11 +449,10 @@ internal static class SpeechBubbles
         try
         {
             // The screen is created up front, so it counts only while on top with a lobby.
-            // LocalPlayer is a struct copy, re-read on every call. VERIFY: Peek() returns the top
-            // submenu, and LobbyPlayer.character is the same model type as Player.Character.
+            // LocalPlayer is a struct copy, re-read on every call.
             if (NGame.Instance?.MainMenu?.SubmenuStack?.Peek() is NCharacterSelectScreen { Lobby: { } lobby }
                 && lobby.LocalPlayer.character is { } pick)
-                return ColorFor(pick.Id.Entry, pick.SpeechBubbleColor);
+                return ColorFor(pick);
         }
         catch (Exception ex)
         {
@@ -449,8 +461,8 @@ internal static class SpeechBubbles
         return VfxColor.White;
     }
 
-    private static VfxColor ColorFor(string? id, VfxColor own) =>
-        string.Equals(id, "NECROBINDER", StringComparison.OrdinalIgnoreCase) ? VfxColor.Purple : own;
+    private static VfxColor ColorFor(CharacterModel character) =>
+        character is Necrobinder ? VfxColor.Purple : character.SpeechBubbleColor;
 
     // ---------- thought cloud ----------
 
@@ -486,7 +498,7 @@ internal static class SpeechBubbles
     {
         if (GameContext.Capture().Me is not { } me || CombatVfx(me) is not { } layer) return;
         NThoughtBubbleVfx? cloud;
-        // No timeout: it stays until GoAway. VERIFY: the third parameter is a nullable duration.
+        // No duration: it stays until GoAway. The game's own timer is skipped in instant mode.
         try { cloud = NThoughtBubbleVfx.Create("...", me.Creature, null); }
         catch (Exception ex)
         {
@@ -508,7 +520,7 @@ internal static class SpeechBubbles
         if (cloud is null || !GodotObject.IsInstanceValid(cloud) || cloud.IsQueuedForDeletion()) return;
         try
         {
-            if (cloud.IsInsideTree()) cloud.GoAway();
+            if (cloud.IsInsideTree()) Fading("GoAway", cloud, cloud.GoAway());
             else cloud.QueueFree();
         }
         catch (Exception ex)
@@ -572,32 +584,10 @@ internal static class SpeechBubbles
 
     /// <summary>
     /// The bubble's label parses BBCode, and an unbalanced closing tag throws in its auto-size
-    /// parser. The game's own escape is used when every "[" it leaves starts [lb] or [rb];
-    /// otherwise every "[" becomes [lb], which leaves no tag at all.
+    /// parser. Every "[" becomes [lb], as in the game's EscapeBbcodeTags, which leaves no tag at
+    /// all; a "]" by itself is plain text to both parsers.
     /// </summary>
-    private static string Escape(string text)
-    {
-        var plain = text.Replace("[", "[lb]");
-        try
-        {
-            // VERIFY: a string extension in a globally imported namespace (Helpers?).
-            var escaped = text.EscapeBbcodeTags();
-            return OnlyEscapes(escaped) ? escaped : plain;
-        }
-        catch (Exception ex)
-        {
-            LogOnce("EscapeBbcodeTags", ex);
-            return plain;
-        }
-    }
-
-    private static bool OnlyEscapes(string text)
-    {
-        for (var i = text.IndexOf('['); i >= 0; i = text.IndexOf('[', i + 1))
-            if (string.CompareOrdinal(text, i, "[lb]", 0, 4) != 0 && string.CompareOrdinal(text, i, "[rb]", 0, 4) != 0)
-                return false;
-        return true;
-    }
+    private static string Escape(string text) => text.Replace("[", "[lb]");
 
     private static void LogOnce(string what, Exception ex)
     {

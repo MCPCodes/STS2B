@@ -36,6 +36,19 @@ internal sealed class ChatGameHooks
     /// <summary>True while the game is in controller mode. The box is keyboard-only and closes then.</summary>
     public Func<bool>? UsingController { get; init; }
 
+    /// <summary>
+    /// True while the keyboard is in use elsewhere and the game ignores its own hotkeys: under
+    /// the platform's overlay (Steam's) and while the game's console shows. The box follows
+    /// suit: what is typed there must neither open it nor end up in it.
+    /// </summary>
+    public Func<bool>? KeyboardBusy { get; init; }
+
+    /// <summary>
+    /// True when the game reads this key itself, for instance because the player bound one of
+    /// its hotkeys to it. The game keeps the key then, and the chat needs another one.
+    /// </summary>
+    public Func<Key, bool>? GameUsesKey { get; init; }
+
     /// <summary>A speech bubble over the bot's character, called for every bot line.</summary>
     public Action<string>? ShowBubble { get; init; }
 }
@@ -145,14 +158,16 @@ internal sealed class ChatOverlay
     private bool _mouseWasDown;
 
     /// <summary>
-    /// Keys pressed while the box was open, by when. Game buttons click on a hotkey's release,
-    /// and the release of the Enter or Escape that closed the box (or of a letter still held)
-    /// would otherwise reach the game as a bare release: Enter is select, E is accept.
+    /// Keys whose press went to the box and that haven't come up yet: the hotkey that opened it
+    /// and everything pressed while it was open. The game never saw those presses, so it must
+    /// not see their releases either. It turns a bare release into a hotkey release (Enter is
+    /// select, Escape is back), and some of its screens close on one. That matters once the box
+    /// has closed: for the Enter or Escape that closed it and for a letter still held.
     /// </summary>
-    private readonly Dictionary<Key, DateTime> _pressedWhileTyping = new();
+    private readonly HashSet<Key> _heldFromTyping = new();
 
-    /// <summary>A release later than this after its press belongs to a fresh press the game saw.</summary>
-    private static readonly TimeSpan ReleaseGuard = TimeSpan.FromSeconds(3);
+    /// <summary>True from the hotkey press that opened the box until that key comes up: its key repeat isn't typed.</summary>
+    private bool _openKeyDown;
 
     private bool _dirty = true;
     private int _renderedKey;
@@ -161,6 +176,7 @@ internal sealed class ChatOverlay
     private bool _windowHooked;
     private bool _tickFailed;
     private bool _hookFailed;
+    private bool _gameKeyReported;
 
     /// <param name="hub">Where lines come from and typed messages go.</param>
     /// <param name="botName">Fallback for the bot's name when the hub doesn't know it yet.</param>
@@ -272,7 +288,7 @@ internal sealed class ChatOverlay
             Drain(now);
             if (!KeysFromPatch) PollHotkey();
             PollClickAway();
-            if (_open && Ask(_game.UsingController)) Close(keepDraft: true);
+            if (_open && (Ask(_game.UsingController) || Ask(_game.KeyboardBusy))) Close(keepDraft: true);
             Render(now);
         }
         catch (Exception ex)
@@ -358,40 +374,50 @@ internal sealed class ChatOverlay
     /// A key event the GUI didn't use, from the Harmony prefix on the game's input manager.
     /// Returns true when the overlay takes it; the caller then marks it handled and skips the
     /// game's handler. While the box is open that is every key: Cmd or Ctrl plus a digit
-    /// (which picks cards whatever has focus), F-keys and key releases. While closed, only a
-    /// fresh press of the hotkey with no modifiers, which opens the box and so isn't typed.
+    /// (which picks cards whatever has focus), F-keys and key releases. While closed, a fresh
+    /// press of the hotkey with no modifiers, which opens the box and so isn't typed, and what
+    /// is left of the keys the box took: their key repeat and their release.
     /// </summary>
     public bool TakeUnhandledKey(InputEvent e)
     {
         if (!GodotObject.IsInstanceValid(_layer) || !_layer.IsInsideTree()) return false;
-        if (TakeStrayRelease(e)) return true;
+        if (e is not InputEventKey key) return false;
         if (_open)
         {
-            NotePress(e);
+            NoteKey(key);
             // Escape normally never gets here (OnInputGui takes it). It does if the box lost
             // focus and couldn't get it back, and must still close it.
-            if (e is InputEventKey { Pressed: true, Keycode: Key.Escape }) Close();
+            if (key is { Pressed: true, Keycode: Key.Escape }) Close();
             return true;
         }
-        if (e is not InputEventKey { Pressed: true, Echo: false } key || key.Keycode != Hotkey) return false;
-        if (key.CtrlPressed || key.MetaPressed || key.AltPressed || key.ShiftPressed || !CanOpen()) return false;
+        if (!key.Pressed) return _heldFromTyping.Remove(key.Keycode);
+        if (key.Echo) return _heldFromTyping.Contains(key.Keycode);
+
+        // A fresh press of a key the box still counts as down: its release never arrived (the
+        // window lost focus meanwhile). This press and its release are the game's again.
+        _heldFromTyping.Remove(key.Keycode);
+        if (key.Keycode != Hotkey || key.CtrlPressed || key.MetaPressed || key.AltPressed || key.ShiftPressed) return false;
+        if (!CanOpen()) return false;
         Open(deferFocus: false);
         return true;
     }
 
-    /// <summary>Remembers a key pressed while typing, so its release can be kept from the game.</summary>
-    private void NotePress(InputEvent e)
+    /// <summary>
+    /// Keeps <see cref="_heldFromTyping"/> current while the box is open: a key going down is
+    /// added, a key coming up is dropped. Called from every place a key can show up, since a
+    /// typed letter is used up by the LineEdit and never reaches <see cref="TakeUnhandledKey"/>.
+    /// An event with no key (text composed by an input method) is skipped.
+    /// </summary>
+    private void NoteKey(InputEvent e)
     {
-        if (_open && e is InputEventKey { Pressed: true, Echo: false } key)
-            _pressedWhileTyping[key.Keycode] = DateTime.UtcNow;
-    }
-
-    /// <summary>The release of a key pressed while typing, arriving after the box closed: swallow it.</summary>
-    private bool TakeStrayRelease(InputEvent e)
-    {
-        if (_open || e is not InputEventKey { Pressed: false } key) return false;
-        if (!_pressedWhileTyping.Remove(key.Keycode, out var at)) return false;
-        return DateTime.UtcNow - at < ReleaseGuard;
+        if (!_open || e is not InputEventKey { Echo: false } key || key.Keycode == Key.None) return;
+        if (key.Pressed)
+        {
+            _heldFromTyping.Add(key.Keycode);
+            return;
+        }
+        _heldFromTyping.Remove(key.Keycode);
+        if (key.Keycode == Hotkey) _openKeyDown = false;
     }
 
     /// <summary>The fallback when the input patch didn't apply: the hotkey is polled, edge-triggered.</summary>
@@ -410,13 +436,30 @@ internal sealed class ChatOverlay
         Open(deferFocus: true);
     }
 
-    /// <summary>Not while another text field has focus (seed entry, the game's console).</summary>
-    private bool CanOpen() => _layer.GetViewport()?.GuiGetFocusOwner() is not (LineEdit or TextEdit);
+    /// <summary>
+    /// Whether the hotkey may open the box now. Not while another text field has focus (seed
+    /// entry, the game's console), in controller mode (the box would take the controller's
+    /// focus and close again at once) or while the keyboard is busy elsewhere, and never when
+    /// the game uses the key itself: then it stays the game's.
+    /// </summary>
+    private bool CanOpen()
+    {
+        if (_layer.GetViewport()?.GuiGetFocusOwner() is LineEdit or TextEdit) return false;
+        if (Ask(_game.UsingController) || Ask(_game.KeyboardBusy)) return false;
+        if (!Ask(() => _game.GameUsesKey?.Invoke(Hotkey) == true)) return true;
+        if (!_gameKeyReported)
+        {
+            _gameKeyReported = true;
+            _logError?.Invoke($"chat: {Hotkey} is one of the game's own keys, so it doesn't open the chat; set SPIREMIND_CHAT_KEY to a free one");
+        }
+        return false;
+    }
 
     /// <summary>
     /// Every input event the window receives, before the game sees it. While the box is open a
     /// key takes focus back first, since game screens release focus under it, and goes back
-    /// into edit mode, so the game's hotkey manager keeps standing down.
+    /// into edit mode, so the game's hotkey manager keeps standing down. Without focus on a
+    /// text field, the game's console would open on an apostrophe.
     /// </summary>
     private void OnWindowInput(InputEvent e)
     {
@@ -425,8 +468,13 @@ internal sealed class ChatOverlay
             if (!_open || e is not InputEventKey || !_input.IsInsideTree()) return;
             // The window sees every key before the GUI does, including the Enter or Escape
             // that closes the box, which the box then consumes.
-            NotePress(e);
-            if (!_input.HasFocus()) _input.GrabFocus();
+            NoteKey(e);
+            if (!_input.HasFocus())
+            {
+                // Another text field the player clicked into keeps the key.
+                if (_input.GetViewport()?.GuiGetFocusOwner() is LineEdit or TextEdit) return;
+                _input.GrabFocus();
+            }
             if (!_input.IsEditing()) _input.Edit();
         }
         catch (Exception ex)
@@ -449,7 +497,9 @@ internal sealed class ChatOverlay
 
     private void Open(bool deferFocus)
     {
-        _pressedWhileTyping.Clear();
+        // The hotkey press that opens the box is the box's, like the keys typed into it.
+        _heldFromTyping.Add(Hotkey);
+        _openKeyDown = true;
         _open = true;
         IsTyping = true;
         _dirty = true;
@@ -479,8 +529,8 @@ internal sealed class ChatOverlay
 
     /// <summary>
     /// Hides the box and gives focus back to the game. Safe to call when already closed. Enter
-    /// and Escape clear the text; a click elsewhere or a switch to the controller keeps it as
-    /// a draft.
+    /// and Escape clear the text; a click elsewhere, a switch to the controller or the Steam
+    /// overlay coming up keeps it as a draft.
     /// </summary>
     private void Close(bool keepDraft = false)
     {
@@ -507,6 +557,9 @@ internal sealed class ChatOverlay
             try { _hub.PostFromHuman(_humanName, said); }
             catch (Exception ex) { _logError?.Invoke($"chat: posting failed: {ex.Message}"); }
         }
+        // Enter must end here whatever the LineEdit does with it after this handler: once the
+        // box is closed, the same press would reach the game as its select hotkey.
+        _input.AcceptEvent();
         // Like most game chats, sending closes the box; the hotkey opens it again.
         Close();
     }
@@ -514,11 +567,22 @@ internal sealed class ChatOverlay
     /// <summary>
     /// Keys the LineEdit doesn't use itself. Accepted here, before the LineEdit and the game see
     /// them: Escape would reach the pause menu, and Up, Down and Tab would move focus to the
-    /// game's controls.
+    /// game's controls. Also where typed keys are noted: the LineEdit uses them up.
     /// </summary>
     private void OnInputGui(InputEvent e)
     {
+        NoteKey(e);
         if (e is not InputEventKey { Pressed: true } key) return;
+        if (_openKeyDown && key.Keycode == Hotkey)
+        {
+            // Still held from opening the box: its key repeat isn't typed.
+            if (key.Echo)
+            {
+                _input.AcceptEvent();
+                return;
+            }
+            _openKeyDown = false;
+        }
         switch (key.Keycode)
         {
             case Key.Escape:
@@ -696,7 +760,7 @@ internal sealed class ChatOverlay
     }
 
     /// <summary>
-    /// T, or the Godot Key named by SPIREMIND_CHAT_KEY ("Y", "Quoteleft"), any case. Enter and
+    /// T, or the Godot Key named by SPIREMIND_CHAT_KEY ("Y", "Slash"), any case. Enter and
     /// Escape fall back to T: they close the box, and the same key would open it again.
     /// </summary>
     private static Key ResolveHotkey()

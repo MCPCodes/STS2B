@@ -20,10 +20,6 @@ internal static class Identity
     /// <summary>Longer lines are monologues; the persona wants the feel of the voice, not speeches.</summary>
     private const int MaxVoiceLength = 160;
 
-    /// <summary>Highest dialogue and line numbers probed in the Ancient keys.</summary>
-    private const int MaxDialogue = 4;
-    private const int MaxLine = 7;
-
     /// <summary>The name the bot answers to, by Character.Id.Entry. Other ids use the title without "The ".</summary>
     private static readonly Dictionary<string, string> Names = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -54,6 +50,9 @@ internal static class Identity
 
     /// <summary>Voice lines by character id, read once each; empty when the tables had none.</summary>
     private static readonly Dictionary<string, List<string>> Voices = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The game language <see cref="Voices"/> was read in.</summary>
+    private static string? _voicesLanguage;
 
     private static DateTime _nextRead;
 
@@ -114,14 +113,14 @@ internal static class Identity
             var select = inRun ? null : CharacterSelect();
             if (!inRun && select is null) return (true, null);
 
-            // LocalPlayer is a struct copy, so it is read afresh every time. VERIFY:
-            // LobbyPlayer.character is the same model type as Player.Character.
+            // LocalPlayer is a struct copy, looked up afresh on every read; its character is
+            // null while the local player isn't in the lobby's list.
             var ch = inRun ? ctx.Me?.Character : select?.Lobby?.LocalPlayer.character;
             if (ch is null) return (!inRun, null);
 
             // Random is only decided when the run starts; until then any name may be the one.
+            if (ch is RandomCharacter) return (true, null);
             var id = ch.Id.Entry ?? "";
-            if (id.Contains("RANDOM", StringComparison.OrdinalIgnoreCase)) return (true, null);
 
             var title = Describe.SafeText(() => ch.Title);
             var name = Names.TryGetValue(id, out var mapped) ? mapped : WithoutThe(title);
@@ -131,7 +130,7 @@ internal static class Identity
                 Describe.SafeText(() => ch.PronounSubject),
                 Describe.SafeText(() => ch.PronounObject),
                 Describe.SafeText(() => ch.PossessiveAdjective));
-            return (true, new Seen(id.Length > 0 ? id : name.ToUpperInvariant(), name, title, pronouns, ColorOf(() => ch.NameColor)));
+            return (true, new Seen(id.Length > 0 ? id : name.ToUpperInvariant(), name, title, pronouns, ch.NameColor));
         }
         catch
         {
@@ -142,28 +141,12 @@ internal static class Identity
 
     /// <summary>
     /// The character select screen while it is up with a lobby, else null. The screen is
-    /// created before it is shown, so it counts only on top of the submenu stack.
+    /// created with the main menu, long before it is shown, and gets its lobby just before it
+    /// is pushed, so it counts only on top of the submenu stack. Peek is null on an empty
+    /// stack: the main menu itself.
     /// </summary>
-    private static NCharacterSelectScreen? CharacterSelect()
-    {
-        try
-        {
-            // VERIFY: SubmenuStack.Peek() returns the top submenu, and may throw when the stack is empty.
-            return NGame.Instance?.MainMenu?.SubmenuStack?.Peek() is NCharacterSelectScreen { Lobby: not null } screen ? screen : null;
-        }
-        catch
-        {
-            // Nothing on the stack: the main menu itself.
-            return null;
-        }
-    }
-
-    /// <summary>The character's NameColor. VERIFY: Character.NameColor is a Godot Color; anything else reads as none.</summary>
-    private static Color? ColorOf(Func<object?> nameColor)
-    {
-        try { return nameColor() is Color color ? color : null; }
-        catch { return null; }
-    }
+    private static NCharacterSelectScreen? CharacterSelect() =>
+        NGame.Instance?.MainMenu?.SubmenuStack?.Peek() is NCharacterSelectScreen { Lobby: not null } screen ? screen : null;
 
     private static string WithoutThe(string title) =>
         (title.StartsWith("The ", StringComparison.OrdinalIgnoreCase) ? title[4..] : title).Trim();
@@ -191,30 +174,36 @@ internal static class Identity
 
     /// <summary>
     /// Up to <see cref="MaxVoiceLines"/> of the character's own lines from the loc tables, read
-    /// once per character. Null while the tables aren't loaded (LocManager comes up after the
-    /// mods), so a later poll reads them.
+    /// once per character and language. Null while the tables aren't loaded (LocManager comes
+    /// up after the mods), so a later poll reads them.
     /// </summary>
     private static List<string>? VoiceLines(string id)
     {
-        if (Voices.TryGetValue(id, out var cached)) return cached;
         if (!LocReady()) return null;
+
+        // A language change swaps the loc tables. It only happens in the main menu's settings
+        // (the dropdown is off in a run), where there is no character, so the next persona
+        // comes through here and reads the new ones.
+        var language = LocManager.Instance.Language;
+        if (language != _voicesLanguage)
+        {
+            _voicesLanguage = language;
+            Voices.Clear();
+        }
+
+        if (Voices.TryGetValue(id, out var cached)) return cached;
         var lines = Pick(ReadVoice(id));
         Voices[id] = lines;
         ModEntry.Log($"chat: {lines.Count} voice lines for {id}");
         return lines;
     }
 
-    private static bool LocReady()
-    {
-        // VERIFY: LocManager (Localization namespace, beside LocString) has a static Instance.
-        try { return LocManager.Instance is not null; }
-        catch { return false; }
-    }
+    /// <summary>LocManager.Instance is null until the game sets it up, which is after the mods load.</summary>
+    private static bool LocReady() => LocManager.Instance is not null;
 
     /// <summary>
     /// The character's lines, one list per source so <see cref="Pick"/> can mix them: its own
-    /// keys in the characters table, then its lines to each Ancient, keyed
-    /// "ANCIENT.talk.ID.dialogue-line.char" with numbers that are probed.
+    /// keys in the characters table, then its lines to each Ancient in the ancients table.
     /// </summary>
     private static List<List<string>> ReadVoice(string id)
     {
@@ -227,27 +216,35 @@ internal static class Identity
         foreach (var ancient in Ancients)
         {
             var talk = new List<string>();
-            // Numbers may start at 0 or 1, and the Ancient's own lines may sit between the
-            // character's, so a range ends at its second miss in a row rather than its first.
-            for (int dialogue = 0, emptyRows = 0; dialogue <= MaxDialogue && emptyRows < 2; dialogue++)
-            {
-                var found = 0;
-                for (int line = 0, misses = 0; line <= MaxLine && misses < 2; line++)
-                {
-                    if (Raw("ancients", $"{ancient}.talk.{id}.{dialogue}-{line}.char") is not { } raw)
-                    {
-                        misses++;
-                        continue;
-                    }
-                    misses = 0;
-                    found++;
-                    AddUsable(talk, raw);
-                }
-                emptyRows = found > 0 ? 0 : emptyRows + 1;
-            }
+            foreach (var raw in TalkLines(ancient, id))
+                AddUsable(talk, raw);
             sources.Add(talk);
         }
         return sources;
+    }
+
+    /// <summary>
+    /// The character's lines to an Ancient as written, in key order. Its keys are
+    /// "ANCIENT.talk.ID.dialogue-line.char", with an "r" after the line number in dialogues
+    /// that repeat; the Ancient's replies end in ".ancient" and button labels in ".next". The
+    /// numbers have gaps wherever the Ancient speaks, so the keys are listed by prefix rather
+    /// than guessed, which also finds the ones only the English fallback table has.
+    /// </summary>
+    private static List<string> TalkLines(string ancient, string id)
+    {
+        try
+        {
+            return LocManager.Instance.GetTable("ancients")
+                .GetLocStringsWithPrefix($"{ancient}.talk.{id}.")
+                .Where(line => line.LocEntryKey.EndsWith(".char", StringComparison.Ordinal))
+                .OrderBy(line => line.LocEntryKey, StringComparer.Ordinal)
+                .Select(line => line.GetRawText())
+                .ToList();
+        }
+        catch
+        {
+            return [];
+        }
     }
 
     /// <summary>A loc table entry as written, or null when the key is missing.</summary>
@@ -255,15 +252,9 @@ internal static class Identity
     {
         try
         {
-            // Most probed keys don't exist, so check first, as the docs say, rather than let
-            // GetRawText complain dozens of times per character. VERIFY: LocString.Exists(string
-            // table, string key).
-            if (!LocString.Exists(table, key)) return null;
-            // VERIFY: LocManager.GetTable(string) and the table's GetRawText(string) returning the
-            // text as written. Should a missing key still get through, it may throw, or come back
-            // empty or as the key itself.
-            var raw = LocManager.Instance.GetTable(table).GetRawText(key);
-            return string.IsNullOrWhiteSpace(raw) || raw.Contains(key, StringComparison.Ordinal) ? null : raw;
+            // GetRawText throws on a missing key, so ask first: characters other than the five
+            // have none of the voice keys.
+            return LocString.Exists(table, key) ? LocManager.Instance.GetTable(table).GetRawText(key) : null;
         }
         catch
         {

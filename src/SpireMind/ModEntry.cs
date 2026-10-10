@@ -106,11 +106,12 @@ public static class ModEntry
             var hooks = new ChatGameHooks
             {
                 Parent = () => NGame.Instance,
-                // VERIFY: AddChildSafely is the game's Node extension (docs/chat-and-persona.md) and its namespace is in the global usings.
                 AddChild = (parent, child) => parent.AddChildSafely(child),
                 Style = () => ChatTheme.Load(LogError),
                 BotColor = () => Identity.NameColor,
                 UsingController = () => NControllerManager.Instance?.IsUsingController == true,
+                KeyboardBusy = () => PlatformUtil.IsPlatformOverlayOpen() || NDevConsole.Instance.Visible,
+                GameUsesKey = GameUsesKey,
                 ShowBubble = SpeechBubbles.Say,
             };
             var overlay = new ChatOverlay(chat, () => chat.BotName, human, hooks, LogError) { KeysFromPatch = keysFromPatch };
@@ -125,6 +126,19 @@ public static class ModEntry
             return null;
         }
     }
+
+    /// <summary>
+    /// True when the game reads this key itself, so the chat must not take it: one of its
+    /// hotkeys is bound to it (the player can rebind them; T is free by default), or it is a
+    /// key the game reads raw before anything else: F2 for the feedback screen, the keys that
+    /// toggle its console and, in co-op, V for the emote wheel, which would send an emote
+    /// every time the box opened.
+    /// </summary>
+    private static bool GameUsesKey(Key key) =>
+        key is Key.F2 or Key.Quoteleft or Key.Apostrophe or Key.Asterisk or Key.Asciicircum
+        || (key == Key.V && NGame.Instance?.ReactionContainer.InMultiplayer == true)
+        || (NInputManager.Instance is { } input
+            && NInputManager.remappableKeyboardInputs.Any(name => input.GetShortcutKey(name) == key));
 
     /// <summary>
     /// Per-frame chat work on the main thread: keep the bot's name and persona current, run the
