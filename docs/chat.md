@@ -14,6 +14,7 @@ Mark talks to the bot from inside the game, and the bot answers as the character
   - `/resume` hands control back.
   - `/start`, `/stop`, `/budget`, `/model [name]` and `/effort [level]` drive the in-game brain (`docs/brain.md`): who plays, on which credit, with which model.
   - `/help` lists every command in the log, with its arguments.
+- In co-op, Mark talks to every bot copy from his own window: his lines and the brain commands reach them, and their lines come back into his log and as bubbles over their players (Co-op, below). `/bots`, `/bot add [character]` and `/party [on|off]` are added there.
 
 ## Flow
 
@@ -53,6 +54,7 @@ Game-agnostic and unit tested. All members are safe to call from any thread.
 - `bool Paused`, `string? PausedBy`.
 - `IReadOnlyList<ChatLine> LinesSince(long seq)`: the log after a sequence number (capped at the last 200 lines). Each `ChatLine` has `Seq`, `Kind` (Human, Bot, System), `From`, `Text`, `At`.
 - `event Action<ChatLine>? LineAdded`: raised after the lock is released, on whatever thread caused it.
+- For co-op (all additive): `ChatLine.Remote` marks a line that came from another copy through the relay, and the overlay draws no local bubble for it. `ChatMessage.Teammate` marks another bot's line relayed in. `PostResult.Seq` is the line a post logged. `PostFromTeammate(from, text)` logs another bot's line as a Remote bot line and queues it as a teammate message (never a command, no burst limit, no speech hold); teammate messages don't count for `HasUnread`, so they never end a wait early, and at most 20 wait. `AddRemoteSay(from, text)` shows a bot copy's line in the human's log without queuing it. `AnnounceFrom(who, text)` shows a bot copy's system line labelled "Silent: ...". `CommandFilter` sees every command before it runs here (null runs it here, "" ends it with no line, other text is the reply). `HelpNote` is a sentence added to the end of `/help`. `RemoveCommand(name, handler?)` takes an added command back off.
 - Addressing: a message is addressed to a name when it starts with that name (or "The name"), optionally after "hey", "hi", "ok" or "@", followed by a comma, colon, space, "!" or "?" or the end. Case-insensitive.
 
 ### Tool results
@@ -83,8 +85,9 @@ Thinking, for the thought cloud: when `get_state` or `wait_for_decision` hands b
 
 ### HTTP
 
-- `POST /chat` `{"from": "Mark", "text": "..."}` posts as the overlay does (curl testing now; the co-op relay later). It answers `{"outcome": "queued" | "command" | "not_for_me" | "empty", "reply": ...}`, with 400 for empty text. A body that isn't JSON gets 400 `{"error": "body must be a JSON object: ..."}`, here and on `/act`.
-- `GET /chat?since=<seq>` returns `{"bot": "Ironclad", "paused": false, "lines": [...]}`.
+- `POST /chat` `{"from": "Mark", "text": "...", "teammate": false}` posts as the overlay does (curl testing, and the co-op relay). With `"teammate": true` it is another bot's line relayed in (`PostFromTeammate`). It answers `{"outcome": "queued" | "command" | "not_for_me" | "empty", "reply": ..., "seq": ...}`, with 400 for empty text; `seq` is the line it logged, or null. A body that isn't JSON gets 400 `{"error": "body must be a JSON object: ..."}`, here and on `/act`.
+- `GET /chat?since=<seq>` returns `{"bot": "Ironclad", "paused": false, "lines": [...]}` plus who this copy is: `role` ("bot" or "human"), `port`, `instance` ("bot-17773" or "main"), `session` (new every launch), `net_id` (null until known), `character`, `playing` ("api", "subscription", "none" or null) and `last_seq`. Each line has `seq`, `kind` (human, bot, system), `from`, `text`, `at` and `remote`.
+- `GET /coop/info` returns the same identity fields with `name`, `version` and `paused`, for the relay's discovery.
 - `GET /state` and `POST /act` carry the same `chat` key as the tools, but peek: the messages stay unread, so a curl doesn't take them from the model, and their results don't mark the bot as thinking.
 
 ### Overlay (src/SpireMind/Game/ChatOverlay.cs)
@@ -125,6 +128,38 @@ Thinking, for the thought cloud: when `get_state` or `wait_for_decision` hands b
 - `pronouns` comes from `PronounSubject`, `PronounObject` and `PossessiveAdjective`, leaving out what can't be read. `tone` is our paraphrase per character (the list in `docs/chat-and-persona.md`).
 - `voice_lines`: up to 15 short lines in the character's own voice, read once per character after `LocManager.Instance` is up. From the `characters` table, `<ID>.goldMonologue`, `aromaPrinciple`, `eventDeathPrevention`, `banter.alive.endTurnPing` and `banter.dead.endTurnPing`; from the `ancients` table, the character's lines to each Ancient, `<ANCIENT>.talk.<ID>.<i>-<j>[r].char` (an `r` marks a repeating dialogue, and the numbers have gaps wherever the Ancient speaks, so the keys are listed rather than probed), with the numbers probed. Each key is checked with `LocString.Exists` before it is read. Lines that are missing, empty, echo their key or hold a placeholder are dropped, the rest are cleaned to plain text, and the pick takes one source at a time, shortest first, skipping lines over 160 characters and repeats. Never epoch lore: it would spoil the timeline.
 
-## Co-op later
+## Co-op
 
-Each game instance runs its own SpireMind server. The overlay only matters in the human's instance; the bot's instance has the MCP server Claude Code talks to. The human's instance will relay its chat to the bot instances over `POST /chat` (ports from a small config file) and poll their `GET /chat` for replies, so each bot still sees only the messages addressed to it or to everyone. At character select each bot answers to its own pick, but on the other menus no bot has a name, so each would take every message. Showing a bot's line as a bubble on the human's screen needs the bot's player rather than the local one (see `docs/chat-and-persona.md`).
+Each copy of the game runs its own SpireMind bridge. Mark plays in his own copy (the human copy, port 17772); each bot is a second copy on the same Mac, started with `--sts2bot=1` and its own port (17773 to 17775, up to three bots). Only bot copies play in a co-op run; the human copy's brain stays off while bots exist (`docs/brain.md`, Co-op). Nothing goes over the game's network, so the mod stays `affects_gameplay: false`.
+
+### The relay (src/SpireMind.Core/Coop/CoopRelay.cs)
+
+The human copy runs a `CoopRelay` (`Game/CoopWiring.cs` starts it after the bridge; a bot copy never relays). It works on its own pool tasks and only ever calls `http://127.0.0.1:<port>`, with no proxy.
+
+- **Finding bots.** The ports come from `SPIREMIND_BOT_PORTS` (such as `17773,17774`), else 17773 to 17775, plus the ports of the copies the game side started (`ICoopBots.Known`), minus its own. Unlinked ports get `GET /coop/info` every 5 s (0.5 s timeout). Only a copy that answers `role: "bot"` is linked, at most three. The first link in the relay's life starts reading after the bot's `last_seq`, so old lines aren't replayed, and says "Silent joined the chat (port 17773)."
+- **One worker per bot.** Each bot's HTTP calls run in order on one task: Mark's lines, commands and party lines, and a `GET /chat?since=` poll every second when nothing else waits. A poll never runs during a POST, so a command reply is never shown twice.
+- **Mark's lines.** Every line Mark types (not a command) is shown in his log as usual and posted to every bot as `{"from": "Mark", "text": ...}`. Each bot decides by name whether it is for it, as in What the player sees.
+- **Bots' lines.** A polled bot line becomes a Remote bot line in Mark's log (`AddRemoteSay`, in the bot's colour by name) and a speech bubble over that bot's player on Mark's screen through `ICoopBots.ShowLine(netId, text)`. A bot's system lines (stops, the switch to the subscription, budget warnings) show labelled: "Silent: Silent paused.". Lines the bot logged from Mark, and Remote lines, are skipped.
+- **Commands.** `/start`, `/stop`, `/pause`, `/resume`, `/budget`, `/model` and `/effort` go to every live bot while bots exist, and each bot's answer shows labelled with its character's name. A bot's name first sends to that bot only: `/model Silent sonnet`, `/help Silent`. A name no bot plays gets "No bot is playing Defect right now. /bots lists them.". Plain `/help` runs here and ends with a note on how commands reach the bots. With no bots every command runs here, exactly as in solo play. The filter only queues work and returns at once.
+- **New commands** in the human copy: `/bots` lists the bots ("Bots: Silent on 17773 (NetId 1000, playing on API credit)."), `/bot add [Ironclad|Silent|Defect|Regent|Necrobinder|Random]` starts a bot copy through `ICoopBots.StartCopyAsync` and announces the game side's line when it is done, and `/party [on|off]` shows or sets whether bots hear each other.
+- **Party chat.** Each line a bot speaks is also posted to the other bots with `"teammate": true`, so they can plan builds together. It can't loop: only a bot's own spoken lines (`kind: "bot"`, not Remote) are forwarded, a relayed line is Remote in the receiving bot's log and never forwarded again, and each line is forwarded once. It can't run up cost: a teammate message never wakes a brain (`HasUnread` ignores it, and the API brain's wake check skips `teammate: true`), so it only rides along on a tool result the bot was getting anyway. At most 10 lines a minute per bot are forwarded, and at most 20 wait in a bot.
+- **Restarts and closed copies.** Three failed polls in a row: "Silent's copy stopped answering." once, and the port goes back to probing. A copy that answers again with the same `session` resumes where it was ("Silent's copy is answering again."). A new `session`, or a `last_seq` below what was read, means it restarted: "Silent's copy restarted." and reading starts again from line 0.
+
+`ICoopBots` (`src/SpireMind.Core/Coop/ICoopBots.cs`) mirrors the game side's static class `SpireMind.Game.Coop.CoopBots` (written on the Mac, under `src/SpireMind/Game/Coop/`), so Core stays game-free. `Game/CoopBotsAdapter.cs` is the only file that names that class: it marshals `StartCopyAsync` and `ShowLine` to the main thread without waiting, and refreshes `Known` once a second on the frame tick. Until the Mac's Coop files land, the build leaves `SPIREMIND_COOP_BOTS` undefined and the adapter's stand-in compiles instead: the relay probes ports, `/bot add` answers "This build can't start bot copies; start one with scripts/coop-bot.sh.", and no bubbles are drawn over bot players.
+
+A bot copy reports who it is on `/coop/info` and `/chat`: `role: "bot"`, its NetId (`Game/InstancePoll.cs` reads it once a second: the lobby's net service at character select, `LocalContext.NetId` in a run), its character (`ChatHub.BotName`) and which brain plays. The relay labels lines with the character and finds the right player by NetId.
+
+### Launcher contract
+
+Whatever starts a bot copy (`scripts/coop-bot.sh`, or `CoopBots.StartCopyAsync` from `/bot add`) must start a second copy of the game with the flags `--force-steam off --clientId <1000, 1001 or 1002> --fastmp join --sts2bot=1` and the environment variable `SPIREMIND_PORT=<17773, 17774 or 17775>`, one pair per bot. `SPIREMIND_CONFIG_DIR` is optional: unset, a bot copy keeps its own files in `~/.config/spiremind/bot-<port>/` (config.json, transcripts, autostart). The launcher writes nothing else: the API key, the shared config.json, spend.json and the locks stay in `~/.config/spiremind/`, which every copy reads, and the bot's run journal goes in `runs/bot-<port>/current.md` under the notes root. A port outside `SPIREMIND_BOT_PORTS` (or 17773 to 17775 when that is unset) is only found if the game side lists it in `CoopBots.Known`.
+
+### Trying it without the game
+
+The dev host runs fake copies on localhost:
+
+```bash
+scripts/dev-host.sh 17773 --bot --character Silent --echo   # a fake bot copy that answers "Heard you, Mark."
+scripts/dev-host.sh --relay --bot-ports 17773                # a fake human copy: type hello, /pause, /bots, /bot add Regent
+```
+
+The relay prints relayed lines as `chat Silent (relayed): ...` and bubbles as `bubble over 1000: ...`.

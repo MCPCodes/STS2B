@@ -16,6 +16,11 @@ public enum ApiKeySource { None, File, Environment }
 /// <c>~/.config/spiremind</c>), every key optional, plus the API key from <c>api_key</c> in the
 /// same folder or the ANTHROPIC_API_KEY environment variable. See docs/brain.md.
 ///
+/// A bot copy in co-op is an instance (<see cref="IsInstance"/>): it has a folder of its own
+/// for config.json and transcripts, layered over the shared folder's config.json, and falls back
+/// to the shared folder's api_key. The monthly budget comes from the shared folder only, so one
+/// cap holds for every copy.
+///
 /// Immutable, so the brain task and the chat commands can share one instance without locks:
 /// a command makes a changed copy (<c>settings with { Model = "sonnet" }</c>), saves it and
 /// swaps it in. The key is never written anywhere by the mod and never appears in
@@ -57,9 +62,24 @@ public sealed record BrainSettings
     private readonly string _effort = DefaultEffort;
     private readonly decimal _budget = DefaultMonthlyBudgetUsd;
     private readonly int? _maxTokens;
+    private readonly string? _sharedConfigDir;
 
     /// <summary>The folder holding config.json, api_key, spend.json and transcripts.</summary>
     public string ConfigDir { get; init; } = DefaultConfigDir;
+
+    /// <summary>The folder every copy of the game shares (<c>~/.config/spiremind</c>): its
+    /// config.json and api_key sit under this copy's, and it holds spend.json and the notes when
+    /// there is no repo. Unless set, it is <see cref="ConfigDir"/>, which makes this copy not an
+    /// instance and everything works as with one folder.</summary>
+    public string SharedConfigDir
+    {
+        get => _sharedConfigDir ?? ConfigDir;
+        init => _sharedConfigDir = value;
+    }
+
+    /// <summary>True for a copy with a config folder of its own (a bot copy in co-op):
+    /// <see cref="ConfigDir"/> and <see cref="SharedConfigDir"/> are different folders.</summary>
+    public bool IsInstance => !SamePath(ConfigDir, SharedConfigDir);
 
     /// <summary>The STS2B checkout the brain reads its prompt and strategy notes from and keeps
     /// its run journal in. Null when not configured; the game side then uses its fallbacks.</summary>
@@ -114,6 +134,10 @@ public sealed record BrainSettings
 
     public ApiKeySource ApiKeySource { get; init; }
 
+    /// <summary>The api_key file the key came from (this copy's or the shared one), or null when
+    /// it came from the environment or there is none. Never the key itself.</summary>
+    public string? ApiKeyFile { get; init; }
+
     public bool HasApiKey => !string.IsNullOrEmpty(ApiKey);
 
     /// <summary>Problems found while loading (a bad value, an unknown key, an unreadable file),
@@ -124,24 +148,68 @@ public sealed record BrainSettings
 
     public string ApiKeyPath => Path.Combine(ConfigDir, ApiKeyFileName);
 
+    /// <summary>The shared folder's config.json (the same file as <see cref="ConfigPath"/> when not an instance).</summary>
+    public string SharedConfigPath => Path.Combine(SharedConfigDir, ConfigFileName);
+
+    /// <summary>The shared folder's api_key (the same file as <see cref="ApiKeyPath"/> when not an instance).</summary>
+    public string SharedApiKeyPath => Path.Combine(SharedConfigDir, ApiKeyFileName);
+
     /// <summary>
     /// Reads config.json and the API key from <paramref name="configDir"/> (default
     /// <see cref="DefaultConfigDir"/>). Never throws for a missing, unreadable or invalid file:
     /// bad values fall back to their defaults and are reported in <see cref="Warnings"/>.
+    ///
+    /// With a different <paramref name="sharedConfigDir"/> the settings are an instance's: the
+    /// shared config.json is read first and this copy's over it, except monthly_budget_usd,
+    /// which only the shared file sets (one cap for every copy; this copy's is ignored with a
+    /// warning). The key comes from this copy's api_key, else the shared api_key, else
+    /// ANTHROPIC_API_KEY.
     /// </summary>
     /// <param name="getEnv">Environment lookup for tests; defaults to <see cref="Environment.GetEnvironmentVariable(string)"/>.</param>
-    public static BrainSettings Load(string? configDir = null, Func<string, string?>? getEnv = null)
+    /// <param name="sharedConfigDir">The folder every copy shares; null for <paramref name="configDir"/>, which is not an instance.</param>
+    public static BrainSettings Load(string? configDir = null, Func<string, string?>? getEnv = null, string? sharedConfigDir = null)
     {
         var dir = string.IsNullOrWhiteSpace(configDir) ? DefaultConfigDir : configDir;
         getEnv ??= Environment.GetEnvironmentVariable;
         var warnings = new List<string>();
         var settings = new BrainSettings { ConfigDir = dir };
+        if (!string.IsNullOrWhiteSpace(sharedConfigDir))
+            settings = settings with { SharedConfigDir = sharedConfigDir };
 
-        if (ReadConfig(settings.ConfigPath, warnings) is { } json)
-            settings = Apply(settings, json, warnings);
+        if (!settings.IsInstance)
+        {
+            if (ReadConfig(settings.ConfigPath, ConfigFileName, warnings) is { } json)
+                settings = Apply(settings, json, ConfigFileName, warnings);
 
-        var (key, source) = ReadApiKey(settings.ApiKeyPath, getEnv, warnings);
-        return settings with { ApiKey = key, ApiKeySource = source, Warnings = warnings };
+            var (key, source) = ReadApiKey(settings.ApiKeyPath, getEnv, warnings);
+            return settings with
+            {
+                ApiKey = key,
+                ApiKeySource = source,
+                ApiKeyFile = source == ApiKeySource.File ? settings.ApiKeyPath : null,
+                Warnings = warnings,
+            };
+        }
+
+        // An instance: the shared file, then this copy's over it. Warnings name the file, since
+        // there are two.
+        if (ReadConfig(settings.SharedConfigPath, settings.SharedConfigPath, warnings) is { } shared)
+            settings = Apply(settings, shared, settings.SharedConfigPath, warnings);
+        if (ReadConfig(settings.ConfigPath, settings.ConfigPath, warnings) is { } own)
+        {
+            if (own.Remove("monthly_budget_usd"))
+                warnings.Add($"monthly_budget_usd is shared by every copy; set it in {settings.SharedConfigPath}.");
+            settings = Apply(settings, own, settings.ConfigPath, warnings);
+        }
+
+        string? keyFile = null;
+        var found = ReadKeyFile(settings.ApiKeyPath, settings.ApiKeyPath, warnings);
+        if (found is not null)
+            keyFile = settings.ApiKeyPath;
+        else if ((found = ReadKeyFile(settings.SharedApiKeyPath, settings.SharedApiKeyPath, warnings)) is not null)
+            keyFile = settings.SharedApiKeyPath;
+        var (apiKey, apiKeySource) = found is not null ? (found, ApiKeySource.File) : ReadEnvKey(getEnv, warnings);
+        return settings with { ApiKey = apiKey, ApiKeySource = apiKeySource, ApiKeyFile = keyFile, Warnings = warnings };
     }
 
     /// <summary>
@@ -149,23 +217,22 @@ public sealed record BrainSettings
     /// claude_path are removed when null. A config.json that can't be parsed is first moved aside to
     /// config.json.bak so a hand edit with a typo isn't lost. Throws <see cref="IOException"/>
     /// or <see cref="UnauthorizedAccessException"/> when the file can't be written.
+    ///
+    /// An instance writes only model, effort and autostart (all the chat commands change) into
+    /// its own config.json, keeping every other key there, and never writes the shared file.
     /// </summary>
     public void Save()
     {
         var path = ConfigPath;
-        var json = new JsonObject();
-        if (File.Exists(path))
+        var json = ReadForSave(path);
+
+        if (IsInstance)
         {
-            try
-            {
-                json = JsonNode.Parse(File.ReadAllText(path), documentOptions: ConfigFiles.ReadOptions) as JsonObject
-                       ?? throw new JsonException("not an object");
-            }
-            catch (JsonException)
-            {
-                ConfigFiles.MoveAside(path);
-                json = new JsonObject();
-            }
+            json["model"] = Model;
+            json["effort"] = Effort;
+            json["autostart"] = Autostart;
+            ConfigFiles.WriteJson(path, json);
+            return;
         }
 
         SetOrRemove(json, "repo", Repo);
@@ -177,6 +244,24 @@ public sealed record BrainSettings
         json["autostart"] = Autostart;
         SetOrRemove(json, "claude_path", ClaudePath);
         ConfigFiles.WriteJson(path, json);
+    }
+
+    // The config.json Save starts from: the file's object, or an empty one when there is none.
+    // One that can't be parsed is moved aside first.
+    private static JsonObject ReadForSave(string path)
+    {
+        if (!File.Exists(path))
+            return new JsonObject();
+        try
+        {
+            return JsonNode.Parse(File.ReadAllText(path), documentOptions: ConfigFiles.ReadOptions) as JsonObject
+                   ?? throw new JsonException("not an object");
+        }
+        catch (JsonException)
+        {
+            ConfigFiles.MoveAside(path);
+            return new JsonObject();
+        }
     }
 
     /// <summary>
@@ -214,18 +299,24 @@ public sealed record BrainSettings
     {
         var key = ApiKeySource switch
         {
+            ApiKeySource.File when IsInstance && ApiKeyFile is { } file && SamePath(file, SharedApiKeyPath) => "from the shared " + ApiKeyFileName,
             ApiKeySource.File => "from " + ApiKeyFileName,
             ApiKeySource.Environment => "from " + ApiKeyEnvVar,
             _ => HasApiKey ? "set" : "none",
         };
         var sb = new StringBuilder("BrainSettings { ");
-        sb.Append(CultureInfo.InvariantCulture, $"ConfigDir = {ConfigDir}, Model = {Model}, Effort = {Effort}, ");
+        sb.Append(CultureInfo.InvariantCulture, $"ConfigDir = {ConfigDir}, ");
+        if (IsInstance)
+            sb.Append(CultureInfo.InvariantCulture, $"SharedConfigDir = {SharedConfigDir}, ");
+        sb.Append(CultureInfo.InvariantCulture, $"Model = {Model}, Effort = {Effort}, ");
         sb.Append(CultureInfo.InvariantCulture, $"MonthlyBudgetUsd = {MonthlyBudgetUsd}, MaxTokens = {MaxTokens?.ToString(CultureInfo.InvariantCulture) ?? "by effort"}, Autostart = {Autostart}, ");
         sb.Append(CultureInfo.InvariantCulture, $"Repo = {Repo ?? "(none)"}, ClaudePath = {ClaudePath ?? "(none)"}, ApiKey = {key} }}");
         return sb.ToString();
     }
 
-    private static JsonObject? ReadConfig(string path, List<string> warnings)
+    // label names the file in warnings: "config.json" for a single folder, the full path for an
+    // instance's two files.
+    private static JsonObject? ReadConfig(string path, string label, List<string> warnings)
     {
         try
         {
@@ -233,20 +324,20 @@ public sealed record BrainSettings
                 return null;
             if (JsonNode.Parse(File.ReadAllText(path), documentOptions: ConfigFiles.ReadOptions) is JsonObject json)
                 return json;
-            warnings.Add($"{ConfigFileName} isn't a JSON object; using the defaults.");
+            warnings.Add($"{label} isn't a JSON object; using the defaults.");
         }
         catch (JsonException ex)
         {
-            warnings.Add($"{ConfigFileName} isn't valid JSON ({ex.Message}); using the defaults.");
+            warnings.Add($"{label} isn't valid JSON ({ex.Message}); using the defaults.");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            warnings.Add($"Couldn't read {ConfigFileName} ({ex.GetType().Name}); using the defaults.");
+            warnings.Add($"Couldn't read {label} ({ex.GetType().Name}); using the defaults.");
         }
         return null;
     }
 
-    private static BrainSettings Apply(BrainSettings s, JsonObject json, List<string> warnings)
+    private static BrainSettings Apply(BrainSettings s, JsonObject json, string label, List<string> warnings)
     {
         foreach (var (name, node) in json)
         {
@@ -301,7 +392,7 @@ public sealed record BrainSettings
                     break;
 
                 default:
-                    warnings.Add($"Unknown key '{name}' in {ConfigFileName}; ignored.");
+                    warnings.Add($"Unknown key '{name}' in {label}; ignored.");
                     break;
             }
         }
@@ -319,7 +410,12 @@ public sealed record BrainSettings
         return null;
     }
 
-    private static (string? Key, ApiKeySource Source) ReadApiKey(string path, Func<string, string?> getEnv, List<string> warnings)
+    private static (string? Key, ApiKeySource Source) ReadApiKey(string path, Func<string, string?> getEnv, List<string> warnings) =>
+        ReadKeyFile(path, ApiKeyFileName, warnings) is { } key ? (key, ApiKeySource.File) : ReadEnvKey(getEnv, warnings);
+
+    // The key in an api_key file, or null when the file is missing, empty, unusable or
+    // unreadable. label names the file in warnings, which never hold the key.
+    private static string? ReadKeyFile(string path, string label, List<string> warnings)
     {
         try
         {
@@ -327,22 +423,26 @@ public sealed record BrainSettings
             {
                 var key = File.ReadAllText(path).Trim().Split('\n')[0].Trim();
                 if (key.Length == 0)
-                    warnings.Add($"{ApiKeyFileName} is empty.");
+                    warnings.Add($"{label} is empty.");
                 else if (!LooksLikeKey(key))
-                    warnings.Add($"{ApiKeyFileName} doesn't hold a usable key (it has spaces, quotes or other characters a key doesn't have); ignored.");
+                    warnings.Add($"{label} doesn't hold a usable key (it has spaces, quotes or other characters a key doesn't have); ignored.");
                 else
                 {
                     if (!OperatingSystem.IsWindows() && (File.GetUnixFileMode(path) & (UnixFileMode.GroupRead | UnixFileMode.OtherRead)) != 0)
-                        warnings.Add($"{ApiKeyFileName} can be read by other users; run chmod 600 on it.");
-                    return (key, ApiKeySource.File);
+                        warnings.Add($"{label} can be read by other users; run chmod 600 on it.");
+                    return key;
                 }
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            warnings.Add($"Couldn't read {ApiKeyFileName} ({ex.GetType().Name}).");
+            warnings.Add($"Couldn't read {label} ({ex.GetType().Name}).");
         }
+        return null;
+    }
 
+    private static (string? Key, ApiKeySource Source) ReadEnvKey(Func<string, string?> getEnv, List<string> warnings)
+    {
         var env = getEnv(ApiKeyEnvVar)?.Trim();
         if (string.IsNullOrEmpty(env))
             return (null, ApiKeySource.None);
@@ -363,5 +463,19 @@ public sealed record BrainSettings
     {
         if (value is null) json.Remove(name);
         else json[name] = value;
+    }
+
+    // Two folders are the same when their full paths are, ignoring a trailing separator.
+    private static bool SamePath(string a, string b)
+    {
+        try
+        {
+            return string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(a)),
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(b)), StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return string.Equals(a, b, StringComparison.Ordinal);
+        }
     }
 }

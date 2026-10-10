@@ -10,3 +10,5 @@ scripts/local.env
 # Decompiled game code is copyrighted. Keep it outside the repo.
 sts2-decompiled/
 runs/*.log
+# Co-op bot copies' run journals (runs/bot-<port>/), written while playing.
+runs/bot-*/

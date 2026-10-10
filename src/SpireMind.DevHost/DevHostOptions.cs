@@ -1,5 +1,6 @@
 using System.Globalization;
 using SpireMind.Core.Brain;
+using SpireMind.Core.Coop;
 
 namespace SpireMind.DevHost;
 
@@ -7,10 +8,12 @@ namespace SpireMind.DevHost;
 public sealed class UsageException(string message) : Exception(message);
 
 /// <summary>
-/// The dev host's command line. Without <c>--brain</c> it serves the fake fight on the bridge
-/// for Claude Code's /play, on the port given as the first argument (default 17772). With
-/// <c>--brain</c> the API brain plays the fake fight with the real key and no game, as a smoke
-/// test before the first in-game /start (see <see cref="BrainSmoke"/> and docs/brain.md).
+/// The dev host's command line. With no mode it serves the fake fight on the bridge for Claude
+/// Code's /play, on the port given as the first argument (default 17772). With <c>--brain</c>
+/// the API brain plays the fake fight with the real key and no game, as a smoke test before the
+/// first in-game /start (see <see cref="BrainSmoke"/> and docs/brain.md). <c>--bot</c> and
+/// <c>--relay</c> try co-op chat on localhost without the game: a fake bot copy, and a fake
+/// human copy that relays its chat to the bot copies as Mark's game does (see <see cref="DevCoop"/>).
 /// </summary>
 public sealed record DevHostOptions
 {
@@ -21,6 +24,18 @@ public sealed record DevHostOptions
     /// <summary>The most requests one smoke test may make, so a typo can't run up a bill.</summary>
     public const int MostRequests = 50;
 
+    /// <summary>The character a fake bot copy plays unless --character says otherwise.</summary>
+    public const string DefaultCharacter = "Ironclad";
+
+    /// <summary>The first bot copy's port; its NetId is 1000 unless --net-id says otherwise, the
+    /// next port's 1001, and so on.</summary>
+    public const int FirstBotPort = 17773;
+
+    public const ulong FirstBotNetId = 1000;
+
+    /// <summary>What --character takes, in any case, with or without "The".</summary>
+    public static IReadOnlyList<string> Characters { get; } = ["Ironclad", "Silent", "Defect", "Regent", "Necrobinder"];
+
     public const string Usage =
         "Usage:\n" +
         "  scripts/dev-host.sh [port]\n" +
@@ -28,7 +43,18 @@ public sealed record DevHostOptions
         "  scripts/dev-host.sh --brain [--model <name>] [--max-requests <n>]\n" +
         "      Let the API brain play the fake fight with your API key, no game needed: a smoke test of the\n" +
         "      real API calls. --model takes opus, sonnet, haiku, fable or a full model id (default haiku,\n" +
-        "      for this run only). --max-requests caps the API calls (default 6, at most 50).";
+        "      for this run only). --max-requests caps the API calls (default 6, at most 50).\n" +
+        "  scripts/dev-host.sh <port> --bot [--character <name>] [--net-id <n>] [--echo]\n" +
+        "      A fake bot copy for trying co-op chat without the game; give it a bot port (17773 to 17775).\n" +
+        "      It reports itself as a bot copy playing the character (Ironclad, Silent, Defect, Regent or\n" +
+        "      Necrobinder; default Ironclad) with the NetId (default 1000 on 17773, 1001 on 17774 and so on),\n" +
+        "      and answers /start, /stop, /budget, /model and /effort with a stub line. With --echo it answers\n" +
+        "      each message for it with \"Heard you, <name>.\"\n" +
+        "  scripts/dev-host.sh [port] --relay [--bot-ports <list>]\n" +
+        "      A fake human copy that relays its chat to the bot copies on localhost, as Mark's game does: type\n" +
+        "      lines and commands (hello, /pause, /model Silent sonnet, /bots, /bot add Regent) and see what the\n" +
+        "      bots answer. --bot-ports lists the ports to look on, such as 17773,17774 (default\n" +
+        "      SPIREMIND_BOT_PORTS, else 17773, 17774 and 17775).";
 
     public int Port { get; init; } = DefaultPort;
 
@@ -43,11 +69,39 @@ public sealed record DevHostOptions
     /// <summary>--help or -h: print <see cref="Usage"/> and exit.</summary>
     public bool Help { get; init; }
 
+    /// <summary>Run a fake bot copy for co-op chat instead of serving the fake fight.</summary>
+    public bool Bot { get; init; }
+
+    /// <summary>Run a fake human copy that relays its chat to the bot copies.</summary>
+    public bool Relay { get; init; }
+
+    /// <summary>The character the fake bot copy plays, from --character.</summary>
+    public string Character { get; init; } = DefaultCharacter;
+
+    /// <summary>The NetId the fake bot copy reports, from --net-id; null for <see cref="DefaultNetId"/>.</summary>
+    public ulong? NetId { get; init; }
+
+    /// <summary>The fake bot copy answers each message for it (--echo).</summary>
+    public bool Echo { get; init; }
+
+    /// <summary>The ports the fake human copy looks for bot copies on, from --bot-ports; null
+    /// for SPIREMIND_BOT_PORTS or the defaults.</summary>
+    public IReadOnlyList<int>? BotPorts { get; init; }
+
+    /// <summary>The NetId the fake bot copy reports: --net-id, else <see cref="DefaultNetId"/> for its port.</summary>
+    public ulong BotNetId => NetId ?? DefaultNetId(Port);
+
+    /// <summary>1000 on 17773, 1001 on 17774 and so on, as the bot copies' clientIds go; at
+    /// least 2, since 1 is the host's.</summary>
+    public static ulong DefaultNetId(int port) => (ulong)Math.Max(2L, (long)FirstBotNetId + port - FirstBotPort);
+
     /// <summary>
-    /// Reads the arguments: an optional port first, then <c>--brain</c>, <c>--model &lt;name&gt;</c>,
-    /// <c>--max-requests &lt;n&gt;</c> and <c>--help</c> in any order. Throws
-    /// <see cref="UsageException"/> for anything else, a missing or bad value, or a brain option
-    /// without <c>--brain</c>.
+    /// Reads the arguments: an optional port first, then in any order at most one mode
+    /// (<c>--brain</c>, <c>--bot</c> or <c>--relay</c>), the brain's <c>--model &lt;name&gt;</c>
+    /// and <c>--max-requests &lt;n&gt;</c>, the bot's <c>--character &lt;name&gt;</c>,
+    /// <c>--net-id &lt;n&gt;</c> and <c>--echo</c>, the relay's <c>--bot-ports &lt;list&gt;</c>,
+    /// and <c>--help</c>. Throws <see cref="UsageException"/> for anything else, a missing or bad
+    /// value, two modes, or an option without its mode.
     /// </summary>
     public static DevHostOptions Parse(IReadOnlyList<string> args)
     {
@@ -55,6 +109,10 @@ public sealed record DevHostOptions
         string? model = null;
         int? maxRequests = null;
         var port = false;
+        string? character = null;
+        ulong? netId = null;
+        var echo = false;
+        IReadOnlyList<int>? botPorts = null;
 
         for (var i = 0; i < args.Count; i++)
         {
@@ -73,6 +131,33 @@ public sealed record DevHostOptions
                         throw new UsageException($"--max-requests takes a whole number from 1 to {MostRequests}, not '{text}'.");
                     maxRequests = n;
                     break;
+                case "--bot":
+                    options = options with { Bot = true };
+                    break;
+                case "--relay":
+                    options = options with { Relay = true };
+                    break;
+                case "--character":
+                    var name = Value(args, ref i);
+                    character = CharacterNamed(name)
+                        ?? throw new UsageException($"--character takes {string.Join(", ", Characters.Take(Characters.Count - 1))} or {Characters[^1]}, not '{name}'.");
+                    break;
+                case "--net-id":
+                    var id = Value(args, ref i);
+                    if (!ulong.TryParse(id, NumberStyles.None, CultureInfo.InvariantCulture, out var nid) || nid < 1)
+                        throw new UsageException($"--net-id takes a whole number of 1 or more, not '{id}'.");
+                    netId = nid;
+                    break;
+                case "--echo":
+                    echo = true;
+                    break;
+                case "--bot-ports":
+                    var list = Value(args, ref i);
+                    var parsed = CoopRelayOptions.ParsePorts(list, out var problem);
+                    if (parsed is null || problem is not null)
+                        throw new UsageException($"--bot-ports takes ports from 1 to 65535 separated by commas, such as 17773,17774, not '{list}'.");
+                    botPorts = parsed;
+                    break;
                 case "--help" or "-h":
                     options = options with { Help = true };
                     break;
@@ -89,8 +174,15 @@ public sealed record DevHostOptions
             }
         }
 
+        if ((options.Brain ? 1 : 0) + (options.Bot ? 1 : 0) + (options.Relay ? 1 : 0) > 1)
+            throw new UsageException("--brain, --bot and --relay are different modes: use one of them.");
         if (!options.Brain && (model is not null || maxRequests is not null))
             throw new UsageException("--model and --max-requests only apply with --brain.");
+        if (!options.Bot && (character is not null || netId is not null || echo))
+            throw new UsageException("--character, --net-id and --echo only apply with --bot.");
+        if (!options.Relay && botPorts is not null)
+            throw new UsageException("--bot-ports only applies with --relay.");
+        options = options with { Character = character ?? DefaultCharacter, NetId = netId, Echo = echo, BotPorts = botPorts };
         if (model is not null)
         {
             if (!BrainSettings.TryResolveModel(model, out var id))
@@ -100,6 +192,15 @@ public sealed record DevHostOptions
         if (maxRequests is { } max)
             options = options with { MaxRequests = max };
         return options;
+    }
+
+    // A character's name as the chat uses it ("Silent" for "the silent"), or null for none.
+    private static string? CharacterNamed(string text)
+    {
+        var name = text.Trim();
+        if (name.StartsWith("the ", StringComparison.OrdinalIgnoreCase))
+            name = name[4..].TrimStart();
+        return Characters.FirstOrDefault(c => c.Equals(name, StringComparison.OrdinalIgnoreCase));
     }
 
     // The value after an option, which must be there and not be another option.

@@ -618,7 +618,9 @@ internal sealed class ChatOverlay
             if (_lines.Count > MaxShown) _lines.RemoveAt(0);
             _dirty = true;
 
-            if (line.Kind == ChatLineKind.Bot && _game.ShowBubble is { } showBubble)
+            // Only this copy's own bot speaks over the local player. A bot copy's line relayed
+            // in (Remote) gets its bubble over that bot's player from the co-op relay instead.
+            if (line.Kind == ChatLineKind.Bot && !line.Remote && _game.ShowBubble is { } showBubble)
             {
                 try { showBubble(line.Text); }
                 catch (Exception ex) { _logError?.Invoke($"chat: speech bubble failed: {ex.Message}"); }

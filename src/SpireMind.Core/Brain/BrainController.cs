@@ -23,6 +23,10 @@ public enum BrainKind { None, Api, Subscription }
 /// until the next run starts (while autostart is on) or /start. One that stepped back because
 /// the run ended is started again when a run is in progress.</item>
 /// <item>Brains announce their own stops; the controller only adds the lines about switching.</item>
+/// <item>In co-op only the bot copies play. While <see cref="Blocked"/> gives a reason (the
+/// human copy with bots around, or in a co-op run), nothing starts here and a brain that plays
+/// is stopped, with the reason said once. A bot copy has <see cref="ForceAutostart"/>, so its
+/// brain starts by itself without /start.</item>
 /// </list>
 /// All members are thread-safe. Command handlers run on the posting thread (often Godot's main
 /// thread) and never wait: brains start without blocking, and stopping one happens on a pool
@@ -79,6 +83,8 @@ public sealed partial class BrainController
     private CancellationTokenSource? _pollCts;
     private bool _initialized;
     private bool _shutdown;
+    private int _blockNoted; // in this blocked stretch: 0 nothing said yet, 1 the reason logged, 2 said in the chat
+    private int _blockedThrew; // Blocked threw once, logged
 
     /// <param name="loadSettings">Reads config.json and the API key (<see cref="BrainSettings.Load"/>).
     /// Called here, by /start, /stop, /model and /effort before they change a setting, and when a
@@ -149,6 +155,21 @@ public sealed partial class BrainController
     /// menu, a subscription turn every few minutes.</summary>
     public TimeSpan RunOverGrace { get; init; } = TimeSpan.FromMinutes(2);
 
+    /// <summary>
+    /// Why no brain may play in this copy right now (the line for the chat), or null when one
+    /// may. A null property means never. While it gives a reason, /start refuses with it, nothing
+    /// starts by itself, and the poll loop stops a brain that plays. Called under the
+    /// controller's lock from command threads and the poll loop's task, so it must return at
+    /// once, never call back into the controller and never touch the game. If it throws, it
+    /// counts as null (logged once).
+    /// </summary>
+    public Func<string?>? Blocked { get; init; }
+
+    /// <summary>For a bot copy: <see cref="Initialize"/> treats autostart as on (in memory, not
+    /// saved), so the brain starts by itself with no /start. /stop still turns it off until
+    /// /start or the next launch.</summary>
+    public bool ForceAutostart { get; init; }
+
     /// <summary>The current settings. Brains read them through a Func before every request, so
     /// /model and /effort apply at once.</summary>
     public BrainSettings Settings
@@ -163,8 +184,9 @@ public sealed partial class BrainController
     }
 
     /// <summary>
-    /// Called once at mod load: starts the poll loop and, when autostart is on, does what
-    /// /start does without saving and without a chat line (the line goes to the log).
+    /// Called once at mod load: starts the poll loop and, when autostart is on (always, with
+    /// <see cref="ForceAutostart"/>), does what /start does without saving and without a chat
+    /// line (the line goes to the log). While <see cref="Blocked"/> gives a reason, it only logs it.
     /// </summary>
     public void Initialize()
     {
@@ -174,6 +196,8 @@ public sealed partial class BrainController
             if (_initialized || _shutdown)
                 return;
             _initialized = true;
+            if (ForceAutostart && !_settings.Autostart)
+                _settings = _settings with { Autostart = true }; // a bot copy: on for this session, not saved
             settings = _settings;
         }
         Log($"brain: {settings}");
@@ -181,7 +205,10 @@ public sealed partial class BrainController
             Log($"brain: {warning}");
         if (settings.Autostart)
         {
-            Log($"brain: autostart is on. {StartChosen(settings, fromCommand: false)}");
+            if (BlockedReason() is { } blocked)
+                Log($"brain: autostart is on, but {blocked}");
+            else
+                Log($"brain: autostart is on. {StartChosen(settings, fromCommand: false)}");
             // Nobody typed /start in this session, so the chat says who plays when the first run starts.
             lock (_gate) _announceStart = true;
         }
@@ -249,6 +276,11 @@ public sealed partial class BrainController
     private string StartCommand(string from, string args)
     {
         // Before anything is saved: a refused /start must not leave autostart on.
+        if (BlockedReason() is { } blocked)
+        {
+            Log($"brain: /start by {from} refused: {blocked}");
+            return blocked;
+        }
         if (Playing == BrainKind.None && OtherClient())
         {
             Log($"brain: /start by {from} refused: another MCP client is calling the game tools");
@@ -303,12 +335,14 @@ public sealed partial class BrainController
         lock (_gate)
         {
             var reason = SubscriptionReason(_settings, month);
+            var blocked = BlockedReason();
             playing = _kind switch
             {
                 BrainKind.Api => "Playing on your API credit.",
                 BrainKind.Subscription when reason == FailedReason => "Playing on your Claude subscription as the fallback until the next run.",
                 BrainKind.Subscription when reason is not null => $"Playing on your Claude subscription, since {reason}.",
                 BrainKind.Subscription => "Playing on your Claude subscription until the next run.",
+                _ when blocked is not null => blocked,
                 _ when !_settings.Autostart => "Nothing is playing. /start hands control over.",
                 _ when reason is not null && _inRun != true && !_hold =>
                     $"Nothing is playing yet. Your Claude subscription takes over once a run is in progress, since {reason}.",
@@ -317,7 +351,9 @@ public sealed partial class BrainController
         }
 
         var requests = calls == 1 ? "1 request" : $"{calls} requests";
-        return $"API spend: {Money(month)} of {Budget(settings.MonthlyBudgetUsd)} this month, {Money(run)} this run in {requests}. " +
+        // A bot copy counts into the same spend.json as every other copy, under one cap.
+        var thisMonth = settings.IsInstance ? "this month across every copy" : "this month";
+        return $"API spend: {Money(month)} of {Budget(settings.MonthlyBudgetUsd)} {thisMonth}, {Money(run)} this run in {requests}. " +
                $"{ModelName(settings.Model)}, {settings.Effort} effort.\n{playing}";
     }
 
@@ -413,6 +449,13 @@ public sealed partial class BrainController
         if (_shutdown || _brain is not null)
         {
             problem = _shutdown ? "the game is closing" : "a brain is already playing";
+            return false;
+        }
+        // Every path checks Blocked before it gets here; this catches one that became blocked meanwhile.
+        if (BlockedReason() is { } blocked)
+        {
+            problem = blocked;
+            Log($"brain: not starting the {KindName(kind)} brain: {blocked}");
             return false;
         }
 
@@ -568,6 +611,9 @@ public sealed partial class BrainController
                     var polled = _inRun == true;
                     var inRun = seen ?? polled;
                     _apiFailedRun = inRun && polled ? _run : _run + 1;
+                    // No brain may play here now, so nothing switches; the poll loop says why.
+                    if (BlockedReason() is not null)
+                        break;
                     line = inRun ? SwitchingLine : SwitchingNextRunLine;
                     if (inRun && _settings.Autostart && !Launch(BrainKind.Subscription, _settings, out var problem))
                         line += " " + CouldntStart(problem);
@@ -657,6 +703,10 @@ public sealed partial class BrainController
         var now = _clock();
         bool runStarted, autostart;
         IPlayBrain? idle = null;
+        IPlayBrain? gated = null;
+        var gatedKind = BrainKind.None;
+        string? blocked;
+        var say = 0; // 1: log the reason, 2: say it in the chat
         lock (_gate)
         {
             if (_shutdown)
@@ -671,8 +721,45 @@ public sealed partial class BrainController
                 _restarts = 0;
             }
             autostart = _settings.Autostart;
-            idle = TakeIdleSubscription(now);
+            blocked = BlockedReason();
+            if (blocked is null)
+            {
+                _blockNoted = 0;
+                idle = TakeIdleSubscription(now);
+            }
+            else
+            {
+                // No brain may play here: take off the one that plays (or is about to start),
+                // without a hold, so the normal path applies once unblocked.
+                if (_brain is not null)
+                {
+                    gated = _brain;
+                    gatedKind = _kind;
+                    _brain = null;
+                    _kind = BrainKind.None;
+                    _generation++; // its Stopped event and a deferred start are now stale
+                    _outOfRunSince = null;
+                }
+                var wanted = gated is not null ? 2 : 1;
+                if (_blockNoted < wanted)
+                {
+                    say = wanted;
+                    _blockNoted = wanted;
+                }
+            }
         }
+
+        if (gated is not null)
+        {
+            Log($"brain: stopping the {KindName(gatedKind)} brain: {blocked}");
+            _chat.NoteStop();
+            ClearThinking();
+            _ = StopBrain(gated);
+        }
+        if (say == 2)
+            Announce(blocked!);
+        else if (say == 1)
+            Log($"brain: no brain plays here: {blocked}");
 
         if (idle is not null)
         {
@@ -685,7 +772,7 @@ public sealed partial class BrainController
             _spend.ResetRun();
             Log($"brain: a run is in progress ({screen})");
         }
-        if (!autostart)
+        if (!autostart || blocked is not null)
             return;
         if (runStarted)
             await OnRunStartedAsync().ConfigureAwait(false);
@@ -868,6 +955,23 @@ public sealed partial class BrainController
     }
 
     private string BotName => _chat.BotName ?? "The bot";
+
+    // Blocked's reason, or null. A throwing callback counts as null and is logged once.
+    private string? BlockedReason()
+    {
+        if (Blocked is not { } blocked)
+            return null;
+        try
+        {
+            return blocked() is { } reason && !string.IsNullOrWhiteSpace(reason) ? reason : null;
+        }
+        catch (Exception ex)
+        {
+            if (Interlocked.Exchange(ref _blockedThrew, 1) == 0)
+                Log($"brain: couldn't tell whether a brain may play here ({ex.GetType().Name}: {ex.Message}); taking it as yes");
+            return null;
+        }
+    }
 
     private bool OtherClient()
     {

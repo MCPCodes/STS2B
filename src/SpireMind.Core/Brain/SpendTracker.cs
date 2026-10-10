@@ -16,32 +16,74 @@ namespace SpireMind.Core.Brain;
 /// is never undercounted. A missing file starts from zero. A corrupt one is moved aside to
 /// spend.json.bak and counting goes on from the totals in memory (zero at startup). A failed
 /// write is logged and the totals stay in memory, so the cap still holds for this session.
+///
+/// In co-op every copy of the game counts into the same spend.json, so one monthly cap holds
+/// for all of them. <see cref="Add"/>, <see cref="TryBegin"/> and <see cref="Cancel"/> read,
+/// change and write the file under a lock every copy takes (<see cref="FileLock"/> on
+/// locks/spend.json.lock), so two copies adding at once never lose a cost. Before a request,
+/// <see cref="TryBegin"/> records an estimate of its cost under this copy's
+/// <see cref="InstanceId"/> in the file's <c>in_flight</c> map, and counts the other copies'
+/// estimates against the cap, so several copies can't each start a request that together
+/// would go over it. If the lock can't be had within <see cref="LockTimeout"/>, counting goes
+/// on without it (logged once).
 /// </summary>
 public sealed class SpendTracker
 {
     public const string FileName = "spend.json";
 
+    /// <summary>The lock file's name, in the <c>locks</c> folder beside spend.json.</summary>
+    public const string LockFileName = "spend.json.lock";
+
+    /// <summary>An in-flight estimate older than this no longer counts (its copy crashed or hung).</summary>
+    public static readonly TimeSpan InFlightLimit = TimeSpan.FromMinutes(10);
+
+    /// <summary>The smallest estimate <see cref="TryBegin"/> records for a request.</summary>
+    public const decimal MinEstimateUsd = 0.05m;
+
+    /// <summary>How long <see cref="Add"/>, <see cref="TryBegin"/> and <see cref="Cancel"/> wait
+    /// for another copy to release the lock.</summary>
+    public static readonly TimeSpan LockTimeout = TimeSpan.FromSeconds(5);
+
     private readonly object _gate = new();
     private readonly Dictionary<string, MonthSpend> _months = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, InFlight> _others = new(StringComparer.Ordinal); // other copies' in-flight requests, as last read
     private readonly Action<string>? _log;
     private readonly List<string> _pendingLogs = [];
     private decimal _runTotal;
     private int _runCalls;
     private string? _lastError;
+    private InFlight? _mine; // this copy's request in flight, between TryBegin and Add or Cancel
+    private decimal _lastCost; // the last request's cost, the estimate for the next one
+    private bool _lockWarned;
 
     private readonly record struct MonthSpend(decimal Usd, int Calls);
 
-    /// <param name="configDir">The folder holding spend.json; created on the first write.</param>
+    private readonly record struct InFlight(decimal Usd, DateTime Since);
+
+    private sealed record SpendFile(Dictionary<string, MonthSpend> Months, Dictionary<string, InFlight> InFlight);
+
+    /// <param name="configDir">The folder holding spend.json; created on the first write. In
+    /// co-op every copy passes the shared folder.</param>
     /// <param name="log">Receives one line per problem (corrupt file, failed write). Optional.</param>
-    public SpendTracker(string configDir, Action<string>? log = null)
+    /// <param name="instanceId">Names this copy's in-flight request in spend.json ("main" for the
+    /// human copy, "bot-17773" for a bot copy). Null or blank for "main".</param>
+    public SpendTracker(string configDir, Action<string>? log = null, string? instanceId = null)
     {
         FilePath = Path.Combine(configDir, FileName);
+        LockPath = Path.Combine(configDir, "locks", LockFileName);
+        InstanceId = string.IsNullOrWhiteSpace(instanceId) ? "main" : instanceId.Trim();
         _log = log;
         lock (_gate) MergeFromDisk();
         FlushLogs();
     }
 
     public string FilePath { get; }
+
+    /// <summary>The lock file every copy takes around a change to spend.json. Never deleted.</summary>
+    public string LockPath { get; }
+
+    /// <summary>This copy's name in spend.json's in_flight map.</summary>
+    public string InstanceId { get; }
 
     /// <summary>The last problem reading or writing spend.json, or null when the last write worked.</summary>
     public string? LastError
@@ -62,19 +104,86 @@ public sealed class SpendTracker
     }
 
     /// <summary>Records one API call that cost <paramref name="costUsd"/> at <paramref name="now"/>
-    /// (UTC; a local time is converted) and saves spend.json.</summary>
+    /// (UTC; a local time is converted) and saves spend.json, without this copy's in-flight
+    /// estimate, which the cost replaces. Runs under the lock every copy takes.</summary>
     public void Add(decimal costUsd, DateTime now)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(costUsd);
         var month = MonthKey(now);
+        var utc = Utc(now);
         lock (_gate)
         {
-            MergeFromDisk();
-            var current = _months.GetValueOrDefault(month);
-            _months[month] = new MonthSpend(current.Usd + costUsd, current.Calls + 1);
-            _runTotal += costUsd;
-            _runCalls++;
-            Save();
+            UnderFileLock(() =>
+            {
+                MergeFromDisk();
+                var current = _months.GetValueOrDefault(month);
+                _months[month] = new MonthSpend(current.Usd + costUsd, current.Calls + 1);
+                _runTotal += costUsd;
+                _runCalls++;
+                _lastCost = costUsd;
+                _mine = null;
+                Save(utc);
+            });
+        }
+        FlushLogs();
+    }
+
+    /// <summary>
+    /// Call before each API request. False when this month's total plus the in-flight estimates
+    /// of the other copies (those newer than <see cref="InFlightLimit"/>) has reached
+    /// <paramref name="capUsd"/>: the request must not be sent. Otherwise records this copy's
+    /// estimate (its last request's cost, at least <see cref="MinEstimateUsd"/>) in spend.json
+    /// and returns true; <see cref="Add"/> or <see cref="Cancel"/> must follow.
+    /// <paramref name="monthTotal"/> is this month's total either way. A copy alone sees no other
+    /// estimates, so it is refused exactly when <see cref="OverCap"/> is true. Runs under the
+    /// lock every copy takes.
+    /// </summary>
+    public bool TryBegin(decimal capUsd, DateTime now, out decimal monthTotal)
+    {
+        var month = MonthKey(now);
+        var utc = Utc(now);
+        var allowed = false;
+        decimal total = 0;
+        lock (_gate)
+        {
+            UnderFileLock(() =>
+            {
+                MergeFromDisk();
+                total = _months.GetValueOrDefault(month).Usd;
+                var others = _others.Values.Where(e => Live(e, utc)).Sum(e => e.Usd);
+                if (total + others >= capUsd)
+                {
+                    if (_mine is not null)
+                    {
+                        _mine = null;
+                        Save(utc);
+                    }
+                    return;
+                }
+                _mine = new InFlight(Math.Max(_lastCost, MinEstimateUsd), utc);
+                allowed = true;
+                Save(utc);
+            });
+        }
+        FlushLogs();
+        monthTotal = total;
+        return allowed;
+    }
+
+    /// <summary>Removes this copy's in-flight estimate without a cost, for a request that failed
+    /// before it was billed or was never sent. Does nothing when there is none.</summary>
+    public void Cancel()
+    {
+        lock (_gate)
+        {
+            if (_mine is null)
+                return;
+            UnderFileLock(() =>
+            {
+                MergeFromDisk();
+                _mine = null;
+                Save(null);
+            });
         }
         FlushLogs();
     }
@@ -130,14 +239,71 @@ public sealed class SpendTracker
         return utc.ToString("yyyy-MM", CultureInfo.InvariantCulture);
     }
 
-    // Caller holds _gate. Reads spend.json and keeps the larger total of each month.
+    // The UTC time of now; an Unspecified time is taken as UTC.
+    private static DateTime Utc(DateTime now) => now.Kind switch
+    {
+        DateTimeKind.Local => now.ToUniversalTime(),
+        DateTimeKind.Unspecified => DateTime.SpecifyKind(now, DateTimeKind.Utc),
+        _ => now,
+    };
+
+    // An estimate still counts until InFlightLimit has passed (either way, so a bad clock
+    // can't keep one forever).
+    private static bool Live(InFlight entry, DateTime utcNow) => (utcNow - entry.Since).Duration() < InFlightLimit;
+
+    // Caller holds _gate. Runs body under the lock every copy takes, or without it when the
+    // lock can't be had. A timeout is logged once per tracker; another failure (the folder
+    // can't be created) only when the write that followed worked, since otherwise the write's
+    // own problem says enough.
+    private void UnderFileLock(Action body)
+    {
+        IDisposable? held = null;
+        string? problem = null;
+        var timedOut = false;
+        try
+        {
+            held = FileLock.Acquire(LockPath, LockTimeout);
+        }
+        catch (TimeoutException)
+        {
+            timedOut = true;
+            problem = Invariant($"Couldn't lock {FileName} within {LockTimeout.TotalSeconds:0} s (another copy may be stuck); counting without the lock.");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            problem = $"Couldn't lock {FileName} ({ex.GetType().Name}: {ex.Message}); counting without the lock.";
+        }
+
+        try
+        {
+            body();
+        }
+        finally
+        {
+            held?.Dispose();
+        }
+
+        if (problem is not null && !_lockWarned && (timedOut || _lastError is null))
+        {
+            _lockWarned = true;
+            if (_log is not null) _pendingLogs.Add(problem);
+        }
+    }
+
+    // Caller holds _gate. Reads spend.json and keeps the larger total of each month, and takes
+    // the other copies' in-flight estimates from it. An estimate under this copy's own id is a
+    // leftover of an earlier session (this one keeps its own in memory) and is dropped at the
+    // next write.
     private void MergeFromDisk()
     {
-        Dictionary<string, MonthSpend>? disk;
+        SpendFile? disk;
         try
         {
             if (!File.Exists(FilePath))
+            {
+                _others.Clear();
                 return;
+            }
             disk = Parse(File.ReadAllText(FilePath));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -148,6 +314,7 @@ public sealed class SpendTracker
 
         if (disk is null)
         {
+            _others.Clear();
             var backup = ConfigFiles.MoveAside(FilePath);
             Problem(backup is null
                 ? $"{FileName} is corrupt and couldn't be moved aside; counting from the totals in memory."
@@ -155,32 +322,52 @@ public sealed class SpendTracker
             return;
         }
 
-        foreach (var (month, spend) in disk)
+        foreach (var (month, spend) in disk.Months)
         {
             var mine = _months.GetValueOrDefault(month);
             _months[month] = new MonthSpend(Math.Max(mine.Usd, spend.Usd), Math.Max(mine.Calls, spend.Calls));
         }
+
+        _others.Clear();
+        foreach (var (id, entry) in disk.InFlight)
+            if (id != InstanceId)
+                _others[id] = entry;
     }
 
-    // Null when the text isn't a spend file.
-    private static Dictionary<string, MonthSpend>? Parse(string text)
+    // Null when the text isn't a spend file. A malformed in_flight map, or a malformed entry in
+    // it, is dropped: those are only estimates, and the totals are what must not be lost.
+    private static SpendFile? Parse(string text)
     {
         try
         {
             if (JsonNode.Parse(text) is not JsonObject root)
                 return null;
-            var result = new Dictionary<string, MonthSpend>(StringComparer.Ordinal);
-            if (root["months"] is null)
-                return result;
-            if (root["months"] is not JsonObject months)
+            var result = new SpendFile(new Dictionary<string, MonthSpend>(StringComparer.Ordinal),
+                new Dictionary<string, InFlight>(StringComparer.Ordinal));
+            if (root["months"] is not null and not JsonObject)
                 return null;
-            foreach (var (month, node) in months)
+            if (root["months"] is JsonObject months)
             {
-                if (node is not JsonObject entry
-                    || entry["usd"] is not JsonValue usdValue || !usdValue.TryGetValue<decimal>(out var usd) || usd < 0)
-                    return null;
-                var calls = entry["calls"] is JsonValue c && c.TryGetValue<int>(out var n) ? Math.Max(0, n) : 0;
-                result[month] = new MonthSpend(usd, calls);
+                foreach (var (month, node) in months)
+                {
+                    if (node is not JsonObject entry
+                        || entry["usd"] is not JsonValue usdValue || !usdValue.TryGetValue<decimal>(out var usd) || usd < 0)
+                        return null;
+                    var calls = entry["calls"] is JsonValue c && c.TryGetValue<int>(out var n) ? Math.Max(0, n) : 0;
+                    result.Months[month] = new MonthSpend(usd, calls);
+                }
+            }
+            if (root["in_flight"] is JsonObject flights)
+            {
+                foreach (var (id, node) in flights)
+                {
+                    if (node is JsonObject entry
+                        && entry["usd"] is JsonValue u && u.TryGetValue<decimal>(out var usd) && usd >= 0
+                        && entry["since"] is JsonValue s && s.TryGetValue<string>(out var sinceText)
+                        && DateTime.TryParse(sinceText, CultureInfo.InvariantCulture,
+                            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var since))
+                        result.InFlight[id] = new InFlight(usd, since);
+                }
             }
             return result;
         }
@@ -190,15 +377,30 @@ public sealed class SpendTracker
         }
     }
 
-    // Caller holds _gate.
-    private void Save()
+    // Caller holds _gate. Writes the months, and the in-flight estimates: the other copies'
+    // (without those past InFlightLimit when now is given) and this copy's own. The in_flight
+    // key is left out when there are none, so a copy alone writes the same file as ever.
+    private void Save(DateTime? now)
     {
         var months = new JsonObject();
         foreach (var (month, spend) in _months.OrderBy(m => m.Key, StringComparer.Ordinal))
             months[month] = new JsonObject { ["usd"] = spend.Usd, ["calls"] = spend.Calls };
+        var root = new JsonObject { ["months"] = months };
+
+        if (now is { } utcNow)
+            foreach (var id in _others.Where(e => !Live(e.Value, utcNow)).Select(e => e.Key).ToList())
+                _others.Remove(id);
+        var flights = new JsonObject();
+        foreach (var (id, entry) in _others.OrderBy(e => e.Key, StringComparer.Ordinal))
+            flights[id] = InFlightJson(entry);
+        if (_mine is { } mine)
+            flights[InstanceId] = InFlightJson(mine);
+        if (flights.Count > 0)
+            root["in_flight"] = flights;
+
         try
         {
-            ConfigFiles.WriteJson(FilePath, new JsonObject { ["months"] = months });
+            ConfigFiles.WriteJson(FilePath, root);
             _lastError = null;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -206,6 +408,14 @@ public sealed class SpendTracker
             Problem($"Couldn't save {FileName} ({ex.GetType().Name}: {ex.Message}); the totals are kept in memory.");
         }
     }
+
+    private static JsonObject InFlightJson(InFlight entry) => new()
+    {
+        ["usd"] = entry.Usd,
+        ["since"] = entry.Since.ToString("O", CultureInfo.InvariantCulture),
+    };
+
+    private static string Invariant(FormattableString text) => text.ToString(CultureInfo.InvariantCulture);
 
     // Caller holds _gate. The line is logged by FlushLogs once the lock is released.
     private void Problem(string message)

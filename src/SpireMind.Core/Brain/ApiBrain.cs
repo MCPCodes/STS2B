@@ -53,7 +53,8 @@ public enum BrainStopReason
 /// <item>Long conversations are replaced by a fresh one that holds the run journal, the recent
 /// chat and the current state; so is the conversation after a model switch or a new run.</item>
 /// <item>Spend is added up from each response's usage and checked against the monthly cap
-/// before every request.</item>
+/// before every request, together with the other copies' requests in flight in co-op
+/// (<see cref="SpendTracker.TryBegin"/>).</item>
 /// </list>
 /// Start, stop and the status properties are safe to call from any thread; everything else
 /// runs on the loop's task. See docs/brain.md.
@@ -482,35 +483,48 @@ public sealed class ApiBrain : IPlayBrain
         var settings = _settings();
         var now = _clock();
         var cap = settings.MonthlyBudgetUsd;
-        if (_spend.OverCap(cap, now))
+        // Records this request as in flight, so other copies count it against the same cap.
+        // Every way out below that doesn't reach _spend.Add cancels it.
+        if (!_spend.TryBegin(cap, now, out var month))
             throw new StopBrainException(BrainStopReason.MonthlyCap,
-                Invariant($"Monthly API budget reached: ${_spend.MonthTotal(now):0.00} of ${cap:0.00} spent this month, so the API brain stopped."));
+                Invariant($"Monthly API budget reached: ${month:0.00} of ${cap:0.00} spent this month, so the API brain stopped."));
 
-        var model = BrainSettings.ResolveModel(settings.Model);
-        var effort = string.IsNullOrWhiteSpace(settings.Effort) ? null : settings.Effort;
-        if (_conversationModel is not null && (_conversationModel != model || _conversationEffort != effort) && _messages.Count > 1)
-        {
-            Log($"brain: model or effort changed ({_conversationModel}, {_conversationEffort ?? "default"} to {model}, {effort ?? "default"}); starting a fresh conversation");
-            StartConversation(ModelChanged);
-        }
-        _conversationModel = model;
-        _conversationEffort = effort;
-        var request = BuildRequest(model, effort, settings.MaxTokens ?? MaxTokensFor(effort));
-        var sentAt = _clock();
+        string model;
+        JsonObject request;
+        DateTime sentAt;
         ClaudeResponse? sent;
         try
         {
+            model = BrainSettings.ResolveModel(settings.Model);
+            var effort = string.IsNullOrWhiteSpace(settings.Effort) ? null : settings.Effort;
+            if (_conversationModel is not null && (_conversationModel != model || _conversationEffort != effort) && _messages.Count > 1)
+            {
+                Log($"brain: model or effort changed ({_conversationModel}, {_conversationEffort ?? "default"} to {model}, {effort ?? "default"}); starting a fresh conversation");
+                StartConversation(ModelChanged);
+            }
+            _conversationModel = model;
+            _conversationEffort = effort;
+            request = BuildRequest(model, effort, settings.MaxTokens ?? MaxTokensFor(effort));
+            sentAt = _clock();
             sent = await SendAsync(request, ct);
         }
         catch (SettingsChangedException)
         {
             // /model or /effort while the request was being resent: the next step builds a new one.
+            _spend.Cancel();
             Log("brain: the model or effort changed while retrying; sending a new request");
             return;
+        }
+        catch
+        {
+            // Stopped, cancelled or failed before anything was billed.
+            _spend.Cancel();
+            throw;
         }
         if (sent is not { } response)
         {
             // The API said the prompt is over the context window.
+            _spend.Cancel();
             if (_messages.Count <= 1)
                 throw new StopBrainException(BrainStopReason.Error, "The prompt alone is too long for the model, so the API brain stopped.");
             Log("brain: the prompt is too long; starting a fresh conversation");
@@ -591,11 +605,12 @@ public sealed class ApiBrain : IPlayBrain
             if (toolUses.Any(t => ForwardTools.Contains(t.Name)))
                 _endTurnsInRow = 0;
             var results = await RunToolsAsync(toolUses, ct);
-            // Sonnet 5.5 and Haiku 5.5 can read user text inside a tool_result as an injection
-            // attempt, so the human's lines also go in a text block after the last tool_result.
-            // _unseenChat was cleared after the response, so it holds this round's messages only.
+            // Some models read user text inside a tool_result as an injection attempt, so the
+            // chat lines (the human's, and in co-op the other bots') also go in a text block after
+            // the last tool_result. _unseenChat was cleared after the response, so it holds this
+            // round's messages only.
             if (_unseenChat.Count > 0)
-                results.Add(TextBlock("The human wrote in the game chat (the same lines as chat.messages above):\n" +
+                results.Add(TextBlock("New lines in the game chat (the same as chat.messages above; teammate: true marks another bot's line, the rest are the human's):\n" +
                                       new JsonArray(_unseenChat.Select(m => m.DeepClone()).ToArray()).ToJsonString(ModelJson)));
             AddUser(results);
             return;
@@ -707,6 +722,9 @@ public sealed class ApiBrain : IPlayBrain
     {
         var character = _character();
         var multiplayer = _multiplayer();
+        // The prompt shows learned.md and the wiki index as they are now, so that is what the
+        // notes tools' write guard takes the model to have seen.
+        _notes.ResetSeen();
         _prompt = PromptBuilder.Build(_promptFolder, character, multiplayer, _notes.Root);
         _promptCharacter = PromptBuilder.CharacterFile(character);
         _promptMultiplayer = multiplayer;
@@ -976,8 +994,11 @@ public sealed class ApiBrain : IPlayBrain
         return RunScreens.InRun(Str(snapshot["screen"]));
     }
 
+    // True when the payload carries a chat message from the human. Another bot's line (teammate:
+    // true, relayed in co-op) never counts, so party chat can't wake a waiting or idle brain
+    // and cost a request; it still reaches the model with the next result through Observe.
     private static bool HasChatMessages(JsonNode payload) =>
-        payload["chat"]?["messages"] is JsonArray { Count: > 0 };
+        payload["chat"]?["messages"] is JsonArray messages && messages.Any(m => m is not null && !IsTrue(m["teammate"]));
 
     /// <summary>The player's calendar day for <paramref name="now"/>, as Claude Code's /play would
     /// date a run: local time, with a clock time of unspecified kind taken as UTC.</summary>

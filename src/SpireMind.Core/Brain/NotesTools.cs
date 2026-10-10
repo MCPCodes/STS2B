@@ -1,8 +1,24 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
 namespace SpireMind.Core.Brain;
+
+/// <summary>Per-copy settings for <see cref="NotesTools"/>; the defaults suit a single copy.</summary>
+public sealed record NotesOptions
+{
+    /// <summary>The journal's real path under the root. The tools keep calling it
+    /// runs/current.md. Either runs/current.md or runs/&lt;name&gt;/current.md with a name of
+    /// lowercase letters, digits and hyphens, at most 40 characters (a bot copy's
+    /// runs/bot-17773/current.md); anything else makes the constructor throw
+    /// <see cref="ArgumentException"/>.</summary>
+    public string JournalFile { get; init; } = NotesTools.Journal;
+
+    /// <summary>The absolute path of a lock file every copy of the game takes around each notes
+    /// operation (<see cref="FileLock"/>), or null for this instance's own lock only.</summary>
+    public string? LockFile { get; init; }
+}
 
 /// <summary>
 /// The brain's only file access: <c>notes_read</c>, <c>notes_write</c> and <c>notes_append</c>
@@ -13,6 +29,18 @@ namespace SpireMind.Core.Brain;
 /// Claude Code has its own file tools, so these are for the API brain only. Writes are atomic
 /// (a temporary file moved over the target) and create the folders they need. Safe to call
 /// from any thread.
+///
+/// In co-op several copies of the game share the notes:
+/// <list type="bullet">
+/// <item>Each copy can keep its journal elsewhere (<see cref="NotesOptions.JournalFile"/>); the
+/// tools still call it runs/current.md, and archives go beside the real file.</item>
+/// <item>With <see cref="NotesOptions.LockFile"/> every operation also holds a lock all copies
+/// take, so no read-check-write of one copy interleaves with another's.</item>
+/// <item>strategy/learned.md and the wiki's pages are guarded: notes_write refuses to replace a
+/// file someone else changed since this instance last saw it (a read, its own write, or what was
+/// there when the brain last built its prompt, see <see cref="ResetSeen"/>), so a copy can't
+/// wipe another's lesson. notes_append is never refused, since it loses nothing.</item>
+/// </list>
 /// </summary>
 public sealed partial class NotesTools
 {
@@ -37,22 +65,48 @@ public sealed partial class NotesTools
     /// so it can always be rewritten.</summary>
     public const int MaxBytes = 32 * 1024;
 
+    /// <summary>The error when another copy holds the notes lock for longer than <see cref="LockTimeout"/>.</summary>
+    public const string BusyError = "The notes are busy (another copy is writing them); try again in a moment.";
+
+    /// <summary>How long an operation waits for another copy's notes lock.</summary>
+    public static readonly TimeSpan LockTimeout = TimeSpan.FromSeconds(5);
+
     // The longest summary notes_list and the prompt's wiki index show; a longer line is cut.
     private const int MaxSummaryChars = 200;
 
     private readonly object _gate = new();
     private readonly Func<DateTime> _clock;
+    private readonly string _journalFile;
+    private readonly string? _lockFile;
+
+    // The shared files' content as this instance last saw it, by file: the SHA-256 of its bytes,
+    // or "" when it was missing. No entry means it hasn't seen the file at all. Under _gate.
+    private readonly Dictionary<string, string> _seen = new(StringComparer.Ordinal);
 
     /// <param name="root">The folder the notes files live under (the repo, or the config folder
     /// when the repo is missing).</param>
     /// <param name="clock">Time source for archive names; defaults to <see cref="DateTime.UtcNow"/>.</param>
-    public NotesTools(string root, Func<DateTime>? clock = null)
+    /// <param name="options">Where this copy's journal is and which lock the copies share; null for the defaults.</param>
+    /// <exception cref="ArgumentException">The journal file isn't one <see cref="NotesOptions.JournalFile"/> allows.</exception>
+    public NotesTools(string root, Func<DateTime>? clock = null, NotesOptions? options = null)
     {
+        options ??= new NotesOptions();
+        if (options.JournalFile is not { } journal || !JournalForm().IsMatch(journal))
+            throw new ArgumentException(
+                $"The journal must be {Journal} or runs/<name>/current.md, name in lowercase letters, digits and hyphens (got {Describe(options.JournalFile)}).",
+                nameof(options));
         Root = Path.GetFullPath(root);
         _clock = clock ?? (() => DateTime.UtcNow);
+        _journalFile = journal;
+        JournalPath = Path.Combine(Root, journal.Replace('/', Path.DirectorySeparatorChar));
+        _lockFile = string.IsNullOrWhiteSpace(options.LockFile) ? null : options.LockFile;
+        SeedSeen();
     }
 
     public string Root { get; }
+
+    /// <summary>The journal's real full path (runs/current.md under the root unless the options moved it).</summary>
+    public string JournalPath { get; }
 
     public IReadOnlyList<ToolSpec> Specs { get; } =
     [
@@ -65,7 +119,8 @@ public sealed partial class NotesTools
             "Replace one of your notes files with new content: runs/current.md, strategy/learned.md or a wiki page (a new " +
             "page is created, with its folder). Send the whole file, not a diff; read it first if you only want to change " +
             "part of it. On a wiki page with a Facts section, everything above its ## Lessons heading must stay exactly as it " +
-            $"is. Use notes_append to add a line instead. A file can be at most {MaxBytes / 1024} KB.",
+            $"is. Use notes_append to add a line instead. A file can be at most {MaxBytes / 1024} KB. " +
+            "If someone else changed the file since you last read it, the write is refused: read it again first.",
             Schema(new JsonObject
             {
                 ["file"] = FileProperty(),
@@ -117,22 +172,22 @@ public sealed partial class NotesTools
     public Task<ToolOutcome> CallAsync(string name, JsonObject args, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        if (name == "notes_list")
-            return Task.FromResult(List());
-
-        var file = args["file"] is JsonValue f && f.TryGetValue<string>(out var s) ? s : null;
-        if (!IsNotesFile(file))
-            return Task.FromResult(Error($"file must be one of: {FileForms} (got {Describe(file)}). No other files are available."));
-
         try
         {
+            if (name == "notes_list")
+                return Task.FromResult(Locked(List) ?? Error(BusyError));
+
+            var file = args["file"] is JsonValue f && f.TryGetValue<string>(out var s) ? s : null;
+            if (!IsNotesFile(file))
+                return Task.FromResult(Error($"file must be one of: {FileForms} (got {Describe(file)}). No other files are available."));
+
             return Task.FromResult(name switch
             {
-                "notes_read" => Read(file!),
+                "notes_read" => Locked(() => Read(file!)),
                 "notes_write" => Write(file!, Content(args)),
                 "notes_append" => Append(file!, Content(args)),
                 _ => Error($"Unknown tool '{name}'"),
-            });
+            } ?? Error(BusyError));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -141,18 +196,21 @@ public sealed partial class NotesTools
     }
 
     /// <summary>The content of a file the tools accept, or "" when it doesn't exist or can't be
-    /// read. For the brain's own use (the run journal in a fresh context).</summary>
+    /// read. For the brain's own use (the run journal in a fresh context). Reads without the
+    /// copies' lock when another copy holds it too long: writes are atomic, so a read never sees
+    /// half a file. Doesn't count as the model having seen the file.</summary>
     public string ReadText(string file)
     {
         if (!IsNotesFile(file))
             throw new ArgumentException($"Not a notes file: {file}", nameof(file));
         try
         {
-            lock (_gate)
+            string ReadNow()
             {
                 var path = PathOf(file);
                 return File.Exists(path) ? File.ReadAllText(path) : "";
             }
+            return Locked(ReadNow) ?? Locked(ReadNow, crossProcess: false)!;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -160,22 +218,22 @@ public sealed partial class NotesTools
         }
     }
 
+    // Caller holds the locks.
     private ToolOutcome Read(string file)
     {
-        lock (_gate)
+        var path = PathOf(file);
+        var bytes = File.Exists(path) ? File.ReadAllBytes(path) : null;
+        if (IsGuarded(file))
+            _seen[file] = Hash(bytes);
+        return new ToolOutcome(new JsonObject
         {
-            var path = PathOf(file);
-            var exists = File.Exists(path);
-            return new ToolOutcome(new JsonObject
-            {
-                ["file"] = file,
-                ["exists"] = exists,
-                ["content"] = exists ? File.ReadAllText(path) : "",
-            });
-        }
+            ["file"] = file,
+            ["exists"] = bytes is not null,
+            ["content"] = bytes is null ? "" : Decode(bytes),
+        });
     }
 
-    private ToolOutcome Write(string file, string? content)
+    private ToolOutcome? Write(string file, string? content)
     {
         if (content is null)
             return Error("content is required: the whole new file as a string.");
@@ -183,10 +241,15 @@ public sealed partial class NotesTools
         if (bytes > MaxBytes)
             return Error($"content is {bytes} bytes; the limit is {MaxBytes}. Shorten it (prune old log lines or lessons) and write again.");
 
-        lock (_gate)
+        return Locked(() =>
         {
             var path = PathOf(file);
-            if (IsWikiPage(file) && File.Exists(path) && !KeepsFacts(File.ReadAllText(path), content))
+            var old = File.Exists(path) ? File.ReadAllBytes(path) : null;
+            // A file that exists and isn't what this instance last saw was changed by someone
+            // else; replacing it would wipe that change. A missing file has nothing to lose.
+            if (IsGuarded(file) && old is not null && (!_seen.TryGetValue(file, out var seen) || seen != Hash(old)))
+                return ChangedSinceRead(file);
+            if (IsWikiPage(file) && old is not null && !KeepsFacts(Decode(old), content))
                 return Error($"{file} has a Facts section, verified from the game files, so a rewrite must keep everything above " +
                              "its ## Lessons heading exactly as it is and change only the Lessons. Read the page with notes_read and " +
                              "write it again, or add a line with notes_append.");
@@ -194,60 +257,148 @@ public sealed partial class NotesTools
             if (file == Journal && ArchiveIfAnotherRun(path, content) is { } archived)
                 reply["archived_previous_as"] = archived;
             ConfigFiles.WriteAtomic(path, content);
+            if (IsGuarded(file))
+                _seen[file] = Hash(Utf8.GetBytes(content));
             return new ToolOutcome(reply);
-        }
+        });
     }
 
     // Adds content on a line of its own, ending with a newline. Never archives: an appended
-    // line belongs to the journal already there.
-    private ToolOutcome Append(string file, string? content)
+    // line belongs to the journal already there. Never refused by the guard, since nothing is
+    // lost; the new content counts as seen only when the old content was (or there was none),
+    // since otherwise this instance still hasn't seen someone else's change.
+    private ToolOutcome? Append(string file, string? content)
     {
         if (content is null || content.Trim().Length == 0)
             return Error("content is required: the text to add.");
 
-        lock (_gate)
+        return Locked(() =>
         {
             var path = PathOf(file);
-            var old = File.Exists(path) ? File.ReadAllText(path) : "";
+            var before = File.Exists(path) ? File.ReadAllBytes(path) : null;
+            var old = before is null ? "" : Decode(before);
             var separator = old.Length > 0 && !old.EndsWith('\n') ? "\n" : "";
             var text = old + separator + content + (content.EndsWith('\n') ? "" : "\n");
             var bytes = Utf8.GetByteCount(text);
             if (bytes > MaxBytes)
                 return Error($"{file} would be {bytes} bytes; the limit is {MaxBytes}. Rewrite it shorter with notes_write " +
                              "(prune old log lines or lessons), then append again.");
+            var fresh = before is null || (_seen.TryGetValue(file, out var seen) && seen == Hash(before));
             ConfigFiles.WriteAtomic(path, text);
+            if (IsGuarded(file) && fresh)
+                _seen[file] = Hash(Utf8.GetBytes(text));
             return new ToolOutcome(new JsonObject { ["file"] = file, ["appended"] = true, ["bytes"] = bytes });
-        }
+        });
     }
 
-    // The wiki pages, and the fixed files with whether they exist.
+    // The wiki pages, and the fixed files with whether they exist. Caller holds the locks.
     private ToolOutcome List()
+    {
+        var files = new JsonArray();
+        foreach (var file in Files)
+        {
+            var info = new FileInfo(PathOf(file));
+            var entry = new JsonObject { ["file"] = file, ["exists"] = info.Exists };
+            if (info.Exists)
+                entry["bytes"] = info.Length;
+            files.Add(entry);
+        }
+
+        var pages = new JsonArray();
+        foreach (var page in ListWiki(Root))
+        {
+            var entry = new JsonObject { ["file"] = page.File, ["bytes"] = page.Bytes };
+            if (page.Title is not null)
+                entry["title"] = page.Title;
+            if (page.Summary is not null)
+                entry["summary"] = page.Summary;
+            pages.Add(entry);
+        }
+        return new ToolOutcome(new JsonObject { ["wiki"] = pages, ["files"] = files });
+    }
+
+    // Runs body under _gate and, when the copies share a lock file, under that lock too. Null
+    // when another copy held it for longer than LockTimeout. A lock file that can't be made at
+    // all (its folder can't be created) leaves this instance's own lock: the guard's check
+    // right before each write still catches nearly every clash.
+    private T? Locked<T>(Func<T> body, bool crossProcess = true) where T : class
     {
         lock (_gate)
         {
-            var files = new JsonArray();
-            foreach (var file in Files)
+            IDisposable? held = null;
+            if (crossProcess && _lockFile is not null)
             {
-                var info = new FileInfo(PathOf(file));
-                var entry = new JsonObject { ["file"] = file, ["exists"] = info.Exists };
-                if (info.Exists)
-                    entry["bytes"] = info.Length;
-                files.Add(entry);
+                try
+                {
+                    held = FileLock.Acquire(_lockFile, LockTimeout);
+                }
+                catch (TimeoutException)
+                {
+                    return null;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+                {
+                    // Only the in-process lock.
+                }
             }
-
-            var pages = new JsonArray();
-            foreach (var page in ListWiki(Root))
-            {
-                var entry = new JsonObject { ["file"] = page.File, ["bytes"] = page.Bytes };
-                if (page.Title is not null)
-                    entry["title"] = page.Title;
-                if (page.Summary is not null)
-                    entry["summary"] = page.Summary;
-                pages.Add(entry);
-            }
-            return new ToolOutcome(new JsonObject { ["wiki"] = pages, ["files"] = files });
+            using (held)
+                return body();
         }
     }
+
+    // learned.md and the wiki's pages are shared by every copy; the journal belongs to one.
+    private static bool IsGuarded(string file) => file == Learned || IsWikiPage(file);
+
+    /// <summary>
+    /// Takes strategy/learned.md and the wiki's pages as they are now as what the model has
+    /// seen, forgetting older reads. The brain calls it right before it builds a system prompt,
+    /// which holds learned.md and the wiki index. Called before, not after, so a change made in
+    /// between makes a later write refused rather than let through.
+    /// </summary>
+    public void ResetSeen()
+    {
+        lock (_gate) SeedSeen();
+    }
+
+    // What this instance sees when it is made: about what the brain's prompt is built from.
+    // Unreadable files are left unseen, so a write waits for a read. Caller holds _gate (or is
+    // the constructor).
+    private void SeedSeen()
+    {
+        _seen.Clear();
+        var files = new List<string> { Learned };
+        files.AddRange(ListWiki(Root).Select(p => p.File));
+        foreach (var file in files)
+        {
+            try
+            {
+                var path = PathOf(file);
+                _seen[file] = Hash(File.Exists(path) ? File.ReadAllBytes(path) : null);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Not seen.
+            }
+        }
+    }
+
+    // SHA-256 of a file's bytes as hex, or "" for a missing file.
+    private static string Hash(byte[]? bytes) => bytes is null ? "" : System.Convert.ToHexString(SHA256.HashData(bytes));
+
+    // A file's bytes as text, the way File.ReadAllText reads them (UTF-8 unless a byte order mark says otherwise).
+    private static string Decode(byte[] bytes)
+    {
+        using var reader = new StreamReader(new MemoryStream(bytes), Utf8, detectEncodingFromByteOrderMarks: true);
+        return reader.ReadToEnd();
+    }
+
+    private static ToolOutcome ChangedSinceRead(string file) => new(new JsonObject
+    {
+        ["error"] = $"{file} was changed by someone else (another bot copy, or a hand edit) since you last read it, so writing it " +
+                    "now would wipe that change. Read it again with notes_read, merge your change into what is there, and write it " +
+                    "again, or add a line with notes_append.",
+        ["changed_since_read"] = true,
+    }, IsError: true);
 
     /// <summary>
     /// The wiki pages under <paramref name="root"/> (files whose path <see cref="IsWikiPage"/>
@@ -357,7 +508,8 @@ public sealed partial class NotesTools
         for (var n = 2; File.Exists(Path.Combine(dir, name)); n++)
             name = $"{stem}-{n}.md";
         File.Copy(path, Path.Combine(dir, name));
-        return $"runs/{name}";
+        // Beside the real journal: runs/<name>.md, or runs/bot-17773/<name>.md for a bot copy's.
+        return $"{_journalFile[.._journalFile.LastIndexOf('/')]}/{name}";
     }
 
     private static readonly UTF8Encoding Utf8 = new(encoderShouldEmitUTF8Identifier: false);
@@ -374,7 +526,9 @@ public sealed partial class NotesTools
         return match.Success ? (match.Groups["c"].Value.ToLowerInvariant(), match.Groups["d"].Value) : null;
     }
 
-    private string PathOf(string file) => Path.Combine(Root, file.Replace('/', Path.DirectorySeparatorChar));
+    // The real path of a file the tools accept; the journal may live elsewhere (NotesOptions.JournalFile).
+    private string PathOf(string file) =>
+        file == Journal ? JournalPath : Path.Combine(Root, file.Replace('/', Path.DirectorySeparatorChar));
 
     private static string Describe(string? file) => file is null ? "nothing" : $"'{file}'";
 
@@ -407,6 +561,9 @@ public sealed partial class NotesTools
 
     [GeneratedRegex(@"\A##[ \t]+Lessons\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex LessonsHeading();
+
+    [GeneratedRegex(@"\Aruns/(?:[a-z0-9-]{1,40}/)?current\.md\z", RegexOptions.CultureInvariant)]
+    private static partial Regex JournalForm();
 
     [GeneratedRegex(@"\Astrategy/wiki/(?:(?<folder>[a-z0-9]+(?:-[a-z0-9]+)*)/)?(?<slug>[a-z0-9]+(?:-[a-z0-9]+)*)\.md\z", RegexOptions.CultureInvariant)]
     private static partial Regex WikiPath();

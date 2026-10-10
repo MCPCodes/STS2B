@@ -581,11 +581,17 @@ public sealed partial class BotTools
         if (messages.Count > 0)
         {
             var now = DateTime.UtcNow;
-            chat["messages"] = new JsonArray(messages.Select(m => (JsonNode)new JsonObject
+            chat["messages"] = new JsonArray(messages.Select(m =>
             {
-                ["from"] = m.From,
-                ["text"] = m.Text,
-                ["seconds_ago"] = Math.Max(0, (int)Math.Round((now - m.At).TotalSeconds)),
+                var message = new JsonObject
+                {
+                    ["from"] = m.From,
+                    ["text"] = m.Text,
+                    ["seconds_ago"] = Math.Max(0, (int)Math.Round((now - m.At).TotalSeconds)),
+                };
+                // Another bot's line relayed in by the co-op relay, not the human's.
+                if (m.Teammate) message["teammate"] = true;
+                return (JsonNode)message;
             }).ToArray());
         }
         json["chat"] = chat;

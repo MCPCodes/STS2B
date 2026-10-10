@@ -6,7 +6,9 @@ namespace SpireMind.Game;
 /// Builds the in-game brain at mod load (docs/brain.md): the settings and folders, the spend
 /// tracker and transcript, and a <see cref="BrainController"/> that picks between the API brain
 /// and the subscription fallback and owns /start, /stop, /budget, /model and /effort. It also
-/// hooks game exit, so a Claude Code child never outlives the game.
+/// hooks game exit, so a Claude Code child never outlives the game. In co-op the
+/// <see cref="InstanceRole"/> decides who plays: a bot copy starts its brain by itself, and the
+/// human copy's brain stays off while bot copies exist or the run is co-op.
 ///
 /// Uses only Core, System and Godot types, so it compiles without the game. Everything here
 /// is wrapped: a failure only loses the brain, never the bridge or the chat.
@@ -37,11 +39,16 @@ internal static class BrainWiring
     /// game tools on /mcp; /start then refuses. Called on the main thread, so it must return at once.</param>
     /// <param name="modDir">The folder the mod was loaded from, for the staged prompt and
     /// brain/repo_path; null when unknown.</param>
+    /// <param name="role">This copy in co-op (<see cref="InstanceRole.Detect"/>): its own config
+    /// folder and the shared one, its run journal, and whether it is a bot copy, whose brain
+    /// starts by itself.</param>
+    /// <param name="botsExist">True while the co-op relay sees bot copies. The human copy's
+    /// brain stays off then. Called under the controller's lock, so it must return at once.</param>
     /// <param name="log">The mod's log. Called from the brains' tasks too, so it must be thread-safe.</param>
     /// <param name="logError">The mod's error log, for problems with the setup and the files.</param>
     /// <returns>The controller, or null when it couldn't be built.</returns>
     public static BrainController? Start(ChatHub chat, BotTools tools, DecisionWaiter waiter, Func<bool> multiplayer, int port,
-        Func<bool> otherClient, string? modDir, Action<string> log, Action<string> logError)
+        Func<bool> otherClient, string? modDir, InstanceRole role, Func<bool> botsExist, Action<string> log, Action<string> logError)
     {
         // Brain tasks log from the thread pool. Once the game is quitting, their lines are
         // dropped, since the engine they print through may already be gone.
@@ -49,15 +56,20 @@ internal static class BrainWiring
         Action<string> warn = line => { if (!_quiet) logError(line); };
         try
         {
-            var initial = BrainSettings.Load();
-            var spend = new SpendTracker(initial.ConfigDir, line => warn($"brain: {line}"));
+            // This copy's config.json over the shared one (a bot copy has its own folder); the
+            // spend counts in the shared folder, so every copy is held to one monthly cap.
+            BrainSettings LoadSettings() => BrainSettings.Load(role.ConfigDir, sharedConfigDir: role.SharedConfigDir);
+            var initial = LoadSettings();
+            var spend = new SpendTracker(role.SharedConfigDir, line => warn($"brain: {line}"), role.InstanceId);
             var transcript = new Transcript(initial.ConfigDir, warn);
+            // A bot copy keeps its own run journal; the shared notes are locked across copies.
+            var notesOptions = new NotesOptions { JournalFile = role.JournalFile, LockFile = role.NotesLockPath };
             var paths = new PathLog(modDir, info, warn);
             var clients = new ClientCache(line => info($"brain: {line}"));
 
             BrainController? controller = null;
             controller = new BrainController(
-                loadSettings: () => BrainSettings.Load(),
+                loadSettings: LoadSettings,
                 saveSettings: settings => settings.Save(),
                 createApi: settings =>
                 {
@@ -65,7 +77,7 @@ internal static class BrainWiring
                     return new ApiBrain(
                         clients.For(settings.ApiKey!),
                         new BotToolsHost(tools),
-                        new NotesTools(folders.NotesRoot),
+                        new NotesTools(folders.NotesRoot, options: notesOptions),
                         folders.PromptFolder ?? settings.ConfigDir,
                         () => controller!.Settings,
                         spend,
@@ -84,6 +96,8 @@ internal static class BrainWiring
                         ClaudePath = settings.ClaudePath,
                         WorkingDirectory = folders.SubscriptionDirectory,
                         Port = port,
+                        // A bot copy's prompt names its own run journal.
+                        Prompt = role.SubscriptionPrompt,
                         // Read as each session starts, so /model reaches Claude Code at its next one.
                         Model = () => controller!.Settings.Model,
                     };
@@ -96,7 +110,13 @@ internal static class BrainWiring
                 spend: spend,
                 chat: chat,
                 log: info,
-                otherClient: otherClient);
+                otherClient: otherClient)
+            {
+                // In co-op only bot copies play: the human copy's brain stays off while bots
+                // exist or the run is co-op. Both reads are lock-free flags, so it returns at once.
+                Blocked = () => role.BrainBlockedReason(multiplayer(), botsExist()),
+                ForceAutostart = role.IsBot,
+            };
 
             // The folders as they stand now; each brain start resolves them again, so a repo
             // set in config.json applies at the next /start. Initialize logs the settings (the

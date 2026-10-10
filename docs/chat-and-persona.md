@@ -54,6 +54,8 @@ Colours: Ironclad Red, Silent Swamp, Defect Blue, Regent Orange. The Necrobinder
 
 ## Co-op transport
 
+As built (`docs/chat.md`, Co-op): the human copy's relay POSTs Mark's lines to each bot bridge's `/chat` and polls each bot's `GET /chat?since=` for its lines, rather than the bot POSTing back; a bot's line is drawn over its player on Mark's screen by NetId. The findings below are what that rests on.
+
 - **Recommended: localhost between the two SpireMind instances.** Both load the mod; the bot instance sets `SPIREMIND_PORT` (17773).
   - Mark's mod POSTs `{from_net_id, text}` to the bot bridge's new `/chat` route; the bot queues it for the brain.
   - The bot's reply is drawn locally and POSTed back to 17772 `/chat`, where Mark's mod draws it over the bot's player.

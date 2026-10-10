@@ -9,3 +9,5 @@ Run journals. The bot keeps the run in progress in `current.md` and writes a pos
 The bot re-reads the first two after a context compaction, so keep them short.
 
 When `/play` starts, the bot checks the header and log against the live run. If the character differs, or the log has a post-mortem or a floor past the live one, the file is from a different run. It is archived whether that run finished or not: renamed to `YYYY-MM-DD-<character>.md` (the run's start date), adding `-2`, `-3`... if that name exists. Never overwrite an archive. A fresh `current.md` then begins.
+
+In co-op each bot copy keeps its own journal in `runs/bot-<port>/current.md` (such as `runs/bot-17773/current.md`) and archives its runs in that folder, so bots never write over each other's run or over Mark's `runs/current.md`. The bot still calls it `runs/current.md`; the mod maps the name. Lessons go to the shared `strategy/learned.md` and wiki as usual.

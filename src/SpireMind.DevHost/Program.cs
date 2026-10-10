@@ -21,6 +21,10 @@ if (options.Help)
 
 if (options.Brain)
     return await BrainSmoke.RunAsync(options);
+if (options.Bot)
+    return await DevCoop.RunBotAsync(options);
+if (options.Relay)
+    return await DevCoop.RunRelayAsync(options);
 
 var game = new FakeGame();
 var versioner = new SnapshotVersioner();

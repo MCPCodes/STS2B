@@ -2,6 +2,9 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+// An alias rather than the namespace, so a game type of the same name in the mod's global
+// usings can never make it ambiguous.
+using InstanceInfo = SpireMind.Core.Coop.InstanceInfo;
 
 namespace SpireMind.Core;
 
@@ -12,8 +15,10 @@ namespace SpireMind.Core;
 ///   GET  /health  liveness and version
 ///   GET  /state   the current snapshot (handy with curl while debugging)
 ///   POST /act     {"action_id": "...", "version": n}, same as the act tool
-///   POST /chat    {"from": "Mark", "text": "..."}, posts as the in-game chat box does
-///   GET  /chat?since=n  the chat log after line n, with the bot's name and the pause flag
+///   POST /chat    {"from": "Mark", "text": "..."}, posts as the in-game chat box does;
+///                 with "teammate": true it is another bot's line relayed in (party chat)
+///   GET  /chat?since=n  the chat log after line n, with the bot's name, the pause flag and who this copy is
+///   GET  /coop/info  who this copy is, for the co-op relay: role, port, instance, session, NetId, character
 ///   GET  /debug/screenshot  saves what the game is drawing to a PNG and returns its path (when the host offers it)
 /// /state and /act go through the tools and show unread chat messages like them, but leave
 /// them unread, so a curl doesn't take them from the model.
@@ -40,9 +45,18 @@ public sealed class BridgeServer : IDisposable
     /// </summary>
     public Func<CancellationToken, Task<JsonObject>>? DebugScreenshot { get; set; }
 
+    /// <summary>What this copy reports about itself on /coop/info and /chat. Null reports a
+    /// human copy with instance "main" and no NetId.</summary>
+    public InstanceInfo? Instance { get; init; }
+
+    /// <summary>A new id for every server (so every launch of the game), which tells the co-op
+    /// relay that a copy on a port it knew was restarted and its chat log began again.</summary>
+    public string Session { get; }
+
     public BridgeServer(int port, BotTools tools, ChatHub chat, string version, Action<string> log)
     {
         Port = port;
+        Session = Guid.NewGuid().ToString("N");
         _tools = tools;
         _chat = chat;
         _version = version;
@@ -136,7 +150,10 @@ public sealed class BridgeServer : IDisposable
 
                 case ("POST", "/chat"):
                     var message = JsonNode.Parse(await ReadBody(req)) as JsonObject ?? new JsonObject();
-                    var posted = _chat.PostFromHuman(Text(message["from"]) ?? "Player", Text(message["text"]) ?? "");
+                    var teammate = message["teammate"] is JsonValue tv && tv.TryGetValue<bool>(out var tm) && tm;
+                    var posted = teammate
+                        ? _chat.PostFromTeammate(Text(message["from"]) ?? "Bot", Text(message["text"]) ?? "")
+                        : _chat.PostFromHuman(Text(message["from"]) ?? "Player", Text(message["text"]) ?? "");
                     await Send(res, posted.Outcome == PostOutcome.Empty ? 400 : 200, new JsonObject
                     {
                         ["outcome"] = posted.Outcome switch
@@ -147,12 +164,20 @@ public sealed class BridgeServer : IDisposable
                             _ => "empty",
                         },
                         ["reply"] = posted.Reply,
+                        ["seq"] = posted.Seq,
                     });
                     return;
 
                 case ("GET", "/chat"):
                     var since = long.TryParse(req.QueryString["since"], out var n) ? n : 0;
                     await Send(res, 200, ChatLog(since));
+                    return;
+
+                case ("GET", "/coop/info"):
+                    var info = new JsonObject { ["name"] = "spiremind", ["version"] = _version };
+                    AddIdentity(info);
+                    info["paused"] = _chat.Paused;
+                    await Send(res, 200, info);
                     return;
 
                 case ("GET", "/debug/screenshot") when DebugScreenshot is { } shoot:
@@ -180,6 +205,9 @@ public sealed class BridgeServer : IDisposable
 
     private JsonObject ChatLog(long since)
     {
+        // last_seq is read before the lines, so it is never past the last line in this reply.
+        var log = new JsonObject { ["bot"] = _chat.BotName, ["paused"] = _chat.Paused };
+        AddIdentity(log);
         var lines = new JsonArray();
         foreach (var l in _chat.LinesSince(since))
         {
@@ -189,9 +217,25 @@ public sealed class BridgeServer : IDisposable
                 ["kind"] = l.Kind.ToString().ToLowerInvariant(),
                 ["from"] = l.From,
                 ["text"] = l.Text,
+                ["remote"] = l.Remote,
             });
         }
-        return new JsonObject { ["bot"] = _chat.BotName, ["paused"] = _chat.Paused, ["lines"] = lines };
+        log["lines"] = lines;
+        return log;
+    }
+
+    // Who this copy is, for the co-op relay: the same fields on /coop/info and /chat (playing
+    // too, so the relay's /bots stays current from its polls).
+    private void AddIdentity(JsonObject json)
+    {
+        json["role"] = Instance?.IsBot == true ? "bot" : "human";
+        json["port"] = Port;
+        json["instance"] = Instance?.InstanceId ?? "main";
+        json["session"] = Session;
+        json["net_id"] = Instance?.NetId;
+        json["character"] = _chat.BotName;
+        json["playing"] = Instance?.ReadPlaying();
+        json["last_seq"] = _chat.LastSeq;
     }
 
     private static string? Text(JsonNode? node) =>

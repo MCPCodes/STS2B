@@ -27,7 +27,8 @@ public enum RepoSource
 /// <item>The prompt folder, which <see cref="PromptBuilder"/> reads: the repo, else the mod's
 /// <c>brain</c> folder with its staged copies of the play prompt and strategy notes.</item>
 /// <item>The notes root, where the run journal, strategy/learned.md and the wiki live: the repo,
-/// else the config folder, so the journal survives reinstalling the mod.</item>
+/// else the shared config folder (the config folder itself, except for a bot copy in co-op), so
+/// the journal survives reinstalling the mod and every copy shares the notes.</item>
 /// <item>The subscription brain's working folder: the repo only, since Claude Code needs the
 /// real checkout for /play. Without one it says why it can't start.</item>
 /// </list>
@@ -101,7 +102,7 @@ public sealed record BrainPaths
             RepoSource = source,
             PromptFolder = prompt,
             HasPlayPrompt = prompt is not null && HasPrompt(prompt),
-            NotesRoot = repo ?? settings.ConfigDir,
+            NotesRoot = repo ?? settings.SharedConfigDir,
             Warnings = warnings,
         };
     }
