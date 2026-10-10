@@ -160,3 +160,15 @@ Line numbers are as of this commit. Items checked in one place but used in sever
 - Positional ids (`reward:n`, `option:n`, `card:n`, `buy:...`) are protected only by the snapshot version, which `act` checks when the caller passes it. `GameBridge.ExecuteAsync` itself only checks that the id is still offered.
 - Card reward: `Clicks.Once` is keyed by Godot instance id, and `NGridCardHolder` instances are pooled, so a pick on a second card reward within 2.5 s of the first is refused once.
 - Rest site: Mend (co-op) is never offered; a human has to do it.
+
+## The in-game brain (2026-10-10)
+
+Written and unit tested on Linux; the game-side wiring was only compiled against GodotSharp 4.5.0 without the game's assemblies. To check on the Mac:
+
+- The mod builds against v0.107.1 with the brain in it (`src/SpireMind.Core/Brain/`, `src/SpireMind/Game/BrainWiring.cs`). A name that clashes with a game type gets a file-level alias, as in the other Brain files.
+- ModEntry.cs `// VERIFY`: `typeof(ModEntry).Assembly.Location` is set for the mod the game loads. The log line `brain: repo ... (from the mod's brain/repo_path)` shows it worked without `repo` in config.json. When it is empty the brain still runs, but only `repo` in config.json finds the checkout.
+- The game loads the mod with the extra `brain/` folder next to the DLL (staged by `scripts/build.sh`).
+- In game: `/help` lists /start, /stop, /budget, /model and /effort. `/start` with a key plays on the API, `/budget` shows the spend, `/stop` stops it.
+- Subscription fallback (move `api_key` aside, then `/start` during a run): `claude auth status` passes, the session plays through `/mcp`, and `/stop` logs "asking Claude Code (pid N) to stop" followed by its exit, which shows the SIGINT through libc `kill` works from the mod (a "killing Claude Code" line after it means it fell back to a kill). "Claude Code exited with code ..." in the log shows Godot's own SIGCHLD handling doesn't keep `Process.Exited` from completing.
+- Quitting the game while Claude Code plays logs "brain: the game is closing; stopping the brains", and `pgrep -fl claude` afterwards finds no child left. Whether `AppDomain.ProcessExit` fires at all in the game is unknown; the root's `TreeExiting` is the one relied on.
+- The usage-limit wording of CLI 2.1.287, when it comes up, matches `SubscriptionBrain`'s pattern (the chat then says the subscription hit its limit).

@@ -48,11 +48,21 @@ public static class ModEntry
             var waiter = new DecisionWaiter(game, versioner);
             var tools = new BotTools(game, waiter, versioner, chat);
 
-            _server = new BridgeServer(ResolvePort(), tools, chat, Version, Log)
+            var port = ResolvePort();
+            _server = new BridgeServer(port, tools, chat, Version, Log)
             {
                 DebugScreenshot = _ => MainThread.Run(Screenshots.Take),
             };
             _server.Start();
+
+            // The in-game brain and its chat commands (docs/brain.md). Failing here only loses the brain.
+            try
+            {
+                // VERIFY: Assembly.Location is set for mods the game loads (it is empty for one loaded from bytes).
+                var location = typeof(ModEntry).Assembly.Location;
+                BrainWiring.Start(chat, tools, waiter, port, location.Length > 0 ? System.IO.Path.GetDirectoryName(location) : null, Log, LogError);
+            }
+            catch (Exception ex) { LogError($"brain skipped: {ex}"); }
 
             Overlay = StartOverlay(chat, ChatKeysPatched());
             tree.Connect(SceneTree.SignalName.ProcessFrame, Callable.From(OnFrame));

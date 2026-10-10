@@ -1,13 +1,14 @@
 # STS2B: a Claude-powered Slay the Spire 2 bot
 
-A personal-use mod that lets Claude (Opus, through Claude Code on a Max plan) play Slay the Spire 2, solo or as a co-op teammate. Not for distribution.
+A personal-use mod that lets Claude play Slay the Spire 2, solo or as a co-op teammate. It can play by itself from inside the game, on the Claude API with Claude Code on the Max plan as the fallback, or be driven by `/play` in Claude Code. Not for distribution.
 
 ## How it fits together
 
 ```
 Slay the Spire 2 (macOS)
   └─ SpireMind mod (C#, loaded from the game's mods folder)
-       ├─ chat box (T) where you talk to the bot, /pause and /resume
+       ├─ chat box (T) where you talk to the bot and type commands (/start, /pause...)
+       ├─ in-game brain: calls the Claude API itself, or runs Claude Code headless as the fallback
        └─ loopback HTTP server on 127.0.0.1:17772
             ├─ /mcp     MCP endpoint (Streamable HTTP, JSON responses)
             ├─ /state   current snapshot, for curl debugging
@@ -26,7 +27,7 @@ The mod turns whatever screen is up into a **snapshot**: the screen name, the fa
 
 | Path | What |
 | --- | --- |
-| `src/SpireMind.Core` | Game-agnostic bridge: HTTP server, MCP endpoint, snapshot versioning, decision waiter, a fake game for tests |
+| `src/SpireMind.Core` | Game-agnostic bridge: HTTP server, MCP endpoint, snapshot versioning, decision waiter, chat, the in-game brain, a fake game for tests |
 | `src/SpireMind` | The mod itself: entry point and per-screen readers against the game's assemblies |
 | `src/SpireMind.DevHost` | Runs the bridge on a fake fight so the Claude Code side can be tried without the game |
 | `tests/SpireMind.Core.Tests` | Unit and HTTP tests for the bridge |
@@ -47,6 +48,31 @@ curl -s http://127.0.0.1:17772/health
 
 Paths default to the Steam install under `~/Library/Application Support/Steam/steamapps/common/Slay the Spire 2`. Override `GAME_DIR` or `MODS_DIR` in `scripts/local.env` if yours differ. A Steam update can replace the app bundle, which removes anything inside it, so rerun `scripts/install.sh` after updates.
 
+## Letting the bot play by itself
+
+The mod can play without a Claude Code window open: it calls the Claude API with your own key and pays from your API credit. `docs/brain.md` has the details.
+
+Once, set up the key. Create an API key in the Claude Console, copy it, then in Terminal (paste the key between the quotes):
+
+```bash
+mkdir -p ~/.config/spiremind
+printf '%s\n' 'PASTE-THE-KEY-HERE' > ~/.config/spiremind/api_key
+chmod 600 ~/.config/spiremind/api_key
+```
+
+Never paste the key anywhere else: not in the game chat, config.json, a commit or a message to Claude. The mod reads it from that file and never logs or writes it. (Your shell may keep that printf line in its history. To avoid that, copy the key and run `printf '%s\n' "$(pbpaste)" > ~/.config/spiremind/api_key` instead.)
+
+Then, in game, open the chat (T) and type:
+
+- `/start`: the bot plays from wherever the run stands. It also starts by itself in later runs, until you type `/stop`.
+- `/stop`: the bot stops: no more API calls, and Claude Code quits if it was playing.
+- `/budget`: what the API has cost this month and this run, the model, and what is playing.
+- `/model`: shows the model; `/model opus`, `sonnet`, `haiku` or `fable` switches it.
+- `/effort`: shows the thinking effort; `/effort low`, `medium`, `high`, `xhigh` or `max` sets it.
+- `/pause` holds the bot so you can play a bit by hand, and `/resume` hands control back.
+
+Without a key, or once the API credit, the Console spend limit or the mod's own monthly cap (`monthly_budget_usd` in `~/.config/spiremind/config.json`, $200 by default) runs out, it plays on your Claude subscription instead, as long as Claude Code is installed and signed in (run `claude` once in Terminal and log in). The chat says when it switches, and the next run tries the API again.
+
 ## Talking to the bot in game
 
 The bot plays as its character and answers in that character's voice, taken from the game itself: its name, pronouns and some of its own lines (`get_persona`). Press **T** to open the chat box at the bottom left; the game's hotkeys stay quiet while you type. Enter sends and closes the box; Escape closes it; clicking away closes it and keeps what you typed for next time.
@@ -57,6 +83,7 @@ The bot plays as its character and answers in that character's voice, taken from
 - Commands take effect at once in the mod, without waiting for the model:
   - `/pause` stops the bot so you can play by hand. Chat keeps working.
   - `/resume` hands control back.
+  - `/start`, `/stop`, `/budget`, `/model` and `/effort` drive the in-game brain (above).
   - `/help` lists the commands.
 - `SPIREMIND_CHAT_KEY` picks another hotkey (a Godot `Key` name such as `Y`; Enter and Escape fall back to T). A key the game uses itself (a bound hotkey, F2, the dev console keys, V in co-op) will not open the chat; the log says so. `SPIREMIND_HUMAN_NAME` sets the name on your lines; it defaults to your OS user name, capitalised. Set them in the game's Steam launch options, e.g. `SPIREMIND_HUMAN_NAME=Mark %command%`.
 

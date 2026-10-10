@@ -8,4 +8,15 @@ set -euo pipefail
 stage="$REPO_ROOT/out/SpireMind"
 rm -rf "$stage" && mkdir -p "$stage"
 cp "$REPO_ROOT/out/build/SpireMind.dll" "$REPO_ROOT/src/SpireMind/SpireMind.json" "$stage/"
+
+# The in-game brain's prompt and strategy notes, for when the repo can't be found, and the
+# repo's path, so the brain finds the checkout without "repo" in config.json (docs/brain.md).
+brain="$stage/brain"
+mkdir -p "$brain/.claude/commands"
+cp "$REPO_ROOT/.claude/commands/play.md" "$brain/.claude/commands/"
+(cd "$REPO_ROOT" && find strategy -type f -name '*.md') | while IFS= read -r note; do
+  mkdir -p "$brain/$(dirname "$note")"
+  cp "$REPO_ROOT/$note" "$brain/$note"
+done
+printf '%s\n' "$REPO_ROOT" > "$brain/repo_path"
 echo "Staged $stage"
