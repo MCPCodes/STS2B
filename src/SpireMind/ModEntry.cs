@@ -58,7 +58,7 @@ public static class ModEntry
             // The in-game brain and its chat commands (docs/brain.md). Failing here only loses the brain.
             try
             {
-                // VERIFY: Assembly.Location is set for mods the game loads (it is empty for one loaded from bytes).
+                // The game loads mods with LoadFromAssemblyPath, so Location is the DLL's path (empty only for one loaded from bytes).
                 var location = typeof(ModEntry).Assembly.Location;
                 BrainWiring.Start(chat, tools, waiter, () => game.IsMultiplayer, port,
                     location.Length > 0 ? System.IO.Path.GetDirectoryName(location) : null, Log, LogError);
