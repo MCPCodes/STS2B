@@ -14,13 +14,13 @@ Slay the Spire 2 (macOS)
             ├─ /act     run one action, for curl debugging
             └─ /chat    post to or read the in-game chat, for curl debugging
 Claude Code (signed in with the Max plan)
-  └─ .mcp.json points at /mcp → tools: get_state, wait_for_decision, act, say, get_deck
+  └─ .mcp.json points at /mcp → tools: get_state, wait_for_decision, act, say, get_deck, get_persona
   └─ /play command + strategy/ notes = the brain
 ```
 
 The mod turns whatever screen is up into a **snapshot**: the screen name, the facts needed to decide (hand, energy, enemies and their intents, map, rewards, shop stock...) and a list of **legal actions** with short ids. The model only ever picks one of those ids, so it can't click something that doesn't exist. Every snapshot has a version; acting on a stale version is rejected instead of misfiring.
 
-`act` waits for the game to settle (animations, enemy turn) and returns the next decision, so a typical turn is one tool call per card. `say` puts a line in the in-game chat, and `get_deck` returns the full deck with card and relic text for build decisions.
+`act` waits for the game to settle (animations, enemy turn) and returns the next decision, so a typical turn is one tool call per card. `say` puts a line in the in-game chat, `get_deck` returns the full deck with card and relic text for build decisions, and `get_persona` describes the character the bot plays.
 
 ## Layout
 
@@ -49,10 +49,11 @@ Paths default to the Steam install under `~/Library/Application Support/Steam/st
 
 ## Talking to the bot in game
 
-The bot plays as its character and answers in that character's voice. Press **T** to open the chat box at the bottom left. Enter sends and closes the box; Escape closes it; clicking away closes it and keeps what you typed for next time.
+The bot plays as its character and answers in that character's voice, taken from the game itself: its name, pronouns and some of its own lines (`get_persona`). Press **T** to open the chat box at the bottom left; the game's hotkeys stay quiet while you type. Enter sends and closes the box; Escape closes it; clicking away closes it and keeps what you typed for next time.
 
-- Address the bot by its character's name: "Ironclad, go for Strength", "hey Silent", "@Defect". With one bot, a message without a name reaches it too. A message that starts with another character's name is left for that bot. Between runs, before a character is picked, every message reaches it.
+- Address the bot by its character's name: "Ironclad, go for Strength", "hey Silent", "@Defect". With one bot, a message without a name reaches it too. A message that starts with another character's name is left for that bot. At character select it answers to the character you just picked; with nothing picked (or Random), and on the other menus, every message reaches it.
 - It sees your message on its next tool call, answers in a line or two and follows orders. Standing orders go under Orders in `runs/current.md` and last the whole run.
+- Its lines show in the chat log and as the game's own speech bubbles over its character. While it is thinking over a move in combat, a thought cloud shows over it.
 - Commands take effect at once in the mod, without waiting for the model:
   - `/pause` stops the bot so you can play by hand. Chat keeps working.
   - `/resume` hands control back.
@@ -68,7 +69,7 @@ curl -s 'http://127.0.0.1:17772/chat?since=0'    # the log, the bot's name and t
 
 `/state` and `/act` show the bot's unread messages under `chat` but leave them unread, so checking on the bot with curl doesn't take its messages.
 
-See `docs/chat.md` for the design.
+See `docs/chat.md` for the design and `docs/chat-and-persona.md` for what the game offers.
 
 ## Ground rules
 

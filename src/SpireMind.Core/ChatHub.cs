@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
 namespace SpireMind.Core;
@@ -17,9 +18,10 @@ public sealed record PostResult(PostOutcome Outcome, string? Reply = null);
 
 /// <summary>
 /// The in-game chat between the human and the bot: the line log the overlay shows, the
-/// messages the model hasn't read yet, and the pause switch. The overlay posts on the main
-/// thread and the tools read on HTTP worker threads, so one lock guards everything and
-/// <see cref="LineAdded"/> is raised only after it is released. See docs/chat.md.
+/// messages the model hasn't read yet, the pause switch, who the bot is playing and whether
+/// it is deciding. The overlay posts on the main thread and the tools read on HTTP worker
+/// threads, so one lock guards everything and <see cref="LineAdded"/> is raised only after
+/// it is released. See docs/chat.md.
 /// </summary>
 public sealed partial class ChatHub
 {
@@ -34,6 +36,8 @@ public sealed partial class ChatHub
     private readonly Queue<DateTime> _recentSays = new();
     private string? _botName;
     private string? _pausedBy;
+    private JsonObject? _persona;
+    private DateTime? _thinkingSince;
     private long _seq;
 
     /// <param name="clock">Time source for tests; defaults to <see cref="DateTime.UtcNow"/>.</param>
@@ -59,6 +63,35 @@ public sealed partial class ChatHub
     public IReadOnlyList<string> KnownNames { get; init; } = ["Ironclad", "Silent", "Defect", "Regent", "Necrobinder"];
 
     public int MaxSayLength { get; init; } = 280;
+
+    /// <summary>The character this bot plays as the game describes it (name, title, pronouns,
+    /// tone, some of its own lines), for get_persona. The game side replaces it whole when the
+    /// character changes and sets it to null when there is none. Both ways it is a deep copy,
+    /// so neither side can change the other's.</summary>
+    public JsonObject? Persona
+    {
+        get { lock (_gate) return _persona?.DeepClone().AsObject(); }
+        set
+        {
+            var copy = value?.DeepClone().AsObject();
+            lock (_gate) _persona = copy;
+        }
+    }
+
+    /// <summary>When (UTC) the bot was handed a decision it hasn't acted on yet, or null. The
+    /// speech bubbles show a thought cloud from it. BotTools keeps it through
+    /// <see cref="MarkThinking"/>, and /pause clears it. A mark older than
+    /// <see cref="ThinkingStaleAfter"/> reads as null: the session ended or the model stopped
+    /// mid-decision, and nothing else would ever clear it.</summary>
+    public DateTime? ThinkingSince
+    {
+        get { lock (_gate) return FreshThinking(); }
+    }
+
+    /// <summary>How long a decision can go unanswered before it no longer counts as being
+    /// decided. Above BotTools' longest wait, since a model that hasn't called a tool in that
+    /// long isn't deciding.</summary>
+    public TimeSpan ThinkingStaleAfter { get; init; } = TimeSpan.FromMinutes(5);
 
     public bool Paused
     {
@@ -151,6 +184,16 @@ public sealed partial class ChatHub
         return line;
     }
 
+    /// <summary>
+    /// True when a tool result hands the model a decision. An earlier time is kept, so a
+    /// get_state after wait_for_decision doesn't restart the clock, unless it has gone stale.
+    /// False once it acts, while it is paused, and when a result has nothing to decide.
+    /// </summary>
+    public void MarkThinking(bool thinking)
+    {
+        lock (_gate) _thinkingSince = thinking ? FreshThinking() ?? _clock() : null;
+    }
+
     /// <summary>Hands over the unread messages addressed to this bot and marks them read.</summary>
     public IReadOnlyList<ChatMessage> TakeUnread()
     {
@@ -186,6 +229,10 @@ public sealed partial class ChatHub
         return line;
     }
 
+    // Caller holds _gate. The thinking mark, or null once it is older than ThinkingStaleAfter.
+    private DateTime? FreshThinking() =>
+        _thinkingSince is { } since && _clock() - since < ThinkingStaleAfter ? since : null;
+
     // Caller holds _gate. Null when the text isn't a command.
     private string? CommandReply(string from, string text)
     {
@@ -196,6 +243,7 @@ public sealed partial class ChatHub
                 if (_pausedBy is not null)
                     return $"{bot} is already paused by {_pausedBy}. Type /resume to hand back control.";
                 _pausedBy = from;
+                _thinkingSince = null; // it can't act on the decision it was handed
                 return $"{bot} paused. Type /resume to hand back control.";
 
             case "/resume":

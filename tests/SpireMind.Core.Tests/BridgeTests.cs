@@ -90,7 +90,7 @@ public class BridgeTests
 
         var list = mcp.HandleAsync("""{"jsonrpc":"2.0","id":2,"method":"tools/list"}""", default).Result!;
         var names = list["result"]!["tools"]!.AsArray().Select(t => t!["name"]!.GetValue<string>()).ToArray();
-        Assert.Equal(["get_state", "wait_for_decision", "act", "say", "get_deck"], names);
+        Assert.Equal(["get_state", "wait_for_decision", "act", "say", "get_deck", "get_persona"], names);
 
         var call = mcp.HandleAsync("""{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_state","arguments":{}}}""", default).Result!;
         var text = call["result"]!["content"]![0]!["text"]!.GetValue<string>();

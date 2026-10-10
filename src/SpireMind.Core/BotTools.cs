@@ -8,10 +8,11 @@ public sealed record ToolOutcome(JsonNode Payload, bool IsError = false);
 
 /// <summary>
 /// The small tool surface the model plays through. Kept deliberately narrow: read the
-/// state, wait for your turn, do one legal action, talk to the human, look at the deck.
-/// Everything the model needs to decide is in the snapshot, so there is no per-screen tool
-/// zoo to learn. Every result carries a "chat" key when the human has written or paused
-/// the bot (see docs/chat.md).
+/// state, wait for your turn, do one legal action, talk to the human, look at the deck, ask
+/// who you are. Everything the model needs to decide is in the snapshot, so there is no
+/// per-screen tool zoo to learn. Every result carries a "chat" key when the human has written
+/// or paused the bot, and results that hand over a decision mark the bot as thinking, for the
+/// thought cloud over its character (see docs/chat.md).
 /// </summary>
 public sealed class BotTools
 {
@@ -64,8 +65,9 @@ public sealed class BotTools
         new("say",
             "Say something in the game's chat. This is how you talk to the human playing with you: answer what they " +
             "wrote in chat.messages, or call out a big moment. Speak in character as the character you play " +
-            "(chat.you_are), briefly, a sentence or two. Long lines are cut at 280 characters and more than 6 lines " +
-            "in 10 seconds are refused.",
+            "(chat.you_are, get_persona), briefly, a sentence or two. The line also shows as a speech bubble over your " +
+            "character, about 100 characters a bubble, so short lines read best. Long lines are cut at 280 characters " +
+            "and more than 6 lines in 10 seconds are refused.",
             Schema(new JsonObject
             {
                 ["text"] = new JsonObject { ["type"] = "string", ["description"] = "What your character says" },
@@ -74,6 +76,13 @@ public sealed class BotTools
             "Return the full deck with each card's text, plus relics with their text, potions, HP and gold. " +
             "Use it for build decisions (card rewards, shops, deciding Smith vs Rest, events that touch the deck); " +
             "map, reward, shop and rest snapshots only carry deck name counts. Removal and upgrade pickers already list their cards with text.",
+            Schema(new JsonObject())),
+        new("get_persona",
+            "Return who you are as the game describes your character: name, title, pronouns, tone, and some of the " +
+            "character's own lines from the game (voice_lines). At character select it is the character just picked. " +
+            "Call it once at the start and again after context compaction, then talk in that voice with say: borrow " +
+            "the feel of voice_lines, don't quote them back. If it says no character yet, or your character " +
+            "(state.player.character, chat.you_are) is not the one it named, call it again once the run has started.",
             Schema(new JsonObject())),
     ];
 
@@ -85,7 +94,8 @@ public sealed class BotTools
         CallAsync(name, args, takeChat: true, ct);
 
     /// <param name="takeChat">False for the curl debugging routes: unread messages are shown
-    /// but stay unread, so peeking at /state doesn't take them from the model.</param>
+    /// but stay unread, so peeking at /state doesn't take them from the model, and the result
+    /// doesn't mark the bot as thinking, since nothing was handed to the model.</param>
     internal async Task<ToolOutcome> CallAsync(string name, JsonObject args, bool takeChat, CancellationToken ct)
     {
         ToolOutcome outcome;
@@ -98,6 +108,7 @@ public sealed class BotTools
                 "act" => await ActAsync(args, ct),
                 "say" => Say(args),
                 "get_deck" => new ToolOutcome(await _game.DescribeDeckAsync(ct)),
+                "get_persona" => Persona(),
                 _ => new ToolOutcome(Error($"Unknown tool '{name}'"), IsError: true),
             };
         }
@@ -109,6 +120,7 @@ public sealed class BotTools
         {
             outcome = new ToolOutcome(Error($"{ex.GetType().Name}: {ex.Message}"), IsError: true);
         }
+        if (takeChat) TrackThinking(name, outcome.Payload);
         return outcome with { Payload = WithChat(outcome.Payload, takeChat) };
     }
 
@@ -140,6 +152,9 @@ public sealed class BotTools
 
     private async Task<ToolOutcome> ActAsync(JsonObject args, CancellationToken ct)
     {
+        // Whatever comes of it, the decision the model was handed is spent; the result marks the next one.
+        _chat.MarkThinking(false);
+
         var actionId = (args["action_id"] as JsonValue)?.GetValue<string>();
         if (string.IsNullOrWhiteSpace(actionId))
             return new ToolOutcome(Error("action_id is required"), IsError: true);
@@ -184,6 +199,11 @@ public sealed class BotTools
         }
     }
 
+    private ToolOutcome Persona() =>
+        _chat.Persona is { } persona
+            ? new ToolOutcome(persona)
+            : new ToolOutcome(Error("no character yet; call get_persona again once the run has started"), IsError: true);
+
     private ToolOutcome Rejected(string why, GameSnapshot current) =>
         new(new JsonObject { ["error"] = why, ["current"] = Present(current) }, IsError: true);
 
@@ -205,6 +225,32 @@ public sealed class BotTools
             Waiting = $"paused by {pausedBy}",
             State = snap.State,
         }.ToJson();
+    }
+
+    /// <summary>
+    /// Keeps <see cref="ChatHub.ThinkingSince"/> on whether the model holds a decision: set when
+    /// the snapshot a result hands back awaits one with actions (act's next, or the current one
+    /// it was refused against), cleared when it doesn't. Paused snapshots never await one. say,
+    /// get_deck and get_persona leave it alone, since the model may call them mid-decision.
+    /// </summary>
+    private void TrackThinking(string tool, JsonNode payload)
+    {
+        JsonNode? snapshot;
+        switch (tool)
+        {
+            case "get_state" or "wait_for_decision":
+                snapshot = payload;
+                break;
+            case "act":
+                snapshot = payload is JsonObject reply ? reply["next"] ?? reply["current"] : null;
+                break;
+            default:
+                return;
+        }
+        var awaiting = snapshot is JsonObject s
+                       && s["awaiting_decision"] is JsonValue v && v.TryGetValue<bool>(out var a) && a
+                       && s["actions"] is JsonArray { Count: > 0 };
+        _chat.MarkThinking(awaiting);
     }
 
     /// <summary>

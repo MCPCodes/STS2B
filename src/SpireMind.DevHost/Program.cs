@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using SpireMind.Core;
 
 var port = args.Length > 0 && int.TryParse(args[0], out var p) ? p : 17772;
@@ -5,7 +6,12 @@ var port = args.Length > 0 && int.TryParse(args[0], out var p) ? p : 17772;
 var game = new FakeGame();
 var versioner = new SnapshotVersioner();
 var waiter = new DecisionWaiter(game, versioner);
-var chat = new ChatHub { BotName = "Ironclad" };
+// A small stand-in for the persona Identity reads from the game, so get_persona works here too.
+var chat = new ChatHub
+{
+    BotName = "Ironclad",
+    Persona = new JsonObject { ["name"] = "Ironclad", ["title"] = "The Ironclad", ["id"] = "IRONCLAD", ["tone"] = "A terse, grim soldier." },
+};
 chat.LineAdded += line => Console.WriteLine(line.From.Length > 0 ? $"chat {line.From}: {line.Text}" : $"chat: {line.Text}");
 var tools = new BotTools(game, waiter, versioner, chat);
 
