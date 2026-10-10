@@ -141,6 +141,21 @@ public class BridgeTests
     }
 
     [Fact]
+    public void Mcp_tool_text_keeps_action_ids_quotes_and_plus_signs_readable()
+    {
+        var (tools, _) = Build();
+        var mcp = new McpEndpoint(tools, "test");
+
+        var state = mcp.HandleAsync("""{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_state","arguments":{}}}""", default).Result!;
+        Assert.Contains("play:0>e0", state["result"]!["content"]![0]!["text"]!.GetValue<string>());
+
+        var act = mcp.HandleAsync("""{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"act","arguments":{"action_id":"play:9>e0+"}}}""", default).Result!;
+        var text = act["result"]!["content"]![0]!["text"]!.GetValue<string>();
+        Assert.Contains("'play:9>e0+' is not a legal action", text);
+        Assert.DoesNotContain("\\u00", text);
+    }
+
+    [Fact]
     public void Mcp_unknown_method_and_bad_json()
     {
         var (tools, _) = Build();

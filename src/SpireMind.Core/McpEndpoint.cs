@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -17,6 +18,10 @@ public sealed class McpEndpoint
     public const string LatestProtocol = "2025-06-18";
 
     private static readonly string[] SupportedProtocols = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+
+    // Tool results are read by a model, not put in a web page, so ">" in action ids and "+" in
+    // upgraded card names stay as they are instead of becoming \u003E and \u002B.
+    private static readonly JsonSerializerOptions ModelJson = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
     private readonly BotTools _tools;
     private readonly string _serverVersion;
@@ -178,7 +183,7 @@ public sealed class McpEndpoint
             ["content"] = new JsonArray(new JsonObject
             {
                 ["type"] = "text",
-                ["text"] = outcome.Payload.ToJsonString(),
+                ["text"] = outcome.Payload.ToJsonString(ModelJson),
             }),
             ["isError"] = outcome.IsError,
         });
