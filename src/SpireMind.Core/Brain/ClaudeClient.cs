@@ -194,29 +194,46 @@ public sealed class ClaudeClient : IClaudeApi, IDisposable
     // Connects as the handler would, with TCP keep-alive probes every 15 s after 60 s of silence,
     // so a router doesn't drop the connection while a long reply is being written. Where an
     // option can't be set, the connection goes ahead without it.
+    //
+    // The name is resolved here and each address gets its own socket. Connecting by name on a
+    // socket that has had an option set fails on macOS as soon as the first address doesn't
+    // answer ("Sockets on this platform are invalid for use after a failed connection attempt"),
+    // and with it every request.
     private static async ValueTask<System.IO.Stream> ConnectWithKeepAliveAsync(SocketsHttpConnectionContext context, CancellationToken ct)
     {
-        var socket = new System.Net.Sockets.Socket(System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp) { NoDelay = true };
-        try
+        var addresses = await System.Net.Dns.GetHostAddressesAsync(context.DnsEndPoint.Host, ct).ConfigureAwait(false);
+        Exception? last = null;
+        foreach (var address in addresses)
         {
+            var socket = new System.Net.Sockets.Socket(address.AddressFamily, System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp) { NoDelay = true };
             try
             {
-                socket.SetSocketOption(System.Net.Sockets.SocketOptionLevel.Socket, System.Net.Sockets.SocketOptionName.KeepAlive, true);
-                socket.SetSocketOption(System.Net.Sockets.SocketOptionLevel.Tcp, System.Net.Sockets.SocketOptionName.TcpKeepAliveTime, 60);
-                socket.SetSocketOption(System.Net.Sockets.SocketOptionLevel.Tcp, System.Net.Sockets.SocketOptionName.TcpKeepAliveInterval, 15);
+                try
+                {
+                    socket.SetSocketOption(System.Net.Sockets.SocketOptionLevel.Socket, System.Net.Sockets.SocketOptionName.KeepAlive, true);
+                    socket.SetSocketOption(System.Net.Sockets.SocketOptionLevel.Tcp, System.Net.Sockets.SocketOptionName.TcpKeepAliveTime, 60);
+                    socket.SetSocketOption(System.Net.Sockets.SocketOptionLevel.Tcp, System.Net.Sockets.SocketOptionName.TcpKeepAliveInterval, 15);
+                }
+                catch (Exception ex) when (ex is System.Net.Sockets.SocketException or PlatformNotSupportedException)
+                {
+                    // Keep-alive is a nicety; the request works without it.
+                }
+                await socket.ConnectAsync(new System.Net.IPEndPoint(address, context.DnsEndPoint.Port), ct).ConfigureAwait(false);
+                return new System.Net.Sockets.NetworkStream(socket, ownsSocket: true);
             }
-            catch (Exception ex) when (ex is System.Net.Sockets.SocketException or PlatformNotSupportedException)
+            catch (Exception ex) when (ex is System.Net.Sockets.SocketException && !ct.IsCancellationRequested)
             {
-                // Keep-alive is a nicety; the request works without it.
+                // This address doesn't answer (IPv6 with no route, say); the next one may.
+                socket.Dispose();
+                last = ex;
             }
-            await socket.ConnectAsync(context.DnsEndPoint, ct).ConfigureAwait(false);
-            return new System.Net.Sockets.NetworkStream(socket, ownsSocket: true);
+            catch
+            {
+                socket.Dispose();
+                throw;
+            }
         }
-        catch
-        {
-            socket.Dispose();
-            throw;
-        }
+        throw last ?? new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.HostNotFound);
     }
 
     /// <summary>Maps an error response to a kind and decides whether it is worth another try.</summary>
