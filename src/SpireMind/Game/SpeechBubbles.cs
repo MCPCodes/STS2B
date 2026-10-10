@@ -40,6 +40,9 @@ internal static class SpeechBubbles
     /// <summary>A bubble cut short with less than this left to go isn't shown again.</summary>
     private const double MinCarry = 0.6;
 
+    /// <summary>A bubble cut short this soon was still fading in, so it gets its whole time again.</summary>
+    private const double BarelySeen = 1.0;
+
     /// <summary>How long the bot has been deciding before the thought cloud shows, so quick moves don't flash it.</summary>
     private static readonly TimeSpan ThinkDelay = TimeSpan.FromSeconds(2.5);
 
@@ -66,8 +69,12 @@ internal static class SpeechBubbles
     /// <summary>When the bubble on screen was shown, to tell in the log how long one lasted.</summary>
     private static DateTime _bubbleShown;
 
-    /// <summary>The chunk on screen as it was queued: what a room change carries over.</summary>
+    /// <summary>The chunk on screen as it was queued, and how long it was given: what a room change carries over.</summary>
     private static string? _bubbleChunk;
+    private static double _bubbleSecs;
+
+    /// <summary>Which spot the bubble on screen took, for the log.</summary>
+    private static string _bubbleSpot = "";
 
     /// <summary>
     /// True when the bubble on screen sits in the room (over the creature, at the rest site or
@@ -146,7 +153,12 @@ internal static class SpeechBubbles
                 CarryOver(now);
             }
 
-            AdvanceSpeech(now);
+            // Travelling between rooms fades the whole screen to black, the top-bar layer included,
+            // so a line spoken just before a move waits for the next room.
+            var fading = ScreenFading();
+            if (fading && _bubble is not null) CarryOver(now, whereverItIs: true);
+
+            AdvanceSpeech(now, fading);
             UpdateCloud(hub, now);
         }
         catch (Exception ex)
@@ -168,7 +180,7 @@ internal static class SpeechBubbles
 
     // ---------- speech ----------
 
-    private static void AdvanceSpeech(DateTime now)
+    private static void AdvanceSpeech(DateTime now, bool fading)
     {
         // A bubble frees itself when its time is up (and with its room). Past that, one still
         // around is faded out here, so it can't hang over the screen.
@@ -177,7 +189,7 @@ internal static class SpeechBubbles
         if (_bubble is not null && (now >= _bubbleGone || !GodotObject.IsInstanceValid(_bubble)))
             DismissBubble();
 
-        if ((_carried is null && Pending.Count == 0) || (_bubble is not null && now < _bubbleDone)) return;
+        if (fading || (_carried is null && Pending.Count == 0) || (_bubble is not null && now < _bubbleDone)) return;
 
         DismissBubble();
         EndCloud();
@@ -195,24 +207,40 @@ internal static class SpeechBubbles
         }
         _bubble = Show(Escape(chunk), secs, out _bubbleInRoom);
         _bubbleChunk = chunk;
+        _bubbleSecs = secs;
         _bubbleShown = now;
         _bubbleDone = now + TimeSpan.FromSeconds(FadeIn + Math.Max(secs - 1, 1));
         _bubbleGone = _bubbleDone + TimeSpan.FromSeconds(FadeOut + Margin);
-        Trace($"shown for {secs:0.0}s {Where(_bubble)}: \"{(chunk.Length > 40 ? chunk[..40] + "..." : chunk)}\"");
+        Trace($"shown for {secs:0.0}s, {_bubbleSpot} spot, {Where(_bubble)}: \"{(chunk.Length > 40 ? chunk[..40] + "..." : chunk)}\"");
     }
 
     /// <summary>
-    /// Takes down a bubble that sits in the room and queues what is left of its time to be
-    /// shown again, by the top bar if the room is gone or covered. A bubble already by the top
-    /// bar stays as it is. One with too little time left to read is just dropped.
+    /// Takes down a bubble the player can no longer see and queues it to be shown again: one
+    /// that sat in the room when the room went away or was covered, or any bubble
+    /// (<paramref name="whereverItIs"/>) when the screen fades to black. Shown under a second
+    /// it was still fading in and gets its whole time again; otherwise what was left of it. One
+    /// that was about done is left to finish.
     /// </summary>
-    private static void CarryOver(DateTime now)
+    private static void CarryOver(DateTime now, bool whereverItIs = false)
     {
-        if (_bubble is null || !_bubbleInRoom || _bubbleChunk is not { } chunk) return;
+        if (_bubble is null || _bubbleChunk is not { } chunk || (!_bubbleInRoom && !whereverItIs)) return;
+        var seen = (now - _bubbleShown).TotalSeconds;
         var left = (_bubbleDone - now).TotalSeconds;
-        Trace($"carried over after {(now - _bubbleShown).TotalSeconds:0.0}s with {Math.Max(left, 0):0.0}s left");
+        if (left < MinCarry) return;
+        Trace($"carried over from the {_bubbleSpot} spot after {seen:0.0}s with {left:0.0}s left");
         DismissBubble();
-        if (left >= MinCarry) _carried = (chunk, Math.Max(left + 1 - FadeIn, MinSeconds));
+        _carried = (chunk, seen < BarelySeen ? _bubbleSecs : Math.Max(left + 1 - FadeIn, MinSeconds));
+    }
+
+    /// <summary>The game is fading between screens; nothing drawn now would be seen.</summary>
+    private static bool ScreenFading()
+    {
+        try { return NGame.Instance?.Transition?.InTransition == true; }
+        catch (Exception ex)
+        {
+            LogOnce("transition check", ex);
+            return false;
+        }
     }
 
     /// <summary>Where a bubble ended up, for the log: its parent, position and whether it can be seen.</summary>
@@ -233,7 +261,7 @@ internal static class SpeechBubbles
     }
 
     /// <summary>One log line per bubble shown or cut short, while bubble placement is being settled in game.</summary>
-    private static void Trace(string what) => ModEntry.Log($"speech bubble: {what}");
+    private static void Trace(string what) => ModEntry.Log($"speech bubble {DateTime.UtcNow:HH:mm:ss.fff}: {what}");
 
     /// <summary>
     /// Creates the bubble at the spot the docs give for where the local player is, and parents
@@ -246,26 +274,41 @@ internal static class SpeechBubbles
         var ctx = GameContext.Capture();
         var color = BubbleColor(ctx.Me);
         if (!ctx.InRun || NGame.Instance?.MainMenu is not null)
+        {
+            _bubbleSpot = "screen";
             return Place(ScreenSpot(), text, secs, color) ?? NoSpot();
+        }
 
         NSpeechBubbleVfx? bubble = null;
         if (!RoomCovered())
         {
             if (ctx.InCombat && ctx.Me is { } me)
-                bubble = OverCreature(me, text, secs, color);
+                (bubble, _bubbleSpot) = (OverCreature(me, text, secs, color), "creature");
             else if (ctx.Run?.CurrentRoom?.RoomType == RoomType.RestSite)
-                bubble = Place(RestSiteSpot(ctx), text, secs, color);
+                (bubble, _bubbleSpot) = (Place(RestSiteSpot(ctx), text, secs, color), "rest site");
             else if (ctx.Run?.CurrentRoom?.RoomType == RoomType.Shop)
-                bubble = Place(ShopSpot(), text, secs, color);
+                (bubble, _bubbleSpot) = (Place(ShopSpot(), text, secs, color), "shop");
         }
         if (bubble is not null)
         {
             inRoom = true;
             return bubble;
         }
-        return Place(PortraitSpot(), text, secs, color)
-            ?? Place(ScreenSpot(), text, secs, color)
-            ?? NoSpot();
+
+        // Rewards and card picks sit over the fight just won, and that is where the player is
+        // looking: over the character still, but on the layer above the overlay.
+        if (Place(AboveOverlaySpot(ctx.Me), text, secs, color) is { } above)
+        {
+            _bubbleSpot = "over the character, above the overlay";
+            return above;
+        }
+        if (Place(PortraitSpot(), text, secs, color) is { } byPortrait)
+        {
+            _bubbleSpot = "portrait";
+            return byPortrait;
+        }
+        _bubbleSpot = "screen";
+        return Place(ScreenSpot(), text, secs, color) ?? NoSpot();
     }
 
     /// <summary>Fight: the factory that finds the creature's node and sits the bubble above its head.</summary>
@@ -354,7 +397,11 @@ internal static class SpeechBubbles
     /// <summary>The map or an overlay screen (rewards, card choices) hides the room, so a bubble in it wouldn't be seen.</summary>
     private static bool RoomCovered()
     {
-        try { return NMapScreen.Instance?.IsOpen == true || Nodes.TopOverlay() is not null; }
+        try
+        {
+            return NMapScreen.Instance?.IsOpen == true || Nodes.TopOverlay() is not null
+                   || NCapstoneContainer.Instance?.InUse == true; // the deck view or pause menu
+        }
         catch (Exception ex)
         {
             LogOnce("overlay check", ex);
@@ -416,6 +463,31 @@ internal static class SpeechBubbles
         catch (Exception ex)
         {
             LogOnce("shop spot", ex);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Over the character while its fight's room is still up but covered by rewards or a card
+    /// pick: the game's own speech position for the creature, on the top-bar layer, which draws
+    /// above overlays. Null with the map or a capstone up (they hide the room for good), with
+    /// no fight room, or when the creature has no node.
+    /// </summary>
+    private static Spot? AboveOverlaySpot(Player? me)
+    {
+        try
+        {
+            if (me?.Creature is not { IsAlive: true } creature) return null;
+            if (NMapScreen.Instance?.IsOpen == true || NCapstoneContainer.Instance?.InUse == true) return null;
+            var room = NCombatRoom.Instance;
+            if (!Nodes.Alive(room) || !Nodes.Alive(room.GetCreatureNode(creature))) return null;
+            if (NRun.Instance?.GlobalUi?.AboveTopBarVfxContainer is not Node layer || !Nodes.Alive(layer)) return null;
+            var at = NThoughtBubbleVfx.GetCreatureSpeechPosition(creature);
+            return at == Vector2.Zero ? null : new Spot(layer, at);
+        }
+        catch (Exception ex)
+        {
+            LogOnce("spot above the overlay", ex);
             return null;
         }
     }
