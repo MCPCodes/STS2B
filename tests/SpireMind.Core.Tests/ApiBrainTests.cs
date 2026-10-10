@@ -324,6 +324,27 @@ public class ApiBrainTests
     }
 
     [Fact]
+    public async Task An_effort_switch_alone_starts_a_fresh_conversation()
+    {
+        using var rig = new Rig();
+        rig.Host.Handler = (name, _, _) =>
+        {
+            if (name == "say") rig.Settings = rig.Settings with { Effort = "low" };
+            return Task.FromResult(Outcome(Snap("combat", true, marker: "after-effort")));
+        };
+        rig.Api.Then(Reply("tool_use", null, ToolUse("toolu_1", "say", new JsonObject { ["text"] = "Quicker now." })));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(rig.Api[0]["model"]!.GetValue<string>(), rig.Api[1]["model"]!.GetValue<string>());
+        Assert.Equal("low", rig.Api[1]["output_config"]!["effort"]!.GetValue<string>());
+        var text = Text(Assert.Single(rig.Api[1]["messages"]!.AsArray())!);
+        Assert.StartsWith(ApiBrain.ModelChanged, text);
+        Assert.Contains("after-effort", text);
+    }
+
+    [Fact]
     public async Task Monthly_cap_stops_before_any_request()
     {
         using var rig = new Rig();

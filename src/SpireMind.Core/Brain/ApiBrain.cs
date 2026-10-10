@@ -53,7 +53,7 @@ public enum BrainStopReason
 /// Start, stop and the status properties are safe to call from any thread; everything else
 /// runs on the loop's task. See docs/brain.md.
 /// </summary>
-public sealed class ApiBrain
+public sealed class ApiBrain : IPlayBrain
 {
     /// <summary>The reply when the model ends its turn during a run.</summary>
     public const string KeepPlaying = "Keep playing: call wait_for_decision.";
@@ -74,9 +74,10 @@ public sealed class ApiBrain
     /// with the notes reloaded so lessons written at the end of the last run are in.</summary>
     public const string NewRun = "A new run started (or the character or co-op changed), so the strategy notes in the system prompt were reloaded and the conversation starts over.";
 
-    /// <summary>Opens a conversation after /model switched models. The cache belongs to a model and
-    /// thinking blocks to the model that wrote them, so a short start is cheaper than the old history.</summary>
-    public const string ModelChanged = "The model changed, so the conversation starts over.";
+    /// <summary>Opens a conversation after /model or /effort changed the settings. The cache belongs to
+    /// a model, thinking blocks to the model that wrote them, and a new effort invalidates the cached
+    /// messages, so a short start is cheaper than the old history.</summary>
+    public const string ModelChanged = "The model or effort changed, so the conversation starts over.";
 
     /// <summary>Ends every opening message.</summary>
     public const string CarryOn = "Carry on from here.";
@@ -139,6 +140,7 @@ public sealed class ApiBrain
     private bool _newRunPending;
     private long? _conversationBaseTokens;
     private string? _conversationModel;
+    private string? _conversationEffort;
     private int _endTurnsInRow;
     private int _cutOffsInRow;
     private int _conversation;
@@ -444,13 +446,15 @@ public sealed class ApiBrain
                 Invariant($"Monthly API budget reached: ${_spend.MonthTotal(now):0.00} of ${cap:0.00} spent this month, so the API brain stopped."));
 
         var model = BrainSettings.ResolveModel(settings.Model);
-        if (_conversationModel is not null && _conversationModel != model && _messages.Count > 1)
+        var effort = string.IsNullOrWhiteSpace(settings.Effort) ? null : settings.Effort;
+        if (_conversationModel is not null && (_conversationModel != model || _conversationEffort != effort) && _messages.Count > 1)
         {
-            Log($"brain: model changed from {_conversationModel} to {model}; starting a fresh conversation");
+            Log($"brain: model or effort changed ({_conversationModel}, {_conversationEffort ?? "default"} to {model}, {effort ?? "default"}); starting a fresh conversation");
             StartConversation(ModelChanged);
         }
         _conversationModel = model;
-        var request = BuildRequest(model, settings.Effort);
+        _conversationEffort = effort;
+        var request = BuildRequest(model, effort);
         var sentAt = _clock();
         if (await SendAsync(request, ct) is not { } response)
         {
