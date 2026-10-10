@@ -43,6 +43,9 @@ internal static class SpeechBubbles
     /// <summary>A bubble cut short this soon was still fading in, so it gets its whole time again.</summary>
     private const double BarelySeen = 1.0;
 
+    /// <summary>A fade lasting longer than this got stuck (the game failed mid-transition); speech stops waiting for it.</summary>
+    private static readonly TimeSpan FadeStuck = TimeSpan.FromSeconds(20);
+
     /// <summary>How long the bot has been deciding before the thought cloud shows, so quick moves don't flash it.</summary>
     private static readonly TimeSpan ThinkDelay = TimeSpan.FromSeconds(2.5);
 
@@ -83,8 +86,18 @@ internal static class SpeechBubbles
     /// </summary>
     private static bool _bubbleInRoom;
 
+    /// <summary>
+    /// True when the bubble on screen points at the character's figure from the layer above
+    /// the overlays. It outlives overlays, but not the map, a capstone or the fight's room,
+    /// which take the figure away.
+    /// </summary>
+    private static bool _bubbleOverFigure;
+
     /// <summary>A chunk cut short when its room went away or was covered, to show again where it can be seen.</summary>
     private static (string Chunk, double Secs)? _carried;
+
+    /// <summary>When the screen began fading, to stop holding speech for a fade that never ends.</summary>
+    private static DateTime? _fadingSince;
 
     /// <summary>When the next chunk may replace <see cref="_bubble"/>: the moment it would start fading out by itself.</summary>
     private static DateTime _bubbleDone;
@@ -131,31 +144,29 @@ internal static class SpeechBubbles
             var place = CurrentPlace();
             if (place != _place)
             {
-                if (place.Run is null || !ReferenceEquals(place.Run, _place.Run))
-                {
-                    // A new run, the end of one or the main menu: nothing said before belongs here.
-                    Clear();
-                }
-                else
-                {
-                    // Another room of the same run. The bot often speaks and moves on in the same
-                    // breath (a map node, an event's Leave), so its line carries over instead of
-                    // going with the room. The thought cloud is the room's.
-                    EndCloud();
-                    CarryOver(now);
-                }
+                // The bot often speaks and moves on in the same breath (a map node, an event's
+                // Leave, the last word before the main menu), so its line carries over instead of
+                // going with the room or the run. Chunks waiting are only seconds old. The
+                // thought cloud is the room's.
+                EndCloud();
+                var runChanged = place.Run is null || !ReferenceEquals(place.Run, _place.Run);
+                CarryOver(now, whereverItIs: runChanged);
+                if (runChanged) DismissBubble(); // one too far gone to carry still goes with its run
                 _place = place;
                 _placeSince = now;
             }
-            else if (_bubble is not null && _bubbleInRoom && RoomCovered())
+            else if (_bubble is not null && (_bubbleInRoom ? RoomCovered() : _bubbleOverFigure && FigureHidden()))
             {
-                // Rewards or the map opened over the fight the line was spoken in.
-                CarryOver(now);
+                // Rewards or the map opened over the fight the line was spoken in, or the map or
+                // deck view opened over the figure it pointed at. Freed at once: the new bubble
+                // may take the same spot.
+                CarryOver(now, whereverItIs: true, atOnce: true);
             }
 
-            // Travelling between rooms fades the whole screen to black, the top-bar layer included,
-            // so a line spoken just before a move waits for the next room.
-            var fading = ScreenFading();
+            // Travelling between rooms fades the run's whole screen to black, the top-bar layer
+            // included, so a line spoken just before a move waits for the next room. Outside a
+            // run the bubble hangs from NGame, which draws above the fade.
+            var fading = place.Run is not null && ScreenFading(now);
             if (fading && _bubble is not null) CarryOver(now, whereverItIs: true);
 
             AdvanceSpeech(now, fading);
@@ -168,10 +179,11 @@ internal static class SpeechBubbles
     }
 
     /// <summary>Drops the queued chunks and dismisses the bubble and the thought cloud on screen. Main thread.</summary>
+    /// <remarks>Not called on a room or run change any more; kept for a caller that wants silence at once.</remarks>
     public static void Clear()
     {
         if (_bubble is not null || _carried is not null || Pending.Count > 0)
-            Trace($"cleared by a run change: {(_bubble is null ? "no bubble up" : $"bubble up for {(DateTime.UtcNow - _bubbleShown).TotalSeconds:0.0}s")}, {Pending.Count} chunks dropped");
+            Trace($"cleared: {(_bubble is null ? "no bubble up" : $"bubble up for {(DateTime.UtcNow - _bubbleShown).TotalSeconds:0.0}s")}, {Pending.Count + (_carried is null ? 0 : 1)} chunks dropped");
         Pending.Clear();
         _carried = null;
         DismissBubble();
@@ -221,24 +233,55 @@ internal static class SpeechBubbles
     /// it was still fading in and gets its whole time again; otherwise what was left of it. One
     /// that was about done is left to finish.
     /// </summary>
-    private static void CarryOver(DateTime now, bool whereverItIs = false)
+    private static void CarryOver(DateTime now, bool whereverItIs = false, bool atOnce = false)
     {
         if (_bubble is null || _bubbleChunk is not { } chunk || (!_bubbleInRoom && !whereverItIs)) return;
         var seen = (now - _bubbleShown).TotalSeconds;
         var left = (_bubbleDone - now).TotalSeconds;
         if (left < MinCarry) return;
         Trace($"carried over from the {_bubbleSpot} spot after {seen:0.0}s with {left:0.0}s left");
-        DismissBubble();
+        DismissBubble(atOnce);
         _carried = (chunk, seen < BarelySeen ? _bubbleSecs : Math.Max(left + 1 - FadeIn, MinSeconds));
     }
 
-    /// <summary>The game is fading between screens; nothing drawn now would be seen.</summary>
-    private static bool ScreenFading()
+    /// <summary>
+    /// The game is fading the run's screen out or in, so nothing drawn under it would be seen.
+    /// In Instant mode the game sets the flag but hides the fade, and then nothing is hidden.
+    /// A fade that outlasts <see cref="FadeStuck"/> is taken for stuck and ignored.
+    /// </summary>
+    private static bool ScreenFading(DateTime now)
     {
-        try { return NGame.Instance?.Transition?.InTransition == true; }
+        try
+        {
+            if (NGame.Instance?.Transition is not { InTransition: true, Visible: true })
+            {
+                _fadingSince = null;
+                return false;
+            }
+            _fadingSince ??= now;
+            if (now - _fadingSince <= FadeStuck) return true;
+            if (Logged.Add("fade stuck"))
+                ModEntry.LogError("speech bubbles: the screen has been fading for a long time; no longer waiting for it");
+            return false;
+        }
         catch (Exception ex)
         {
             LogOnce("transition check", ex);
+            return false;
+        }
+    }
+
+    /// <summary>The map, a capstone or the loss of the fight's room hides the figure an over-the-character bubble points at.</summary>
+    private static bool FigureHidden()
+    {
+        try
+        {
+            return NMapScreen.Instance?.IsOpen == true || NCapstoneContainer.Instance?.InUse == true
+                   || !Nodes.Alive(NCombatRoom.Instance);
+        }
+        catch (Exception ex)
+        {
+            LogOnce("figure check", ex);
             return false;
         }
     }
@@ -271,6 +314,7 @@ internal static class SpeechBubbles
     private static NSpeechBubbleVfx? Show(string text, double secs, out bool inRoom)
     {
         inRoom = false;
+        _bubbleOverFigure = false;
         var ctx = GameContext.Capture();
         var color = BubbleColor(ctx.Me);
         if (!ctx.InRun || NGame.Instance?.MainMenu is not null)
@@ -300,6 +344,7 @@ internal static class SpeechBubbles
         if (Place(AboveOverlaySpot(ctx.Me), text, secs, color) is { } above)
         {
             _bubbleSpot = "over the character, above the overlay";
+            _bubbleOverFigure = true;
             return above;
         }
         if (Place(PortraitSpot(), text, secs, color) is { } byPortrait)
@@ -340,7 +385,7 @@ internal static class SpeechBubbles
     }
 
     /// <summary>Fades out and frees the bubble on screen, if it is still there.</summary>
-    private static void DismissBubble()
+    private static void DismissBubble(bool atOnce = false)
     {
         var bubble = _bubble;
         _bubble = null;
@@ -349,7 +394,8 @@ internal static class SpeechBubbles
         {
             // AnimOut makes a tween, which needs the tree. Out of it, the bubble's room is being
             // swapped out (and frees it at the end of the frame) or its deferred add hasn't happened.
-            if (bubble.IsInsideTree()) Fading("AnimOut", bubble, bubble.AnimOut());
+            // At once: the next bubble may open on the same spot, and two would show for a moment.
+            if (bubble.IsInsideTree() && !atOnce) Fading("AnimOut", bubble, bubble.AnimOut());
             else bubble.QueueFree();
         }
         catch (Exception ex)
@@ -640,7 +686,7 @@ internal static class SpeechBubbles
     private static void UpdateCloud(ChatHub hub, DateTime now)
     {
         var since = hub.ThinkingSince is { } t && t >= _placeSince && now - t <= ThinkAbandoned ? t : (DateTime?)null;
-        var speaking = _bubble is not null || Pending.Count > 0;
+        var speaking = _bubble is not null || _carried is not null || Pending.Count > 0;
 
         if (_cloud is not null)
         {
