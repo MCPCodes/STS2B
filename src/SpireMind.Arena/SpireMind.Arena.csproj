@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The arena: seeded practice fights in a small combat simulator, played by scripted policies
+       (baseline) or by Claude Code headless on the Claude subscription (run), to compare how the
+       models play. Nothing here touches the game or the mod. See docs/arena.md. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <RollForward>Major</RollForward>
+    <RootNamespace>SpireMind.Arena</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../SpireMind.Core/SpireMind.Core.csproj" />
+  </ItemGroup>
+</Project>
