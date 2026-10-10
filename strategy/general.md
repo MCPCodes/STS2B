@@ -1,10 +1,10 @@
 # Slay the Spire 2: General Strategy Rules (read before every run)
 
 Compiled Oct 2026 from community guides, wiki data, patch notes and the AgenticSTS paper (see sources.md).
-Version context: Major Update #1 = v0.103.2 (Apr 16 2026). Major Update #2 = v0.107.1 (Jun 19). Beta reached v0.111 (Aug).
+Game version: v0.107.1 (Major Update #2, Jun 19 2026; Major Update #1 was v0.103.2).
 **Rule 0: the in-game card, relic, potion and intent text always beats this file.** Numbers here drift patch to patch.
 Baseline: the developer-reported human win rate at Ascension 0 is about 16%. Unscaffolded LLM agents have scored 0 wins at A0.
-Adding short, triggered strategy rules like these took one agent from 3/10 to 6/10 wins. Follow the rules. Don't freestyle.
+Adding short, triggered strategy rules like these took one agent from 3/10 to 6/10 wins. They are defaults: when verified facts (rules.md, the wiki, the screen) let you compute a line, the computation beats these defaults.
 
 ## 1. STS2 vs STS1: unlearn these assumptions
 - **Roster:** Ironclad, Silent, Defect (returning), plus Regent and Necrobinder (new). That is all 5 as of Oct 2026.
@@ -43,8 +43,8 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
     - Inky: +damage and Weak.
     - Instinct: double attack damage.
   - Put enchantments on cards you play every fight.
-- **Afflictions** are negative modifiers that enemies put on your cards. Examples: *Bound* from Chains of Binding (Queen), *Ringing* (play 1 card per turn).
-  - Ringing (Ceremonial Beast) and Tangled (Vine Shambler: Attacks cost 1 more) last 1 turn: both are removed at the end of your next turn. For the others, assume they last only for that combat (unverified).
+- **Afflictions** are negative modifiers that enemies put on your cards. Example: *Bound* from Chains of Binding (Queen). Assume they last only for that combat (unverified).
+  - Not afflictions: Ringing (Ceremonial Beast: play only 1 card) and Tangled (Vine Shambler: Attacks cost 1 more) are debuffs on you that last exactly your next turn.
 - **New or changed keywords:**
   - **Sly:** if discarded from hand during your turn, the card is played for free.
   - **Replay N:** played N extra times.
@@ -64,15 +64,11 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
 - **Silent starts with 12 cards (5 Strike, 5 Defend). Other characters start with 10.** Base hand is 5 cards. Base energy is 3.
 - **STS1 card names that are NOT in STS2:** Limit Break, Heavy Blade, Spot Weakness, Flex, Sentinel, Searing Blow, Reaper (Ironclad). Clash and Entrench exist only as event cards, never in a card reward.
   - If a guide cites these for STS2, distrust that guide.
-- **Map facts:**
-  - A rest site always sits right before the boss.
-  - A treasure room is guaranteed at the act midpoint.
-  - The boss is visible at the top of the map from the start of the act.
 - **Save & Quit restarts the current fight from turn 1** (a legit game feature). Use it only if your harness and operator allow it.
 
 ## 2. Deckbuilding rules
 1. **Score each card on four axes: Damage, Block, Draw, Energy.** Take the card that best fixes your weakest axis.
-   - If it fixes nothing, **skip**. Skipping is a real, frequently correct option.
+   - In Act 1, until the deck holds 1-2 answers to the act boss (your character file's list, or the fight card in bosses-and-elites.md), take an answer when one is offered, and otherwise front-loaded damage or efficient Block over a skip. After that, if it fixes nothing, **skip**. Skipping is a real, frequently correct option.
 2. **Act 1 pick priority:** front-loaded damage > reliable block > draw > scaling.
    - Starter decks cannot kill Act 1 elites. Take 2-3 real damage cards in your first ~4 rewards.
 3. **Lean beats big.** Cycle time = (deck size − draw effects) / cards drawn per turn. A 10-card starter cycles in 2 turns.
@@ -107,7 +103,7 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
 - **Act 1 boss:**
   - 2-3 real damage cards. One AoE or multi-hit option. 1-2 upgrades on key cards. Ideally 1 Strike removed.
   - At least 1 elite killed for a relic. HP at least 50-60% at the pre-boss campfire.
-  - Look at which boss is coming (sections 4 and bosses-and-elites.md) and draft its counter.
+  - Look at which boss is coming (bosses-and-elites.md) and draft its counter (your character file, or the fight card there).
 - **Act 2 boss:**
   - A scaling plan online: Strength, Focus, Stars, poison, Doom, Souls, Exhaust value...
   - Draw and energy sources, 2-3 elites done, deck mostly thinned.
@@ -119,6 +115,10 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
 
 ## 4. Map and pathing
 - At act start, read the boss icon first. Then plan backward from the pre-boss rest site.
+- **Map facts:** the boss shows at the top of the map from the start. A rest site sits right before the boss and a treasure room at the act midpoint.
+  - Act 1 (both versions): floor 2 Monster; floors 3-6 Monster, Unknown or Shop only (1-5 Monster rooms before floor 7); Elites on 7-9 and 11-15; Rest Sites on 7-9, 11-13 and 16, none on 14-15; floor 10 Treasure; floor 17 boss.
+  - Act 1 Overgrowth: hallway fights 1-3 are the weak encounters; from fight 4 on all are regular (Underdocks unverified).
+  - An Unknown room is never an Elite. The k-th one of an act (verified for Act 1, A0) is an Event 85, 71, 60, 54, 50% of the time and a fight 10, 19, 25, 28, 29%.
 - List the top 2-3 paths. Count elites, rests, shops and unknowns on each. Prefer flexible paths whose branches re-merge.
 - **First floors:** fight 2-3 normal monsters before any elite (gold, cards, deck fixes).
 - **Elite budget:**
@@ -177,8 +177,8 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
    - Count multi-hits (11×2 = 22). The intent number already includes the enemy's Strength and Weak and your Vulnerable: don't add them again. Frail cuts your card Block, not the incoming damage. Remember Thorns-like and end-of-turn effects (Beckon, Burn, Constrict, Disintegration, Wither).
 2. **Check lethal on enemies.** A dead enemy deals 0. Prefer the kill that removes the most incoming damage or scaling.
 3. **If no enemy attacks this turn, it's a free window.** Play Powers and setup, or all-out attack. Don't block, except against end-of-turn damage that Block absorbs (Constrict on you, Infection or Burn in hand).
-4. **Block only what's needed.** Use the minimum block to reach 0 unblocked. Spend the rest on damage or setup.
-   - Exception: early hallway fights in Act 1, where zero-damage lines are worth a little tempo.
+4. **Block only what's needed.** Never Block more than the incoming damage plus end-of-turn damage that Block absorbs. Up to that, each Block point saves 1 HP: weigh it against damage that ends the fight a turn sooner. Spend the rest on damage or setup.
+   - Exception: early Act 1 hallway fights, when the damage would not heal back (item 12): zero-damage lines are worth a little tempo.
    - Exception: when HP is your binding constraint for an upcoming elite or boss.
 5. **Sequence for value:**
    - Draw, 0-cost and setup cards first.
@@ -187,6 +187,7 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
 6. **Spend all energy.** Unspent energy is wasted, unless you have Ice Cream, Pael's Tears, Convergence-type Retain, or similar.
 7. **Kill order:**
    - First: enemies that buff others, summon, revive, or scale fast.
+   - Except Minions and enemies that come back (Eye with Teeth): when the fight ends with one main enemy, damage goes there.
    - Then the highest damage dealer. Then the rest.
    - Don't overkill. Split damage when one more hit isn't needed.
    - In 3+ enemy fights, AoE beats focus fire.
@@ -200,13 +201,15 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
     - Poison ticks at the start of the enemy's turn and is blocked by Artifact. Strip Artifact first (Expose, Know Thy Place, cheap debuffs).
 11. **Avoid high-variance all-ins** unless you've verified you survive the next enemy turn.
 12. **HP policy:**
-    - Act 1, first 3 fights (the weak encounters, from floor 2): prefer zero-damage lines.
+    - Burning Blood (Ironclad) heals 6 after every won fight, up to max HP: a won fight that ends within 6 of max HP costs nothing, so stop chasing zero-damage lines there.
+    - Act 1 Overgrowth, first 3 fights (the weak encounters, from floor 2; Underdocks unverified): prefer zero-damage lines when the damage would not heal back.
     - Later: trade a few HP to end fights a turn earlier. HP above max is wasted, and Ancients refill you between acts.
 
 ## 9. Neow, Ancients and events
 - **Neow** (pick 1). Prefer:
   - Strong and safe: removal (Precise Scissors), transform (New Leaf), a Rare (Arcane Scroll; Hefty Tablet = choose 1 of 3 Rares + Injury).
-  - Upgrades (Pomander, Neow's Talisman), Phial Holster (+slot, 2 potions), Winged Boots, gold if a shop is near (Golden Pearl 150).
+  - Pomander (upgrade 1 chosen card), Phial Holster (+slot, 2 potions), Winged Boots, gold if a shop is near (Golden Pearl 150).
+  - Neow's Talisman: Strike 6 to 9 and Defend 5 to 8, on cards you plan to remove. Rank it below Pomander, removal, transform or a Rare.
   - Cautious: Neow's Bones (2 Neow relics + curse) and Leafy Poultice (-12 max HP) on fragile characters.
   - Lava Rock: 2 extra relics from the Act 1 boss, nothing before it.
   - Silken Tress: loses all gold.
