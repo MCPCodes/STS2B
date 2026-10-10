@@ -18,7 +18,7 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
   - Start of Acts 2 and 3: an Ancient heals you to full (A2+: only 80% of missing HP), then offers **pick 1 of 3** relics.
     - Act 2 pool: Orobas, Pael, Tezcatara. Act 3 pool: Nonupeipe, Tanx, Vakuu.
     - **Darv** can replace either one. Darv offers classic STS1 boss relics: Ectoplasm, Sozu, Snecko Eye, Velvet Choker, Philosopher's Stone, Runic Pyramid, Pandora's Box, Black Star, Astrolabe, Empty Cage, Calling Bell, Dusty Tome.
-  - Whether act bosses also drop a relic is unclear (unverified). Neow's Lava Rock reads "Act 1 Boss drops 2 Relics".
+  - Act 1 and Act 2 bosses drop no relic: 100 gold, a potion roll and a card reward of 3 Rares. Neow's Lava Rock reads "Act 1 Boss drops 2 Relics".
 - **Starter upgrades come from Orobas, not from a boss.**
   - *Touch of Orobas* upgrades your starter relic (e.g. Burning Blood to Black Blood, Cracked Core to Infused Core).
   - *Archaic Tooth* transforms a starter card into its Ancient-rarity version. Community-rated S, a near auto-pick.
@@ -44,7 +44,7 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
     - Instinct: double attack damage.
   - Put enchantments on cards you play every fight.
 - **Afflictions** are negative modifiers that enemies put on your cards. Examples: *Bound* from Chains of Binding (Queen), *Ringing* (play 1 card per turn).
-  - Assume they last only for that combat (unverified).
+  - Ringing (Ceremonial Beast) and Tangled (Vine Shambler: Attacks cost 1 more) last 1 turn: both are removed at the end of your next turn. For the others, assume they last only for that combat (unverified).
 - **New or changed keywords:**
   - **Sly:** if discarded from hand during your turn, the card is played for free.
   - **Replay N:** played N extra times.
@@ -55,13 +55,14 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
 - **New status cards that punish you if they stay in hand at end of turn:**
   - Beckon (Soul Fysh): 6 unblockable damage.
   - Wither (Aeonglass).
-  - Frantic Escape (Insatiable): must be played.
-  - Infection, Burn, Soot, Debris.
+  - Frantic Escape (Insatiable): no end-of-turn effect. Play it anyway: each play adds 1 to the Sandpit countdown, and at 0 you die.
+  - Infection (3), Burn (2), Toxic (5): damage that Block absorbs. Soot and Debris do nothing at end of turn.
+  - Exact numbers: strategy/wiki/cards/status.md.
 - **Quest cards** are unplayable cards that pay off later. *Never remove them by accident.*
   - *Spoils Map*: reach the red X next act for 600 gold.
   - *Dowsing*: transforms into Abundance.
 - **Silent starts with 12 cards (5 Strike, 5 Defend). Other characters start with 10.** Base hand is 5 cards. Base energy is 3.
-- **STS1 card names that are NOT in STS2:** Limit Break, Heavy Blade, Spot Weakness, Flex, Sentinel, Clash, Entrench, Searing Blow, Reaper (Ironclad).
+- **STS1 card names that are NOT in STS2:** Limit Break, Heavy Blade, Spot Weakness, Flex, Sentinel, Searing Blow, Reaper (Ironclad). Clash and Entrench exist only as event cards, never in a card reward.
   - If a guide cites these for STS2, distrust that guide.
 - **Map facts:**
   - A rest site always sits right before the boss.
@@ -168,14 +169,14 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
 - **Act 3:** keep 2 strong potions for the final boss unless an elite threatens the run.
 - Use a potion now if your slots are full and more are coming (a reward screen, a shop).
 - **Sequencing:** buff potions (Strength, Focus, Energy) BEFORE attacks. Damage potions to secure kills. Block Potion only on the turn you need it (Block expires).
-- Ancient Potion (Artifact) pre-empts a crippling debuff. Distilled Chaos is burst. Blood Potion heals 20% (Ironclad).
-- Potion drops: about 40% at act start, adjusting ±10% per fight. Elites add a bonus roll. White Beast Statue guarantees drops.
+- No potion gives Artifact in v0.107.1 (there is no Ancient Potion). Distilled Chaos is burst. Blood Potion heals 20% (Ironclad).
+- Potion drops: one roll after every fight. 40% at run start, 10 points down after a drop, 10 up after a miss, never reset between acts. Elites roll with +12.5 points. White Beast Statue guarantees drops. Exact effects and odds: strategy/wiki/potions.md.
 
 ## 8. Combat turn procedure (run this every turn)
 1. **Read all intents and sum incoming damage.**
-   - Count multi-hits (11×2 = 22). Include enemy Strength and your Frail. Remember Thorns-like and end-of-turn effects (Beckon, Burn, Disintegration, Wither).
+   - Count multi-hits (11×2 = 22). The intent number already includes the enemy's Strength and Weak and your Vulnerable: don't add them again. Frail cuts your card Block, not the incoming damage. Remember Thorns-like and end-of-turn effects (Beckon, Burn, Constrict, Disintegration, Wither).
 2. **Check lethal on enemies.** A dead enemy deals 0. Prefer the kill that removes the most incoming damage or scaling.
-3. **If no enemy attacks this turn, it's a free window.** Play Powers and setup, or all-out attack. Don't block.
+3. **If no enemy attacks this turn, it's a free window.** Play Powers and setup, or all-out attack. Don't block, except against end-of-turn damage that Block absorbs (Constrict on you, Infection or Burn in hand).
 4. **Block only what's needed.** Use the minimum block to reach 0 unblocked. Spend the rest on damage or setup.
    - Exception: early hallway fights in Act 1, where zero-damage lines are worth a little tempo.
    - Exception: when HP is your binding constraint for an upcoming elite or boss.
@@ -199,7 +200,7 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
     - Poison ticks at the start of the enemy's turn and is blocked by Artifact. Strip Artifact first (Expose, Know Thy Place, cheap debuffs).
 11. **Avoid high-variance all-ins** unless you've verified you survive the next enemy turn.
 12. **HP policy:**
-    - Act 1 floors 1-3: prefer zero-damage lines.
+    - Act 1, first 3 fights (the weak encounters, from floor 2): prefer zero-damage lines.
     - Later: trade a few HP to end fights a turn earlier. HP above max is wasted, and Ancients refill you between acts.
 
 ## 9. Neow, Ancients and events
@@ -207,7 +208,7 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
   - Strong and safe: removal (Precise Scissors), transform (New Leaf), a Rare (Arcane Scroll; Hefty Tablet = choose 1 of 3 Rares + Injury).
   - Upgrades (Pomander, Neow's Talisman), Phial Holster (+slot, 2 potions), Winged Boots, gold if a shop is near (Golden Pearl 150).
   - Cautious: Neow's Bones (2 Neow relics + curse) and Leafy Poultice (-12 max HP) on fragile characters.
-  - Lava Rock: only on elite-heavy maps.
+  - Lava Rock: 2 extra relics from the Act 1 boss, nothing before it.
   - Silken Tress: loses all gold.
   - Large Capsule: adds a Strike and a Defend.
 - **Act 2 Ancient:**

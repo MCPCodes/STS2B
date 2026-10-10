@@ -4,7 +4,7 @@
 - **80 HP.** Deck: 5 Strike, 4 Defend, Bash.
 - **Starter relic: Burning Blood** (heal 6 after each combat).
   - Touch of Orobas upgrades it to Black Blood (heal 12). This is rated weak for Ironclad.
-  - Prefer **Archaic Tooth**, which upgrades a starter card to an Ancient version. Likely Bash becomes **Break**: 1 cost, 20 (30) damage, 5 (7) Vulnerable (unverified mapping).
+  - Prefer **Archaic Tooth**, which upgrades a starter card to an Ancient version. Bash becomes **Break**: 1 cost, 20 (30) damage, 5 (7) Vulnerable.
 - **Character relics:**
   - Paper Phrog: Vulnerable is 75% instead of 50%.
   - Ruined Helmet: the first Strength gain each combat is doubled.
@@ -21,32 +21,33 @@
   - The weak point is consistent block. Uppercut is his only Weak source, so kill fast.
 
 ## Archetypes (blend them; they overlap)
+- Exact card numbers and upgrades: strategy/wiki/cards/ironclad.md
 ### 1. Vulnerable / Strength (most common winning core)
 - **Vulnerable sources:**
   - Tremble (common, 1 cost: 3 (4) Vulnerable, Exhaust). An elite pick early.
-  - Taunt (6 Block + Vulnerable).
+  - Taunt (7 (8) Block + 1 (2) Vulnerable).
   - Molten Fist (10 damage, doubles Vulnerable, Exhaust).
   - Uppercut. Bash or Break.
-  - Dominate (rare: apply Vulnerable, gain 1 Strength per Vulnerable on the target, Exhaust).
+  - Dominate (uncommon: apply Vulnerable, gain 1 Strength per Vulnerable on the target, Exhaust).
 - **Payoffs:**
-  - Cruelty (Vulnerable enemies take +25% (50%)).
+  - Cruelty (Vulnerable is 75% (100%) instead of 50%).
   - Dismantle (hits twice vs Vulnerable).
   - Bully (0 cost: +2 damage per Vulnerable stack).
   - Colossus (block, and take 50% less damage from Vulnerable enemies this turn). A standard Act 1 defensive pick since it became Uncommon.
 - **Strength:**
-  - Inflame. Demon Form (+3 (4) Strength per turn: the best boss scaler). Dominate. Rupture (self-damage line).
+  - Inflame. Demon Form (+2 (3) Strength per turn: the best boss scaler). Dominate. Rupture (self-damage line).
   - Payoffs: Whirlwind, Sword Boomerang, Twin Strike, Thrash, Conflagration (2 AoE × 4-5), One-Two Punch.
 - **Relics:** Paper Phrog, Ruined Helmet (+Inflame or Dominate), Red Skull, Vajra, Shuriken.
 
 ### 2. Exhaust (best answer to Aeonglass Withers and junk statuses)
 - **Enablers:**
-  - Burning Pact (exhaust 1, draw 2 (3)). True Grit. Second Wind. Evil Eye. Brand (0 cost: lose 1 HP, exhaust 1, +Strength).
-  - Stoke (exhaust hand, get random cards). Forgotten Ritual (+3 (4) Energy, Exhaust). Drum of Battle (draw 2; +2 (3) Energy when Exhausted).
+  - Burning Pact (exhaust 1, draw 2 (3)). True Grit. Second Wind. Brand (0 cost: lose 1 HP, exhaust 1, +Strength).
+  - Stoke (exhaust hand, get random cards). Forgotten Ritual (1 cost: +3 (4) Energy only if a card was exhausted earlier this turn, Exhaust). Drum of Battle (draw 2; +2 (3) Energy when another effect exhausts it; it does not exhaust itself).
   - Corruption (Ancient rarity: Skills cost 0 and Exhaust).
 - **Payoffs:**
-  - Feel No Pain (block per exhaust). Dark Embrace (draw per exhaust).
+  - Feel No Pain (block per exhaust). Dark Embrace (draw per exhaust). Evil Eye (8 (11) Block, twice if a card was exhausted earlier this turn).
   - Fiend Fire. Ashen Strike (+3 (4) damage per exhausted card).
-  - Pact's End (0 cost: 18 (24) AoE if 3+ cards are in the exhaust pile).
+  - Pact's End (0 cost: 17 (23) AoE if 3+ cards are in the exhaust pile).
   - Charon's Ashes.
 - **Rule:** commit when you hold 2+ enablers and 1 payoff. Feel No Pain and Dark Embrace are bad without exhaust density.
 
@@ -55,7 +56,7 @@
   - Bloodletting (HP to energy). Offering (0 cost: lose 6 HP, +2 Energy, draw 3 (5), Exhaust; one of his best cards).
   - Rupture (+Strength when you lose HP on your turn).
   - Inferno (lose 1 HP per turn; 6 (9) AoE each time you lose HP on your turn).
-  - Crimson Mantle (lose 1 HP, gain 7 (10) Block each turn).
+  - Crimson Mantle (lose 1 HP, gain 8 (10) Block each turn).
   - Hemokinesis, Breakthrough, Tear Asunder (extra hit per HP-loss instance this combat), Blood Wall.
 - **Sustain:** Burning Blood, Not Yet (2 cost rare: heal 10 (13), Exhaust), Feed (+max HP on kill).
   - Relics: Self-Forming Clay, Demon Tongue, Red Skull, Tungsten Rod.
@@ -63,13 +64,13 @@
 
 ### 4. Block / Body Slam (secondary)
 - Body Slam, Shrug It Off, Flame Barrier, Impervious (30 (40) Block, Exhaust), Unmovable (doubles the first card-block each turn), Stone Armor, Colossus.
-- Barricade + Juggernaut (5 damage per block gain).
+- Barricade + Juggernaut (6 (8) damage per block gain).
 - Relics: Anchor, Horn Cleat, Captain's Wheel, Sturdy Clamp.
 - Barricade is a trap without a real block engine. Killing fast is usually better.
 
 ## Draft priorities
 - **Early (Act 1):**
-  - Damage: Tremble, Bludgeon, Breakthrough, Twin Strike, Sword Boomerang, Headbutt, Anger, Molten Fist.
+  - Damage: Tremble (Vulnerable only, no damage itself), Bludgeon, Breakthrough, Twin Strike, Sword Boomerang, Headbutt, Anger, Molten Fist.
   - Block: Shrug It Off, Colossus, Impervious.
   - Draw: Battle Trance (the first copy is almost always good), Pommel Strike (draw-positive only when upgraded).
   - AoE for multi-enemy fights: Thunderclap, Whirlwind, Conflagration.
@@ -81,11 +82,12 @@
 - Feel No Pain or Dark Embrace in a deck with fewer than 4-5 exhaust sources.
 - Brimstone in slow decks (enemies scale too).
 - Corruption played carelessly: it exhausts your Defends.
-- Expect a Fight: its text changed across patches. Read it. In v0.111 it is a 3-cost Strength-scaling block card.
+- Expect a Fight: its text changed across patches. Read it. In v0.107.1 it is a 2 (1) cost Skill: +1 Energy per Attack in hand, then no more Energy gain that turn. No Block.
 - Drum of Battle and Conflagration were reworked around v0.104. Read the current text.
 - Too many attacks with no block: watch the attack-to-block ratio in Vulnerable decks.
 
 ## Boss and elite notes
+- Vantom and Ceremonial Beast, exact numbers and patterns: strategy/wiki/enemies/vantom.md, strategy/wiki/enemies/ceremonial-beast.md
 - **Vantom** (Slippery): use multi-hit attacks (Twin Strike, Sword Boomerang, Whirlwind, Conflagration, Thrash) to strip it.
   - Don't open with Bludgeon.
 - **Ceremonial Beast:** save Bludgeon, Break or Mangle for the Ringing turns (1 card per turn).

@@ -4,37 +4,38 @@ Numbers are base, with Ascension values in parentheses. A8 raises HP and A9 rais
 **First move each act:** look at the boss icon on the map and draft and path for that fight.
 
 ## ACT 1A: OVERGROWTH
+Exact numbers and patterns: `strategy/wiki/enemies/<name>.md` (bygone-effigy, byrdonis, phrog-parasite, wriggler, vantom, ceremonial-beast, kin-priest, kin-follower).
 ### Elites
 - **Bygone Effigy** (127 HP)
-  - Turn 1: does nothing. Turn 2: Wake, +10 Strength. Then it repeats Slash, 15 (17) before Strength, so it hits very hard.
+  - Turn 1: does nothing. Turn 2: Wake, +10 Strength. Then it repeats Slash, 13 (15) before Strength, so it hits for 23 (25) every turn.
   - *Slow* power: each card you play this turn makes it take +10% Attack damage.
   - Play: use turn 1 for Powers and Vulnerable. Block heavily from turn 3 on.
   - Dump many cards first, then big attacks last in the same turn.
 - **Byrdonis** (81-84 HP)
-  - Alternates Swoop 13 (15) and Peck 3×3 (4×3). Gains +1 Strength every turn.
+  - Alternates Swoop 17 (19) and Peck 3×3 (4×3). Gains +1 Strength every turn.
   - Play: pure damage check. Frontload and kill fast. Don't turtle.
 - **Phrog Parasite** (61-64 HP)
-  - Alternates Infect (3 Infection statuses into your discard) and Lash 4×4.
+  - Alternates Infect (3 Infection statuses into your discard) and Lash 4×4 (5×4).
   - On death it splits into 4 Wrigglers. They are stunned their first turn, then swap attack and buff roles each turn.
   - Play: save AoE for the Wrigglers. Kill the currently-attacking Wrigglers first. Done well, you take 0 every other turn.
-  - Infections hurt if they are in hand at end of turn (unverified details).
+  - Each Infection in your hand at end of turn deals 3 damage to you; Block absorbs it.
 ### Bosses
 - **Vantom** (173 HP)
-  - 4-turn cycle. Starts with 9 *Slippery*: each damage instance is reduced to 1 and removes 1 stack.
-  - Big hit 27 (30) that also shuffles 3 Wounds into your discard, even if blocked.
+  - 4-turn cycle. Starts with 8 (9) *Slippery*: each damage instance that takes HP is reduced to 1 and removes 1 stack.
+  - Big hit 26 (30) that also shuffles 3 Wounds into your discard, even if blocked.
   - Off-turn: +2 Strength. Slippery stacks double in co-op.
   - Play: strip Slippery with multi-hits and cheap hits (Shivs, Twin Strike, Whirlwind, Lightning orbs, Claw, Ricochet, Astral Pulse).
   - Do NOT open with Bludgeon-type single hits. Weak isn't blocked by Slippery. Save your best block for the big hit.
 - **Ceremonial Beast** (252 HP)
-  - Phase 1: attacks 18 (20) each turn and gains Strength.
-  - Dropping it to 150 HP stuns it and wipes its Strength. Then 2 free turns.
-  - Then it applies *Ringing* (you may play only 1 card per turn) and scales 3-4 Strength per cycle.
+  - Phase 1: turn 1 has no attack (it puts *Plow* on itself). From turn 2 it attacks 18 (20) each turn and gains 2 Strength after each.
+  - Once Plow is on, dropping it to 150 (160) HP stuns it and wipes its Strength. Then 2 free turns: the stun and the first *Ringing* cast.
+  - After the stun it repeats a 3-turn cycle: it applies Ringing (you may play only 1 card on your next turn), attacks, then attacks and gains 3 (4) Strength.
   - Play: build burst and cross 150 only when you can exploit the stun.
   - On Ringing turns, play your single highest-value card (Bludgeon, Comet, Squeeze, Echo Form...). Orbs, poison, Doom and Powers keep working. Close fast.
-- **The Kin** (Priest about 190 HP + 2 Followers about 58 HP each)
-  - Priest: Frail → Weak → 3-hit attack → +Strength.
-  - Left Follower buffs, then attacks. Right Follower attacks.
-  - Play: AoE is king. Kill the left (buffing) Follower first, or burst the Priest with strong single-target damage.
+- **The Kin** (Priest 190 HP + 2 Followers 58-59 HP each)
+  - Priest: 8 (9) + Frail → 8 (9) + Weak → 3×3 → +2 (3) Strength.
+  - Left Follower (e0) opens with the buff, right Follower (e1) with the hit. Both cycle hit 5 → 2×2 → +2 (3) Strength (itself only).
+  - Play: AoE is king. Kill the left Follower first (it deals 6 more per 3 turns), or burst the Priest with strong single-target damage: its death kills both Followers and wins.
 
 ## ACT 1B: UNDERDOCKS
 ### Elites
