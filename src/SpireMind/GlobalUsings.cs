@@ -83,6 +83,7 @@ global using MegaCrit.Sts2.Core.Nodes.Screens.Timeline.UnlockScreens;
 global using MegaCrit.Sts2.Core.Nodes.Screens.TreasureRoomRelic;
 global using MegaCrit.Sts2.Core.Nodes.TopBar;
 global using MegaCrit.Sts2.Core.Nodes.Vfx;
+global using MegaCrit.Sts2.Core.Nodes.Vfx.Utilities;
 global using MegaCrit.Sts2.Core.Platform;
 global using MegaCrit.Sts2.Core.Platform.Steam;
 global using MegaCrit.Sts2.Core.Rewards;
