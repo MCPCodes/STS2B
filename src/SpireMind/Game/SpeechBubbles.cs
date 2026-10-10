@@ -60,6 +60,9 @@ internal static class SpeechBubbles
 
     private static NSpeechBubbleVfx? _bubble;
 
+    /// <summary>When the bubble on screen was shown, to tell in the log how long one lasted.</summary>
+    private static DateTime _bubbleShown;
+
     /// <summary>When the next chunk may replace <see cref="_bubble"/>: the moment it would start fading out by itself.</summary>
     private static DateTime _bubbleDone;
 
@@ -123,6 +126,8 @@ internal static class SpeechBubbles
     /// <summary>Drops the queued chunks and dismisses the bubble and the thought cloud on screen. Main thread.</summary>
     public static void Clear()
     {
+        if (_bubble is not null || Pending.Count > 0)
+            Trace($"cleared by a room or run change: {(_bubble is null ? "no bubble up" : $"bubble up for {(DateTime.UtcNow - _bubbleShown).TotalSeconds:0.0}s")}, {Pending.Count} chunks dropped");
         Pending.Clear();
         DismissBubble();
         EndCloud();
@@ -144,9 +149,31 @@ internal static class SpeechBubbles
         var chunk = Pending.Dequeue();
         var secs = Seconds(chunk);
         _bubble = Show(Escape(chunk), secs);
+        _bubbleShown = now;
         _bubbleDone = now + TimeSpan.FromSeconds(FadeIn + Math.Max(secs - 1, 1));
         _bubbleGone = _bubbleDone + TimeSpan.FromSeconds(FadeOut + Margin);
+        Trace($"shown for {secs:0.0}s {Where(_bubble)}: \"{(chunk.Length > 40 ? chunk[..40] + "..." : chunk)}\"");
     }
+
+    /// <summary>Where a bubble ended up, for the log: its parent, position and whether it can be seen.</summary>
+    private static string Where(NSpeechBubbleVfx? bubble)
+    {
+        try
+        {
+            if (bubble is null || !GodotObject.IsInstanceValid(bubble)) return "nowhere";
+            var parent = bubble.GetParent();
+            var view = bubble.IsInsideTree() ? bubble.GetViewport().GetVisibleRect().Size : Vector2.Zero;
+            return $"at {bubble.GlobalPosition} of {view} under {(parent is null ? "no parent" : parent.GetPath().ToString())}"
+                   + $" (in tree {bubble.IsInsideTree()}, visible {bubble.IsVisibleInTree()}, z {bubble.ZIndex})";
+        }
+        catch (Exception ex)
+        {
+            return $"unknown ({ex.Message})";
+        }
+    }
+
+    /// <summary>One log line per bubble shown or cut short, while bubble placement is being settled in game.</summary>
+    private static void Trace(string what) => ModEntry.Log($"speech bubble: {what}");
 
     /// <summary>
     /// Creates the bubble at the spot the docs give for where the local player is, and parents

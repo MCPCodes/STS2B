@@ -48,7 +48,10 @@ public static class ModEntry
             var waiter = new DecisionWaiter(game, versioner);
             var tools = new BotTools(game, waiter, versioner, chat);
 
-            _server = new BridgeServer(ResolvePort(), tools, chat, Version, Log);
+            _server = new BridgeServer(ResolvePort(), tools, chat, Version, Log)
+            {
+                DebugScreenshot = _ => MainThread.Run(Screenshots.Take),
+            };
             _server.Start();
 
             Overlay = StartOverlay(chat, ChatKeysPatched());

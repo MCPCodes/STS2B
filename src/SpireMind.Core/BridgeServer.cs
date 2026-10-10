@@ -13,6 +13,7 @@ namespace SpireMind.Core;
 ///   POST /act     {"action_id": "...", "version": n}, same as the act tool
 ///   POST /chat    {"from": "Mark", "text": "..."}, posts as the in-game chat box does
 ///   GET  /chat?since=n  the chat log after line n, with the bot's name and the pause flag
+///   GET  /debug/screenshot  saves what the game is drawing to a PNG and returns its path (when the host offers it)
 /// /state and /act go through the tools and show unread chat messages like them, but leave
 /// them unread, so a curl doesn't take them from the model.
 /// </summary>
@@ -27,6 +28,12 @@ public sealed class BridgeServer : IDisposable
     private readonly CancellationTokenSource _stop = new();
 
     public int Port { get; }
+
+    /// <summary>
+    /// Saves a picture of the game's screen and returns where, for checking by eye what the
+    /// overlay and bubbles look like. Set by the host; null means the route answers 404.
+    /// </summary>
+    public Func<CancellationToken, Task<JsonObject>>? DebugScreenshot { get; set; }
 
     public BridgeServer(int port, BotTools tools, ChatHub chat, string version, Action<string> log)
     {
@@ -141,6 +148,10 @@ public sealed class BridgeServer : IDisposable
                 case ("GET", "/chat"):
                     var since = long.TryParse(req.QueryString["since"], out var n) ? n : 0;
                     await Send(res, 200, ChatLog(since));
+                    return;
+
+                case ("GET", "/debug/screenshot") when DebugScreenshot is { } shoot:
+                    await Send(res, 200, await shoot(_stop.Token));
                     return;
 
                 default:
