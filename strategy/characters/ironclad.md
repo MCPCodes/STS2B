@@ -87,10 +87,14 @@
 - Too many attacks with no block: watch the attack-to-block ratio in Vulnerable decks.
 
 ## Boss and elite notes
-- Vantom and Ceremonial Beast, exact numbers and patterns: strategy/wiki/enemies/vantom.md, strategy/wiki/enemies/ceremonial-beast.md
-- **Vantom** (Slippery): use multi-hit attacks (Twin Strike, Sword Boomerang, Whirlwind, Conflagration, Thrash) to strip it.
-  - Don't open with Bludgeon.
-- **Ceremonial Beast:** save Bludgeon, Break or Mangle for the Ringing turns (1 card per turn).
+### Act 1 Overgrowth (fight cards: bosses-and-elites.md)
+- **Counters to draft for the coming boss, and for elites:**
+  - Vantom: multi-hits, since each hit strips 1 Slippery (Twin Strike 2, Sword Boomerang 3, Thrash 2, Conflagration 4, Whirlwind X), and Anger (0 cost, 1 hit per play, adds a copy each play). Flame Barrier's 4 back per enemy hit strips one too. Exhaust (Second Wind, Burning Pact, True Grit) for the Wounds, which never leave the deck by themselves.
+  - The Kin: area damage (Breakthrough 9, Thunderclap 4, Whirlwind, Howl from Beyond 16) or single-target burst on the Priest (Bludgeon 32).
+  - Ceremonial Beast: fast damage to deal the 102 early, and big single cards for the 1-card turns: Bludgeon, Impervious (30 Block), Mangle (15, and Stomp 15 becomes 5; the trigger wipes its Strength loss).
+  - Phrog Parasite: area damage for the 4 Wrigglers. Byrdonis: front-loaded damage and Vulnerable, Weak from Uppercut; Flame Barrier returns 12 against a Peck. Bygone Effigy: Powers for the 2 free turns, Vulnerable, Weak from Uppercut (23 becomes 17).
+- **In the fight:** against Vantom a Strike strips a stack exactly like Bludgeon. Against The Kin, Bash the Priest (e2). Against Bygone Effigy, Skills and Powers first, then Bash, then the other attacks, so they get Vulnerable and Slow.
+### Other acts (unverified, from guides)
 - **Lagavulin Matriarch:** use the 3 sleep turns for Powers (Demon Form, Inflame, Inferno), then race before her second siphon (-2 Strength and -2 Dexterity each).
 - **Knowledge Demon:** take Disintegration early. Kill before the 3rd curse.
 - **Aeonglass:** Exhaust plus Strength is the most reliable plan (Feel No Pain, Burning Pact, Corruption clear Withers).

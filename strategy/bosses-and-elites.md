@@ -1,43 +1,48 @@
 # Bosses and Elites (STS2)
 
-Numbers are base, with Ascension values in parentheses. A8 raises HP and A9 raises damage. Enemy data shifts by patch, so **read intents and power tooltips in-game.**
 **First move each act:** look at the boss icon on the map and draft and path for that fight.
+Sections marked unverified give base numbers with ascension values in parentheses, and drift by patch: **read intents and power tooltips in-game.**
 
 ## ACT 1A: OVERGROWTH
-Exact numbers and patterns: `strategy/wiki/enemies/<name>.md` (bygone-effigy, byrdonis, phrog-parasite, wriggler, vantom, ceremonial-beast, kin-priest, kin-follower).
+Verified from the game files, single player, ascension 0. From A8 HP and Vantom's Slippery are higher; from A9 damage, the Beast's Plow threshold and every Strength gain; in co-op enemies scale too (coop.md). There, read the HP bar and the power amounts and redo the sums. Enemy turn N follows your turn N. Full pages: `strategy/wiki/enemies/<name>.md`.
 ### Elites
-- **Bygone Effigy** (127 HP)
-  - Turn 1: does nothing. Turn 2: Wake, +10 Strength. Then it repeats Slash, 13 (15) before Strength, so it hits for 23 (25) every turn.
-  - *Slow* power: each card you play this turn makes it take +10% Attack damage.
-  - Play: use turn 1 for Powers and Vulnerable. Block heavily from turn 3 on.
-  - Dump many cards first, then big attacks last in the same turn.
-- **Byrdonis** (81-84 HP)
-  - Alternates Swoop 17 (19) and Peck 3×3 (4×3). Gains +1 Strength every turn.
-  - Play: pure damage check. Frontload and kill fast. Don't turtle.
-- **Phrog Parasite** (61-64 HP)
-  - Alternates Infect (3 Infection statuses into your discard) and Lash 4×4 (5×4).
-  - On death it splits into 4 Wrigglers. They are stunned their first turn, then swap attack and buff roles each turn.
-  - Play: save AoE for the Wrigglers. Kill the currently-attacking Wrigglers first. Done well, you take 0 every other turn.
-  - Each Infection in your hand at end of turn deals 3 damage to you; Block absorbs it.
+- **Bygone Effigy** (127 HP, alone)
+  - Enemy turns 1 (Sleep) and 2 (Wake, +10 Strength) deal 0, and damage does not wake it early. From turn 3: Slashes 23 every turn.
+  - *Slow*: each card you finish this turn makes your later attack cards hit it 10% harder (card 3 x1.2, card 6 x1.5). Potions and reflected damage get no bonus.
+  - Your turns 1-2: no Block. Play Powers, Vulnerable and attacks.
+  - Every turn: Skills, Powers and cheap cards first, the biggest attack last.
+  - Weak on it cuts 23 to 17. Each turn after turn 2 costs 23 minus your Block.
+- **Byrdonis** (81-84 HP, alone)
+  - Swoop 17, Peck 3x3, alternating, +1 Strength after every enemy turn: 17, 4x3, 19, 6x3, 21, 8x3. No free turn.
+  - The next number is known: never Block past it. Each Block point up to it saves 1 HP; weigh that against damage, since each Swoop + Peck pair deals 8 more (29, 37, 45) and stalling loses.
+  - Weak rounds down per hit: Peck 6x3 becomes 4x3, Swoop 19 becomes 14. Strength loss is worth 3 per point on a Peck, 1 on a Swoop.
+- **Phrog Parasite** (61-64 HP, then 4 Wrigglers of 17-21 HP; 135-142 HP in all)
+  - Infect (3 Infections into your discard, no attack), then Lash 4x4 = 16, alternating. Each Infection in hand at end of turn deals 3; Block absorbs it.
+  - Killing the Phrog cancels its shown move and the Wrigglers skip that enemy turn. Best on a Lash turn (the 16 never lands); a kill on an Infect turn saves the 3 Infections.
+  - The fight ends when all 4 Wrigglers die. e1 and e3 bite 6 while e2 and e4 add 1 Infection and +2 Strength, swapping every turn: 12, 16, 16, 20 with all 4 alive.
+  - The Wrigglers appear at once: on the kill turn, kill the Phrog with single-target cards first, then play area damage (4 different HP, check each). An all-enemy multi-hit keeps going onto them after the Phrog dies (from the code, not seen in a fight); a single-target one stops.
+  - Then finish one biting pair (e1+e3 or e2+e4), starting with the pair that shows attack: with a pair dead, every other enemy turn has no attack.
 ### Bosses
-- **Vantom** (173 HP)
-  - 4-turn cycle. Starts with 8 (9) *Slippery*: each damage instance that takes HP is reduced to 1 and removes 1 stack.
-  - Big hit 26 (30) that also shuffles 3 Wounds into your discard, even if blocked.
-  - Off-turn: +2 Strength. Slippery stacks double in co-op.
-  - Play: strip Slippery with multi-hits and cheap hits (Shivs, Twin Strike, Whirlwind, Lightning orbs, Claw, Ricochet, Astral Pulse).
-  - Do NOT open with Bludgeon-type single hits. Weak isn't blocked by Slippery. Save your best block for the big hit.
-- **Ceremonial Beast** (252 HP)
-  - Phase 1: turn 1 has no attack (it puts *Plow* on itself). From turn 2 it attacks 18 (20) each turn and gains 2 Strength after each.
-  - Once Plow is on, dropping it to 150 (160) HP stuns it and wipes its Strength. Then 2 free turns: the stun and the first *Ringing* cast.
-  - After the stun it repeats a 3-turn cycle: it applies Ringing (you may play only 1 card on your next turn), attacks, then attacks and gains 3 (4) Strength.
-  - Play: build burst and cross 150 only when you can exploit the stun.
-  - On Ringing turns, play your single highest-value card (Bludgeon, Comet, Squeeze, Echo Form...). Orbs, poison, Doom and Powers keep working. Close fast.
-- **The Kin** (Priest 190 HP + 2 Followers 58-59 HP each)
-  - Priest: 8 (9) + Frail → 8 (9) + Weak → 3×3 → +2 (3) Strength.
-  - Left Follower (e0) opens with the buff, right Follower (e1) with the hit. Both cycle hit 5 → 2×2 → +2 (3) Strength (itself only).
-  - Play: AoE is king. Kill the left Follower first (it deals 6 more per 3 turns), or burst the Priest with strong single-target damage: its death kills both Followers and wins.
+- **Vantom** (173 HP, alone)
+  - Ink Blot 7, Inky Lance 6x2, Dismember 26 + 3 Wounds into your discard (blocked or not), Prepare +2 Strength. By enemy turn: 7, 12, 26, 0, 9, 16, 28, 0, 11, 20, 30, 0.
+  - *Slippery 8*: each instance that removes HP removes exactly 1 and 1 stack, from cards, potions, reflected damage and HP loss alike. After 8 such hits the other 165 HP take full damage.
+  - Strip stacks with the cheapest hits first: count hits, not damage. Damage potions wait until Slippery is gone. A big single hit waits only while a cheaper hit can take the stack: with energy left and nothing better to play, it still strips 1. Play Bash when the stacks are nearly gone (its own hit strips one).
+  - Turns 4, 8, 12 deal 0: no Block. Turns 3, 7, 11 bring the big hit (26, 28, 30). Weak works through Slippery: Dismember 26 becomes 19.
+- **Ceremonial Beast** (252 HP, alone)
+  - Enemy turn 1: Stamp, no damage (puts Plow 150 on itself). Then Plow every turn: 18, 20, 22, 24, 26 (+2 Strength each).
+  - From your turn 2, the first HP loss from any source (cards, potions, reflected damage) that leaves it at 150 or less (102 damage) wipes its Strength to 0 and stuns it. Turn 1 damage counts, but the trigger waits for the next hit.
+  - Triggered on your turn, it cancels the Plow it showed: 2 enemy turns with no damage follow, so get there early. Triggered during its Plow (Flame Barrier), the Plow lands, it keeps 2 Strength, and the stun comes the enemy turn after (from the code).
+  - Play no Block on the trigger turn or the turn after. Strength loss before the trigger only helps until the trigger, which wipes it: save lasting Strength loss for phase 2. Vulnerable and Weak stay.
+  - Phase 2 repeats Beast Cry (0 damage, *Ringing*: you play only 1 card next turn), Stomp 15, Crush 17 + 3 Strength: 32, 38, 44 per 3 turns. A turn it shows `debuff`: no Block, all damage before the 1-card turn.
+  - Each 1-card turn faces Stomp (15, 18, 21). Energy is full and potions are not limited: play your single strongest card, Block or attack.
+- **The Kin** (Kin Priest e2 190 HP; Kin Followers e0 and e1, 58-59 HP, Minions)
+  - Killing the Priest kills both Followers and wins: 190 HP of work against 307 for all 3. Single-target damage goes into e2 by default.
+  - Kill a Follower only when a leftover hit or area damage finishes it, e0 before e1 (e0 deals 6 more per 3 turns). Feed on a Follower gives nothing.
+  - Priest: 8 + Frail, 8 + Weak, Beam 3x3, Ritual +2 Strength. All 3 together by enemy turn: 13, 19, 17, 7, 27, 22, 24, 23, 28, 23, 50, 20.
+  - Your turns 2, 6, 10 are Frail (card Block x0.75): lean on attacks. Turns 3, 7, 11 are Weak (attacks x0.75): lean on Block.
+  - Enemy turns 1 (13) and 4 (7) are the cheap ones to skip Block and set up. End it before enemy turn 11 (50 damage).
 
-## ACT 1B: UNDERDOCKS
+## ACT 1B: UNDERDOCKS (unverified, from guides)
 ### Elites
 - **Skulking Colony** (70-75 HP; buffed 3 times through v0.106)
   - *Hardened Shell*: it can't lose more than 15 HP per turn (20 from v0.106).
@@ -70,7 +75,7 @@ Exact numbers and patterns: `strategy/wiki/enemies/<name>.md` (bygone-effigy, by
   - Play: kill fast to keep Steam low. Trading HP for speed is right.
   - Before landing the kill, make sure you can block or survive the explosion. Sometimes delay the kill a turn to set up Block or Weak.
 
-## ACT 2: HIVE
+## ACT 2: HIVE (unverified, from guides)
 ### Elites
 - **Decimillipede** (3 segments, 40-46 HP each)
   - Each segment cycles Bulk (6 + 2 Strength) / Writhe 5×2 / Outgas (8 + Weak).
@@ -109,7 +114,7 @@ Exact numbers and patterns: `strategy/wiki/enemies/<name>.md` (bygone-effigy, by
   - Play: usually kill Rocket first (its Laser is the biggest hit). Turtle on the turn after the first claw dies.
   - Considered the easiest Act 2 boss.
 
-## ACT 3: GLORY
+## ACT 3: GLORY (unverified, from guides)
 ### Elites
 - **Knights** (Flail Knight 101 HP, Spectral Knight 93 HP, Magi Knight 82 HP; presumably fought together, unverified)
   - Flail Knight: Ram 15 / Flail 9×2 / Breaker +3 Strength.
@@ -139,15 +144,6 @@ Exact numbers and patterns: `strategy/wiki/enemies/<name>.md` (bygone-effigy, by
     - P2: block cleanly.
     - P3: burst on non-Intangible turns and block on the others.
     - Use the stun turns for Powers. It's an endurance fight.
-- **Doormaker** (v0.103-v0.104 main/beta; removed from the pool in v0.105 beta / v0.107.1 main)
-  - Door / Doormaker with 489 (512) HP. Rotates hand-hostile modes:
-    - Hunger: 30 (35), and your played Attacks and Skills Exhaust.
-    - Scrutiny: 24 (26), and you can't draw extra cards.
-    - Dramatic Open: 10×2, and you lose 1 Energy per card played, +3 (4) Strength.
-  - Play:
-    - Hunger turns: play Powers, X-costs and natively-exhausting cards. Keep core scaling cards in hand.
-    - Energy-burn turns: play few, expensive cards.
-    - Burst during its stun or spawn turn. Hard on Sly-cycle Silent, Soul-loop Necrobinder and 0-cost Defect.
 - **Aeonglass** (512 (535) HP, 3 Artifact; Act 3 boss from v0.105 beta / v0.107.1 main)
   - Fixed loop: **Ebb** 22-26 (26-32) + gains 33 Block → **Eye Lasers** 11×2 (12×2) → **Increasing Intensity** (+2+X Strength; shuffles in and upgrades Wither) → repeat.
   - *Withering Presence*: every 6 cards you play, a **Wither** status is added to your hand. Wither hurts if it stays there, and it can't be upgraded or Retained.
@@ -157,10 +153,6 @@ Exact numbers and patterns: `strategy/wiki/enemies/<name>.md` (bygone-effigy, by
     - Prefer fewer, high-impact cards per turn: X-costs, big hits, poison, Doom, orbs.
     - Block-only stalling loses because Strength and Wither escalate.
 
-## A10 Double Boss
+## A10 Double Boss (unverified, from guides)
 - Two Act 3 bosses back-to-back. Your scaling resets between them.
-- Keep potions for the second fight unless the first one is about to kill you. Decks with fast re-setup win.
-
-## Hallway notes
-- Several late enemies were buffed in v0.111 beta (Axebot, Exoskeleton, Globe Head, Louse Progenitor; plus Mecha Knight, Soul Fysh, Entomancer).
-- Re-check damage thresholds before taking a second elite.
+- Spend a potion in the first boss when it saves more HP there than it would in the second; don't hold potions until the first boss threatens a kill. Decks with fast re-setup win.
