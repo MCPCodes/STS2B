@@ -211,6 +211,10 @@ public sealed class SubscriptionBrain : IPlayBrain, IDisposable
         get { lock (_gate) return _running; }
     }
 
+    /// <summary>Always null: the controller follows the run with its own poll for this brain,
+    /// which never stops for a reason that switches brains.</summary>
+    public bool? LastSeenInRun => null;
+
     /// <summary>Raised once when the loop ends, on the loop's task, with the reason and a line
     /// saying why. Every reason but <see cref="BrainStopReason.UserStop"/> and
     /// <see cref="BrainStopReason.RunEnded"/> has already been announced, so a handler shouldn't

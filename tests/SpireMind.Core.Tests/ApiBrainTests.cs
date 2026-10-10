@@ -50,6 +50,7 @@ public class ApiBrainTests
         // The opening message carries the state, so the first decision needs no extra call.
         var opening = Text(rig.Api[0]["messages"]![0]!);
         Assert.StartsWith(ApiBrain.Starting, opening);
+        Assert.Contains($"Today is {ApiBrain.Today(rig.Now):yyyy-MM-dd}.", opening);
         Assert.Contains("\"version\":7", opening);
         Assert.EndsWith(ApiBrain.CarryOn, opening);
 
@@ -580,7 +581,7 @@ public class ApiBrainTests
 
         var request = rig.Api[0];
         Assert.Equal("claude-opus-5-5", request["model"]!.GetValue<string>());
-        Assert.Equal(16000, request["max_tokens"]!.GetValue<int>());
+        Assert.Equal(32000, request["max_tokens"]!.GetValue<int>()); // high effort
         foreach (var absent in new[] { "temperature", "top_p", "top_k", "thinking", "tool_choice" })
             Assert.False(request.ContainsKey(absent), absent);
         Assert.Equal("high", request["output_config"]!["effort"]!.GetValue<string>());
@@ -611,6 +612,62 @@ public class ApiBrainTests
         // The host's own specs are untouched.
         Assert.Equal(1, rig.Host.Specs[1].InputSchema["properties"]!["timeout_seconds"]!["minimum"]!.GetValue<int>());
         Assert.False(rig.Host.Specs[0].InputSchema.ContainsKey("additionalProperties"));
+    }
+
+    [Theory]
+    [InlineData("low", null, 16000)]
+    [InlineData("medium", null, 16000)]
+    [InlineData("high", null, 32000)]
+    [InlineData("xhigh", null, 64000)]
+    [InlineData("max", null, 64000)]
+    [InlineData("max", 20000, 20000)]
+    [InlineData("low", 40000, 40000)]
+    public async Task Max_tokens_follow_the_effort_unless_config_sets_them(string effort, int? maxTokens, int expected)
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Effort = effort, MaxTokens = maxTokens };
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(expected, rig.Api[0]["max_tokens"]!.GetValue<int>());
+        Assert.Equal(effort, rig.Api[0]["output_config"]!["effort"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task The_brain_tells_whether_it_last_saw_a_run()
+    {
+        using var rig = new Rig();
+        var screen = "menu";
+        rig.Host.Handler = (_, _, _) => Task.FromResult(Outcome(Snap(screen, false)));
+        Assert.Null(rig.Brain.LastSeenInRun);
+
+        rig.Brain.Start();
+        await WaitFor(() => rig.Brain.LastSeenInRun == false);
+
+        // A run starts: the next idle poll sees it and the first request goes out.
+        screen = "event";
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+        Assert.True(rig.Brain.LastSeenInRun);
+    }
+
+    [Fact]
+    public void Today_is_the_players_local_calendar_day()
+    {
+        var utc = new DateTime(2026, 10, 10, 3, 30, 0, DateTimeKind.Utc);
+        Assert.Equal(utc.ToLocalTime().Date, ApiBrain.Today(utc));
+        Assert.Equal(utc.ToLocalTime().Date, ApiBrain.Today(DateTime.SpecifyKind(utc, DateTimeKind.Unspecified)));
+        Assert.Equal(new DateTime(2026, 10, 10), ApiBrain.Today(new DateTime(2026, 10, 10, 23, 59, 0, DateTimeKind.Local)));
+    }
+
+    private static async Task WaitFor(Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow + Guard;
+        while (!condition())
+        {
+            Assert.True(DateTime.UtcNow < deadline, "timed out waiting");
+            await Task.Delay(5);
+        }
     }
 
     [Fact]
@@ -1226,6 +1283,22 @@ public class NotesToolsTests : IDisposable
         Assert.True(tooBig.IsError);
         Assert.Equal('a', File.ReadAllText(Path.Combine(_dir, "runs", "current.md"))[0]);
         Assert.Single(Directory.GetFiles(Path.Combine(_dir, "runs")));
+    }
+
+    [Fact]
+    public void The_header_line_the_prompt_asks_for_names_the_archive()
+    {
+        // The API brain can't read runs/README.md, so the format in the harness notes is all it
+        // has; a header written that way must give the archive its run's date and character.
+        var notes = PromptBuilder.HarnessNotes;
+        var start = notes.IndexOf("`# ", StringComparison.Ordinal) + 1;
+        var example = notes[start..notes.IndexOf('`', start)];
+        Assert.Contains("started YYYY-MM-DD", example);
+
+        Write("runs/current.md", example.Replace("YYYY-MM-DD", "2026-10-09").Replace("<what you picked>", "gold") + "\nfloor 1");
+        var archived = Write("runs/current.md", "# Silent, started 2026-10-10, Neow: card\n").Payload["archived_previous_as"]?.GetValue<string>();
+
+        Assert.Equal("runs/2026-10-09-ironclad.md", archived);
     }
 
     [Fact]

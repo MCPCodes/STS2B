@@ -478,6 +478,75 @@ public class ClaudeClientTests
         Assert.Equal(20, handler.Requests.Count);
     }
 
+    [Fact]
+    public void Each_try_waits_longer_for_a_larger_max_tokens()
+    {
+        using var client = new ClaudeClient(Key, new FakeHandler());
+
+        Assert.Equal(TimeSpan.FromMinutes(10), client.TimeoutFor(new JsonObject()));
+        Assert.Equal(TimeSpan.FromMinutes(10), client.TimeoutFor(Request()));
+        Assert.Equal(TimeSpan.FromMinutes(15), client.TimeoutFor(new JsonObject { ["max_tokens"] = 32_000 }));
+        Assert.Equal(TimeSpan.FromMinutes(30), client.TimeoutFor(JsonNode.Parse("""{"max_tokens": 64000}""")!.AsObject()));
+        Assert.Equal(TimeSpan.FromHours(1), client.TimeoutFor(new JsonObject { ["max_tokens"] = 128_000 }));
+
+        using var patient = new ClaudeClient(Key, new FakeHandler()) { RequestTimeout = TimeSpan.FromMinutes(45) };
+        Assert.Equal(TimeSpan.FromMinutes(45), patient.TimeoutFor(new JsonObject { ["max_tokens"] = 64_000 }));
+    }
+
+    [Fact]
+    public async Task The_clients_own_connections_work_with_keep_alive()
+    {
+        // No handler passed, so the client connects through its own keep-alive callback. A bare
+        // HTTP/1.1 server on loopback answers once.
+        var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            var served = Task.Run(async () =>
+            {
+                using var tcp = await listener.AcceptTcpClientAsync();
+                using var stream = tcp.GetStream();
+                var buffer = new byte[64 * 1024];
+                var read = 0;
+                var text = "";
+                while (!text.Contains("\r\n\r\n") || read < HeaderEnd(text) + ContentLength(text))
+                {
+                    var n = await stream.ReadAsync(buffer.AsMemory(read));
+                    if (n == 0) break;
+                    read += n;
+                    text = Encoding.UTF8.GetString(buffer, 0, read);
+                }
+                var body = Encoding.UTF8.GetBytes(OkBody);
+                var head = $"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n";
+                await stream.WriteAsync(Encoding.ASCII.GetBytes(head));
+                await stream.WriteAsync(body);
+                return text;
+            });
+
+            using var client = new ClaudeClient(Key, baseUrl: $"http://127.0.0.1:{port}");
+            var response = await client.SendAsync(Request(), CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.Equal("tool_use", response.StopReason);
+            var request = await served.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.StartsWith("POST /v1/messages HTTP/1.1", request);
+        }
+        finally
+        {
+            listener.Stop();
+        }
+
+        static int HeaderEnd(string text) => text.IndexOf("\r\n\r\n", StringComparison.Ordinal) + 4;
+
+        static int ContentLength(string text)
+        {
+            foreach (var line in text[..HeaderEnd(text)].Split("\r\n"))
+                if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+                    return int.Parse(line["Content-Length:".Length..].Trim());
+            return 0;
+        }
+    }
+
     /// <summary>Records each request and answers from a script, one entry per request. An entry
     /// may throw to simulate a network failure.</summary>
     private sealed class FakeHandler : HttpMessageHandler

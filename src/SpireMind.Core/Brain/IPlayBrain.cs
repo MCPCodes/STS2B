@@ -11,6 +11,12 @@ public interface IPlayBrain
     /// <see cref="Stopped"/> is raised).</summary>
     bool IsRunning { get; }
 
+    /// <summary>Whether a run was in progress when the brain last looked at the game: true,
+    /// false, or null when it hasn't looked since <see cref="Start"/> or doesn't keep track.
+    /// The controller reads it when the brain stops, since a brain that just failed has usually
+    /// just read the screen, more recently than the controller's own poll.</summary>
+    bool? LastSeenInRun { get; }
+
     /// <summary>Start playing on a background task. False when already running.</summary>
     bool Start();
 

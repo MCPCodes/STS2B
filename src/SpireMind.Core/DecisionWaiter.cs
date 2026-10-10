@@ -26,6 +26,14 @@ public sealed class DecisionWaiter
         _versioner.Stamp(await _game.CaptureAsync(ct));
 
     /// <summary>
+    /// The game's current snapshot without a version: the versioner is left alone, so a look
+    /// from outside the bot's tools (the brain controller's screen poll) can't bump the version
+    /// while the model plans. Otherwise a deck view opened and closed meanwhile would count as
+    /// two changes, and the model's next act would be refused as stale with the game unchanged.
+    /// </summary>
+    public Task<GameSnapshot> PeekAsync(CancellationToken ct) => _game.CaptureAsync(ct);
+
+    /// <summary>
     /// Wait for a settled decision newer than <paramref name="afterVersion"/> (or any
     /// settled decision when null). On timeout returns whatever the game shows now.
     /// </summary>

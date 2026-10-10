@@ -84,8 +84,9 @@ public sealed record TokenUsage(long Input, long Output, long CacheRead, long Ca
 
 /// <summary>
 /// What a response cost. <see cref="KnownModel"/> is false when the model isn't in the price
-/// table and the most expensive entry's prices were used instead
-/// (<see cref="ModelPrices.FallbackModel"/>), so the estimate errs high.
+/// table and the highest rate of each kind in it was used instead
+/// (<see cref="ModelPrices.Fallback"/>, priced as <see cref="ModelPrices.FallbackName"/>), so
+/// the estimate errs high.
 /// <see cref="LongPrompt"/> is true when the long-prompt tier applied.
 /// </summary>
 public readonly record struct UsageCost(decimal Usd, string PricedAs, bool KnownModel, bool LongPrompt);
@@ -93,17 +94,15 @@ public readonly record struct UsageCost(decimal Usd, string PricedAs, bool Known
 /// <summary>
 /// List prices for the models the brain can use, and the cost of a response from its usage.
 /// There is no API to read the credit balance with a normal key, so spend is the mod's own
-/// estimate from these numbers (checked against the pricing docs on 2026-10-09). Update the
+/// estimate from these numbers (checked against the pricing docs on 2026-10-10). Update the
 /// table when prices change or a model is added.
 /// </summary>
 public static class ModelPrices
 {
     private const decimal PerToken = 1_000_000m;
 
-    /// <summary>Unknown models are priced as this one, the most expensive entry in <see cref="Table"/>,
-    /// so the monthly cap never lets through more than its value. A cheaper unknown model is
-    /// overcounted (and stops sooner) until it is added to the table.</summary>
-    public const string FallbackModel = "claude-fable-5-1";
+    /// <summary>What <see cref="UsageCost.PricedAs"/> says for a model the table doesn't know.</summary>
+    public const string FallbackName = "the highest rates";
 
     public static IReadOnlyDictionary<string, ModelPrice> Table { get; } = new Dictionary<string, ModelPrice>(StringComparer.OrdinalIgnoreCase)
     {
@@ -115,18 +114,33 @@ public static class ModelPrices
             LongPromptMultiplier = 5m,
         },
         ["claude-fable-5-1"] = new(Input: 10m, CacheWrite5m: 12.5m, CacheWrite1h: 20m, CacheRead: 0.25m, Output: 50m),
+        // The previous releases of the entry above, still served: the same prices, but cache reads at $1.
+        ["claude-fable-5"] = new(Input: 10m, CacheWrite5m: 12.5m, CacheWrite1h: 20m, CacheRead: 1.00m, Output: 50m),
+        ["claude-mythos-5"] = new(Input: 10m, CacheWrite5m: 12.5m, CacheWrite1h: 20m, CacheRead: 1.00m, Output: 50m),
     };
+
+    /// <summary>The prices of a model the table doesn't know: the highest of each rate in
+    /// <see cref="Table"/>, taken one by one, so no line of the estimate comes out lower than it
+    /// would for any model listed here, and the monthly cap can't be overrun by a model priced
+    /// like one of them. A cheaper unknown model is overcounted (and stops sooner) until it is
+    /// added to the table. Declared after the table, which it is computed from.</summary>
+    public static ModelPrice Fallback { get; } = new(
+        Input: Table.Values.Max(p => p.Input),
+        CacheWrite5m: Table.Values.Max(p => p.CacheWrite5m),
+        CacheWrite1h: Table.Values.Max(p => p.CacheWrite1h),
+        CacheRead: Table.Values.Max(p => p.CacheRead),
+        Output: Table.Values.Max(p => p.Output));
 
     /// <summary>True when <paramref name="model"/> (a full id, a dated snapshot of one, or an
     /// alias such as "sonnet") has an entry in <see cref="Table"/>.</summary>
     public static bool IsKnown(string? model) => Lookup(model) is not null;
 
-    /// <summary>The prices for <paramref name="model"/>, or <see cref="FallbackModel"/>'s when it is unknown.</summary>
+    /// <summary>The prices for <paramref name="model"/>, or <see cref="Fallback"/> when it is unknown.</summary>
     public static ModelPrice For(string? model, out bool known)
     {
         var key = Lookup(model);
         known = key is not null;
-        return Table[key ?? FallbackModel];
+        return key is not null ? Table[key] : Fallback;
     }
 
     /// <summary>The cost of one response from its <c>usage</c> object. Pass the response's own
@@ -137,7 +151,7 @@ public static class ModelPrices
     public static UsageCost Cost(string? model, TokenUsage usage)
     {
         var key = Lookup(model);
-        var price = Table[key ?? FallbackModel];
+        var price = key is not null ? Table[key] : Fallback;
         var longPrompt = price.LongPromptThreshold is { } threshold && usage.PromptTokens > threshold;
         var factor = longPrompt ? price.LongPromptMultiplier : 1m;
 
@@ -146,11 +160,13 @@ public static class ModelPrices
                    + usage.CacheWrite1h * price.CacheWrite1h
                    + usage.CacheRead * price.CacheRead
                    + usage.Output * price.Output) * factor / PerToken;
-        return new UsageCost(usd, key ?? FallbackModel, KnownModel: key is not null, LongPrompt: longPrompt);
+        return new UsageCost(usd, key ?? FallbackName, KnownModel: key is not null, LongPrompt: longPrompt);
     }
 
     // The table key for a model id: an exact match, an alias, or a dated or suffixed snapshot
-    // such as "claude-opus-5-5-20261001". Null when nothing matches.
+    // such as "claude-opus-5-5-20261001" (an "@" or "[" suffix counts too). After a hyphen only
+    // a date counts, so a later version of a listed model isn't taken for a snapshot of it.
+    // Null when nothing matches.
     private static string? Lookup(string? model)
     {
         if (string.IsNullOrWhiteSpace(model))
@@ -159,8 +175,13 @@ public static class ModelPrices
         if (Table.ContainsKey(id))
             return Table.Keys.First(k => string.Equals(k, id, StringComparison.OrdinalIgnoreCase));
         return Table.Keys
-            .Where(k => id.Length > k.Length && id.StartsWith(k, StringComparison.OrdinalIgnoreCase) && id[k.Length] is '-' or '@' or '[')
+            .Where(k => id.Length > k.Length && id.StartsWith(k, StringComparison.OrdinalIgnoreCase) && IsSnapshotSuffix(id.AsSpan(k.Length)))
             .OrderByDescending(k => k.Length)
             .FirstOrDefault();
     }
+
+    // "@..." or "[...]" after the model id, or a hyphen and a date of 8 digits.
+    private static bool IsSnapshotSuffix(ReadOnlySpan<char> suffix) =>
+        suffix[0] is '@' or '['
+        || (suffix.Length >= 9 && suffix[0] == '-' && suffix[1..9].IndexOfAnyExceptInRange('0', '9') < 0);
 }

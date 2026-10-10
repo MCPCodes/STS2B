@@ -68,6 +68,48 @@ public class BridgeTests
         Assert.Equal(40, outcome.Payload["current"]!["state"]!["enemies"]![0]!["hp"]!.GetValue<int>());
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_screen_peek_while_the_model_plans_leaves_its_version_valid(bool peek)
+    {
+        // The brain controller's poll looks at the screen while a deck view is open, then again
+        // once it is closed. A peek leaves the version alone; a stamped capture (the old way)
+        // counts two changes and the model's act is refused with the game unchanged.
+        var game = new CoverableGame();
+        var versioner = new SnapshotVersioner();
+        var waiter = new DecisionWaiter(game, versioner) { PollInterval = TimeSpan.FromMilliseconds(10), SettleTime = TimeSpan.FromMilliseconds(30) };
+        var tools = new BotTools(game, waiter, versioner, new ChatHub()) { ActSettleTimeout = TimeSpan.FromSeconds(3) };
+        Task<GameSnapshot> Look() => peek ? waiter.PeekAsync(CancellationToken.None) : waiter.CaptureAsync(CancellationToken.None);
+        var version = Call(tools, "get_state")["version"]!.GetValue<long>();
+
+        game.Covered = true;
+        Assert.Equal("unknown", (await Look()).Screen);
+        game.Covered = false;
+        Assert.Equal("combat", (await Look()).Screen);
+
+        var outcome = await tools.CallAsync("act", new JsonObject { ["action_id"] = "play:0>e0", ["version"] = version }, CancellationToken.None);
+        Assert.Equal(!peek, outcome.IsError);
+        if (peek)
+            Assert.Equal(34, outcome.Payload["next"]!["state"]!["enemies"]![0]!["hp"]!.GetValue<int>());
+        else
+            Assert.Contains("Snapshot changed", outcome.Payload["error"]!.GetValue<string>());
+    }
+
+    /// <summary>The fake fight, with a deck view the test can open over it.</summary>
+    private sealed class CoverableGame : IGameBridge
+    {
+        private readonly FakeGame _game = new() { ActionDelay = TimeSpan.FromMilliseconds(50) };
+
+        public volatile bool Covered;
+
+        public Task<GameSnapshot> CaptureAsync(CancellationToken ct) =>
+            Covered ? Task.FromResult(GameSnapshot.Busy("unknown", "a deck view or the pause menu is open")) : _game.CaptureAsync(ct);
+
+        public Task<ActionResult> ExecuteAsync(string actionId, CancellationToken ct) => _game.ExecuteAsync(actionId, ct);
+        public Task<JsonObject> DescribeDeckAsync(CancellationToken ct) => _game.DescribeDeckAsync(ct);
+    }
+
     [Fact]
     public void Illegal_action_is_rejected()
     {

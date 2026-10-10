@@ -262,6 +262,7 @@ public sealed partial class BrainController
         var bot = BotName;
         if (brain is null)
             return (wasOn ? $"{bot} isn't playing, and won't start by itself until you type /start." : $"{bot} isn't playing.") + saved;
+        ClearThinking(); // at once, not only when the brain has stopped (StopBrain clears it again)
         _ = StopBrain(brain);
         return $"{bot} stopped. /start hands control back.{saved}";
     }
@@ -470,7 +471,9 @@ public sealed partial class BrainController
 
     // Stops a brain on a pool thread, never the caller's: the caller may be the main thread,
     // which the brain's loop may be waiting on. A brain still running after StopWaitLimit is
-    // aborted. The task never faults, and the next start waits for it.
+    // aborted. Then the thinking mark is cleared, also when a tool result that came in during
+    // the stop set it again. The task never faults, and the next start waits for it, so the
+    // clear can't wipe the next brain's mark.
     private Task StopBrain(IPlayBrain brain)
     {
         var task = Task.Run(async () =>
@@ -483,17 +486,20 @@ public sealed partial class BrainController
                 {
                     timeout.Cancel();
                     await stop.ConfigureAwait(false);
-                    return;
                 }
-                _ = stop.ContinueWith(t => _ = t.Exception, CancellationToken.None,
-                    TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
-                Log(Invariant($"brain: a brain didn't stop within {StopWaitLimit.TotalSeconds:0} s; aborting it"));
-                brain.Abort();
+                else
+                {
+                    _ = stop.ContinueWith(t => _ = t.Exception, CancellationToken.None,
+                        TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+                    Log(Invariant($"brain: a brain didn't stop within {StopWaitLimit.TotalSeconds:0} s; aborting it"));
+                    brain.Abort();
+                }
             }
             catch (Exception ex)
             {
                 Log($"brain: stopping a brain failed: {ex.GetType().Name}: {ex.Message}");
             }
+            ClearThinking();
         });
         lock (_gate)
             _stopping = _stopping.IsCompleted ? task : Task.WhenAll(_stopping, task);
@@ -505,6 +511,7 @@ public sealed partial class BrainController
     private void OnStopped(IPlayBrain brain, long generation, BrainStopReason reason, string message)
     {
         string? line = null;
+        var seen = brain.LastSeenInRun;
         lock (_gate)
         {
             _live.RemoveAll(b => ReferenceEquals(b, brain));
@@ -518,6 +525,10 @@ public sealed partial class BrainController
             _brain = null;
             _kind = BrainKind.None;
             Log($"brain: the {KindName(kind)} brain stopped ({reason}): {message}");
+            // It can't act on a decision it was handed. Here, after the checks above, so a late
+            // stop of a replaced brain can't wipe the next one's mark, and before a fallback
+            // starts. ChatHub never calls out while it holds its lock, so taking it under ours is safe.
+            ClearThinking();
             if (_shutdown)
                 return;
 
@@ -526,9 +537,13 @@ public sealed partial class BrainController
                 case BrainStopReason.NoKey or BrainStopReason.Unauthorized or BrainStopReason.OutOfCredit
                     or BrainStopReason.SpendLimit or BrainStopReason.MonthlyCap when kind == BrainKind.Api:
                     // The API brain already said why. The subscription takes over for this run,
-                    // or for the next one when this happened between runs.
-                    var inRun = _inRun == true;
-                    _apiFailedRun = inRun ? _run : _run + 1;
+                    // or for the next one when this happened between runs. The brain's own look
+                    // at the screen decides, since the poll's can be PollInterval old: a request
+                    // that fails at once can beat the poll to a run start or a game over. A run
+                    // the poll hasn't counted yet is the one its next round counts as _run + 1.
+                    var polled = _inRun == true;
+                    var inRun = seen ?? polled;
+                    _apiFailedRun = inRun && polled ? _run : _run + 1;
                     line = inRun ? SwitchingLine : SwitchingNextRunLine;
                     if (inRun && _settings.Autostart && !Launch(BrainKind.Subscription, _settings, out var problem))
                         line += " " + CouldntStart(problem);
@@ -834,6 +849,14 @@ public sealed partial class BrainController
     private static string Budget(decimal usd) => usd == decimal.Truncate(usd) ? Invariant($"${usd:0}") : Money(usd);
 
     private static string Invariant(FormattableString text) => text.ToString(CultureInfo.InvariantCulture);
+
+    // A brain that stopped can't act on the decision it was handed, so no thought cloud should
+    // stay over the character while the human plays (as /pause does).
+    private void ClearThinking()
+    {
+        try { _chat.MarkThinking(false); }
+        catch (Exception ex) { Log($"brain: couldn't clear the thinking mark: {ex.GetType().Name}: {ex.Message}"); }
+    }
 
     private void Announce(string line)
     {

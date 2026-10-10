@@ -12,7 +12,9 @@ namespace SpireMind.Core.Brain;
 /// <summary>
 /// A minimal client for the Claude Messages API: <c>POST /v1/messages</c> with the key in
 /// x-api-key and anthropic-version 2023-06-01. No SDK, so the mod stays one DLL. Requests are
-/// not streamed.
+/// not streamed, so a long reply comes back in one piece after minutes of silence: each try
+/// waits longer the larger the request's max_tokens (<see cref="TimeoutFor"/>), and TCP
+/// keep-alive keeps the quiet connection from being dropped along the way.
 ///
 /// Passing failures are retried, at most <see cref="MaxAttempts"/> tries in total: 429 after
 /// its retry-after (unless it is the Console spend limit), and 500, 502, 503, 504, 529 and
@@ -67,6 +69,7 @@ public sealed class ClaudeClient : IClaudeApi, IDisposable
             {
                 ConnectTimeout = TimeSpan.FromSeconds(30),
                 PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+                ConnectCallback = ConnectWithKeepAliveAsync,
             })
             : new HttpClient(handler, disposeHandler: false);
         // Each try has its own deadline (RequestTimeout), so the client-wide one is off.
@@ -74,8 +77,22 @@ public sealed class ClaudeClient : IClaudeApi, IDisposable
         _http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("SpireMind", "1.0"));
     }
 
-    /// <summary>The deadline for one try, response body included.</summary>
+    /// <summary>The deadline for one try, response body included, unless the request's
+    /// max_tokens calls for a longer one (<see cref="TimeoutFor"/>).</summary>
     public TimeSpan RequestTimeout { get; init; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// The deadline for one try of <paramref name="request"/>: <see cref="RequestTimeout"/>, or
+    /// longer when its max_tokens could take longer to write at a slow 128000 tokens an hour
+    /// (an hour at the models' 128000 limit, 30 minutes at 64000). A try cut off by its deadline
+    /// is retried and billed again, so the deadline must outlast the longest reply.
+    /// </summary>
+    public TimeSpan TimeoutFor(JsonObject request)
+    {
+        var maxTokens = request["max_tokens"] is JsonValue v && v.TryGetValue<int>(out var n) ? Math.Max(0, n) : 0;
+        var writing = TimeSpan.FromHours(1) * (maxTokens / 128_000.0);
+        return writing > RequestTimeout ? writing : RequestTimeout;
+    }
 
     /// <summary>A 429 asking to wait longer than this isn't retried; the exception carries the wait.</summary>
     public TimeSpan MaxRetryAfter { get; init; } = TimeSpan.FromMinutes(5);
@@ -91,11 +108,12 @@ public sealed class ClaudeClient : IClaudeApi, IDisposable
     {
         ArgumentNullException.ThrowIfNull(request);
         var body = request.ToJsonString();
+        var timeout = TimeoutFor(request);
 
         for (var attempt = 1; ; attempt++)
         {
             ct.ThrowIfCancellationRequested();
-            var (response, failure) = await AttemptAsync(body, attempt, ct);
+            var (response, failure) = await AttemptAsync(body, attempt, timeout, ct);
             if (response is not null)
                 return response;
 
@@ -118,10 +136,10 @@ public sealed class ClaudeClient : IClaudeApi, IDisposable
     private sealed record Failure(ClaudeErrorKind Kind, int? Status, string? ErrorType, string Message,
         string? RequestId, bool Retryable, TimeSpan? RetryAfter = null, Exception? Inner = null);
 
-    private async Task<(ClaudeResponse? Response, Failure? Failure)> AttemptAsync(string body, int attempt, CancellationToken ct)
+    private async Task<(ClaudeResponse? Response, Failure? Failure)> AttemptAsync(string body, int attempt, TimeSpan timeout, CancellationToken ct)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        deadline.CancelAfter(RequestTimeout);
+        deadline.CancelAfter(timeout);
 
         using var message = new HttpRequestMessage(HttpMethod.Post, _messagesUri)
         {
@@ -160,7 +178,7 @@ public sealed class ClaudeClient : IClaudeApi, IDisposable
         {
             // Our deadline, or a timeout inside the handler (connect timeout). Not the caller.
             return (null, new Failure(ClaudeErrorKind.Network, null, "timeout",
-                $"No response within {RequestTimeout.TotalSeconds.ToString("0.#", CultureInfo.InvariantCulture)} s.",
+                $"No response within {timeout.TotalSeconds.ToString("0.#", CultureInfo.InvariantCulture)} s.",
                 null, Retryable: true, Inner: Safe(ex)));
         }
         catch (HttpRequestException ex)
@@ -170,6 +188,34 @@ public sealed class ClaudeClient : IClaudeApi, IDisposable
         catch (IOException ex)
         {
             return (null, new Failure(ClaudeErrorKind.Network, null, null, Redact(ex.Message), null, Retryable: true, Inner: Safe(ex)));
+        }
+    }
+
+    // Connects as the handler would, with TCP keep-alive probes every 15 s after 60 s of silence,
+    // so a router doesn't drop the connection while a long reply is being written. Where an
+    // option can't be set, the connection goes ahead without it.
+    private static async ValueTask<System.IO.Stream> ConnectWithKeepAliveAsync(SocketsHttpConnectionContext context, CancellationToken ct)
+    {
+        var socket = new System.Net.Sockets.Socket(System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp) { NoDelay = true };
+        try
+        {
+            try
+            {
+                socket.SetSocketOption(System.Net.Sockets.SocketOptionLevel.Socket, System.Net.Sockets.SocketOptionName.KeepAlive, true);
+                socket.SetSocketOption(System.Net.Sockets.SocketOptionLevel.Tcp, System.Net.Sockets.SocketOptionName.TcpKeepAliveTime, 60);
+                socket.SetSocketOption(System.Net.Sockets.SocketOptionLevel.Tcp, System.Net.Sockets.SocketOptionName.TcpKeepAliveInterval, 15);
+            }
+            catch (Exception ex) when (ex is System.Net.Sockets.SocketException or PlatformNotSupportedException)
+            {
+                // Keep-alive is a nicety; the request works without it.
+            }
+            await socket.ConnectAsync(context.DnsEndPoint, ct).ConfigureAwait(false);
+            return new System.Net.Sockets.NetworkStream(socket, ownsSocket: true);
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
         }
     }
 

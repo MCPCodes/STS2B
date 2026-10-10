@@ -30,6 +30,13 @@ public sealed record BrainSettings
     public const string DefaultEffort = "medium";
     public const decimal DefaultMonthlyBudgetUsd = 200m;
 
+    /// <summary>The range config.json's max_tokens accepts: below the minimum a reply has no room
+    /// to think and act, and the maximum is the models' output limit.</summary>
+    public const int MinMaxTokens = 1024;
+
+    /// <inheritdoc cref="MinMaxTokens"/>
+    public const int MaxMaxTokens = 128_000;
+
     /// <summary>The values output_config.effort accepts, lowest first.</summary>
     public static IReadOnlyList<string> Efforts { get; } = ["low", "medium", "high", "xhigh", "max"];
 
@@ -49,6 +56,7 @@ public sealed record BrainSettings
     private readonly string _model = DefaultModel;
     private readonly string _effort = DefaultEffort;
     private readonly decimal _budget = DefaultMonthlyBudgetUsd;
+    private readonly int? _maxTokens;
 
     /// <summary>The folder holding config.json, api_key, spend.json and transcripts.</summary>
     public string ConfigDir { get; init; } = DefaultConfigDir;
@@ -81,6 +89,17 @@ public sealed record BrainSettings
     {
         get => _budget;
         init => _budget = value >= 0 ? value : throw new ArgumentOutOfRangeException(nameof(MonthlyBudgetUsd), "The budget can't be negative.");
+    }
+
+    /// <summary>The max_tokens of every API request, or null (the default) to size it from the
+    /// effort (<see cref="ApiBrain.MaxTokensFor"/>). Values outside <see cref="MinMaxTokens"/> to
+    /// <see cref="MaxMaxTokens"/> throw <see cref="ArgumentOutOfRangeException"/>.</summary>
+    public int? MaxTokens
+    {
+        get => _maxTokens;
+        init => _maxTokens = value is null or (>= MinMaxTokens and <= MaxMaxTokens)
+            ? value
+            : throw new ArgumentOutOfRangeException(nameof(MaxTokens), $"max_tokens must be from {MinMaxTokens} to {MaxMaxTokens}.");
     }
 
     /// <summary>Start the brain by itself when a run is in progress. /start sets it, /stop clears it.</summary>
@@ -126,8 +145,8 @@ public sealed record BrainSettings
     }
 
     /// <summary>
-    /// Writes config.json atomically. Keys the mod doesn't know are kept; repo and claude_path
-    /// are removed when null. A config.json that can't be parsed is first moved aside to
+    /// Writes config.json atomically. Keys the mod doesn't know are kept; repo, max_tokens and
+    /// claude_path are removed when null. A config.json that can't be parsed is first moved aside to
     /// config.json.bak so a hand edit with a typo isn't lost. Throws <see cref="IOException"/>
     /// or <see cref="UnauthorizedAccessException"/> when the file can't be written.
     /// </summary>
@@ -153,6 +172,8 @@ public sealed record BrainSettings
         json["model"] = Model;
         json["effort"] = Effort;
         json["monthly_budget_usd"] = MonthlyBudgetUsd;
+        if (MaxTokens is { } maxTokens) json["max_tokens"] = maxTokens;
+        else json.Remove("max_tokens");
         json["autostart"] = Autostart;
         SetOrRemove(json, "claude_path", ClaudePath);
         ConfigFiles.WriteJson(path, json);
@@ -199,7 +220,7 @@ public sealed record BrainSettings
         };
         var sb = new StringBuilder("BrainSettings { ");
         sb.Append(CultureInfo.InvariantCulture, $"ConfigDir = {ConfigDir}, Model = {Model}, Effort = {Effort}, ");
-        sb.Append(CultureInfo.InvariantCulture, $"MonthlyBudgetUsd = {MonthlyBudgetUsd}, Autostart = {Autostart}, ");
+        sb.Append(CultureInfo.InvariantCulture, $"MonthlyBudgetUsd = {MonthlyBudgetUsd}, MaxTokens = {MaxTokens?.ToString(CultureInfo.InvariantCulture) ?? "by effort"}, Autostart = {Autostart}, ");
         sb.Append(CultureInfo.InvariantCulture, $"Repo = {Repo ?? "(none)"}, ClaudePath = {ClaudePath ?? "(none)"}, ApiKey = {key} }}");
         return sb.ToString();
     }
@@ -240,7 +261,7 @@ public sealed record BrainSettings
                     {
                         s = s with { Model = model };
                         if (!ModelPrices.IsKnown(s.Model))
-                            warnings.Add($"Model '{s.Model}' isn't in the price table; spend is estimated at {ModelPrices.FallbackModel} prices, the highest, so the cap may stop it early.");
+                            warnings.Add($"Model '{s.Model}' isn't in the price table; spend is estimated at the highest rates in it, so the cap may stop it early.");
                     }
                     break;
 
@@ -259,6 +280,13 @@ public sealed record BrainSettings
                         s = s with { MonthlyBudgetUsd = budget };
                     else if (node is not null)
                         warnings.Add($"monthly_budget_usd must be a number of dollars, zero or more; using {DefaultMonthlyBudgetUsd}.");
+                    break;
+
+                case "max_tokens":
+                    if (node is JsonValue t && t.TryGetValue<int>(out var maxTokens) && maxTokens is >= MinMaxTokens and <= MaxMaxTokens)
+                        s = s with { MaxTokens = maxTokens };
+                    else if (node is not null)
+                        warnings.Add($"max_tokens must be a whole number from {MinMaxTokens} to {MaxMaxTokens}; sizing it from the effort.");
                     break;
 
                 case "autostart":

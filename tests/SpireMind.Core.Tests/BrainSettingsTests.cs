@@ -45,6 +45,7 @@ public class BrainSettingsTests : IDisposable
         Assert.False(s.Autostart);
         Assert.Null(s.Repo);
         Assert.Null(s.ClaudePath);
+        Assert.Null(s.MaxTokens);
         Assert.Null(s.ApiKey);
         Assert.False(s.HasApiKey);
         Assert.Equal(ApiKeySource.None, s.ApiKeySource);
@@ -101,6 +102,9 @@ public class BrainSettingsTests : IDisposable
         Assert.Equal("low", (s with { Effort = "Low" }).Effort);
         Assert.Throws<ArgumentException>(() => s with { Effort = "extreme" });
         Assert.Throws<ArgumentOutOfRangeException>(() => s with { MonthlyBudgetUsd = -1 });
+        Assert.Throws<ArgumentOutOfRangeException>(() => s with { MaxTokens = 1000 });
+        Assert.Throws<ArgumentOutOfRangeException>(() => s with { MaxTokens = 128_001 });
+        Assert.Equal(128_000, (s with { MaxTokens = 128_000 }).MaxTokens);
     }
 
     [Fact]
@@ -113,6 +117,7 @@ public class BrainSettingsTests : IDisposable
               "model": "sonnet",
               "effort": "high",
               "monthly_budget_usd": 42.5,
+              "max_tokens": 48000,
               "autostart": true,
               "claude_path": "/opt/homebrew/bin/claude",
             }
@@ -124,6 +129,7 @@ public class BrainSettingsTests : IDisposable
         Assert.Equal("claude-sonnet-5-5", s.Model);
         Assert.Equal("high", s.Effort);
         Assert.Equal(42.5m, s.MonthlyBudgetUsd);
+        Assert.Equal(48000, s.MaxTokens);
         Assert.True(s.Autostart);
         Assert.Equal("/opt/homebrew/bin/claude", s.ClaudePath);
         Assert.Empty(s.Warnings);
@@ -143,7 +149,7 @@ public class BrainSettingsTests : IDisposable
     public void Bad_values_fall_back_to_defaults_with_warnings()
     {
         WriteConfig("""
-            { "model": 5, "effort": "extreme", "monthly_budget_usd": -10, "autostart": "yes", "modle": "haiku", "repo": "  " }
+            { "model": 5, "effort": "extreme", "monthly_budget_usd": -10, "autostart": "yes", "modle": "haiku", "repo": "  ", "max_tokens": 500 }
             """);
 
         var s = Load();
@@ -153,12 +159,14 @@ public class BrainSettingsTests : IDisposable
         Assert.Equal(200m, s.MonthlyBudgetUsd);
         Assert.False(s.Autostart);
         Assert.Null(s.Repo);
-        Assert.Equal(5, s.Warnings.Count);
+        Assert.Null(s.MaxTokens);
+        Assert.Equal(6, s.Warnings.Count);
         Assert.Contains(s.Warnings, w => w.Contains("model must be a string"));
         Assert.Contains(s.Warnings, w => w.Contains("effort 'extreme'"));
         Assert.Contains(s.Warnings, w => w.Contains("monthly_budget_usd"));
         Assert.Contains(s.Warnings, w => w.Contains("autostart"));
         Assert.Contains(s.Warnings, w => w.Contains("'modle'"));
+        Assert.Contains(s.Warnings, w => w.Contains("max_tokens must be a whole number from 1024 to 128000"));
     }
 
     [Fact]
@@ -189,7 +197,7 @@ public class BrainSettingsTests : IDisposable
         var loaded = Load();
         Assert.Single(loaded.Warnings); // the unknown "theme" key
 
-        var changed = loaded with { Repo = null, Model = "fable", Effort = "low", MonthlyBudgetUsd = 12.34m, Autostart = true, ClaudePath = "/usr/local/bin/claude" };
+        var changed = loaded with { Repo = null, Model = "fable", Effort = "low", MonthlyBudgetUsd = 12.34m, MaxTokens = 40000, Autostart = true, ClaudePath = "/usr/local/bin/claude" };
         changed.Save();
 
         var json = JsonNode.Parse(File.ReadAllText(changed.ConfigPath))!.AsObject();
@@ -197,8 +205,10 @@ public class BrainSettingsTests : IDisposable
         Assert.Equal("dark", json["theme"]!.GetValue<string>());
         Assert.Equal("claude-fable-5-1", json["model"]!.GetValue<string>());
         Assert.Equal(12.34m, json["monthly_budget_usd"]!.GetValue<decimal>());
+        Assert.Equal(40000, json["max_tokens"]!.GetValue<int>());
 
         var again = Load();
+        Assert.Equal(40000, again.MaxTokens);
         Assert.Equal(changed.Model, again.Model);
         Assert.Equal(changed.Effort, again.Effort);
         Assert.Equal(changed.MonthlyBudgetUsd, again.MonthlyBudgetUsd);
@@ -206,6 +216,11 @@ public class BrainSettingsTests : IDisposable
         Assert.Equal(changed.ClaudePath, again.ClaudePath);
         Assert.Null(again.Repo);
         Assert.Equal(["config.json"], Directory.GetFiles(_dir).Select(Path.GetFileName));
+
+        // Back to sizing it from the effort: the key goes.
+        (again with { MaxTokens = null }).Save();
+        Assert.False(JsonNode.Parse(File.ReadAllText(changed.ConfigPath))!.AsObject().ContainsKey("max_tokens"));
+        Assert.Null(Load().MaxTokens);
     }
 
     [Fact]

@@ -30,6 +30,9 @@ public class ModelPricesTests
     [InlineData("claude-haiku-5-5", "0.0124")]
     // in*10 + 5m*12.5 + 1h*20 + read*0.25 + out*50
     [InlineData("claude-fable-5-1", "1.21")]
+    // in*10 + 5m*12.5 + 1h*20 + read*1.00 + out*50
+    [InlineData("claude-fable-5", "1.24")]
+    [InlineData("claude-mythos-5", "1.24")]
     public void Cost_per_model_with_both_cache_lifetimes(string model, string expected)
     {
         var cost = ModelPrices.Cost(model, Usage());
@@ -96,27 +99,36 @@ public class ModelPricesTests
     }
 
     [Fact]
-    public void Unknown_models_are_priced_as_the_most_expensive_and_flagged()
+    public void Unknown_models_are_priced_at_the_highest_rates_and_flagged()
     {
-        // Fable 5 and Mythos 5.1 cost as much as Fable 5.1; "claude-fable-5" is shorter than the
-        // table key, so it doesn't match it as a snapshot and must not get cheaper rates.
-        foreach (var model in new[] { "claude-opus-6", "claude-fable-5", "claude-mythos-5-1", "claude-opus-5", "gpt-5", null, "" })
+        // A later version of a listed model isn't a snapshot of it, and each rate is the table's
+        // highest ($1 for cache reads), so no listed model's line comes out above the estimate.
+        foreach (var model in new[] { "claude-opus-6", "claude-mythos-5-1", "claude-fable-5-2", "claude-opus-5", "gpt-5", null, "" })
         {
             var cost = ModelPrices.Cost(model, Usage());
             Assert.False(cost.KnownModel);
-            Assert.Equal("claude-fable-5-1", cost.PricedAs);
-            Assert.Equal(1.21m, cost.Usd);
+            Assert.Equal(ModelPrices.FallbackName, cost.PricedAs);
+            Assert.Equal(1.24m, cost.Usd);
         }
-        var fallback = ModelPrices.Table[ModelPrices.FallbackModel];
-        Assert.Equal(ModelPrices.Table.Values.Max(p => p.Output), fallback.Output);
+        var fallback = ModelPrices.Fallback;
         Assert.Equal(ModelPrices.Table.Values.Max(p => p.Input), fallback.Input);
+        Assert.Equal(ModelPrices.Table.Values.Max(p => p.CacheWrite5m), fallback.CacheWrite5m);
+        Assert.Equal(ModelPrices.Table.Values.Max(p => p.CacheWrite1h), fallback.CacheWrite1h);
+        Assert.Equal(ModelPrices.Table.Values.Max(p => p.CacheRead), fallback.CacheRead);
+        Assert.Equal(ModelPrices.Table.Values.Max(p => p.Output), fallback.Output);
+        Assert.Equal(1.00m, fallback.CacheRead);
         Assert.False(ModelPrices.IsKnown("claude-opus-6"));
-        ModelPrices.For("nope", out var known);
+        var price = ModelPrices.For("nope", out var known);
         Assert.False(known);
+        Assert.Same(fallback, price);
     }
 
     [Theory]
     [InlineData("claude-sonnet-5-5-20260930", "claude-sonnet-5-5")]
+    [InlineData("claude-opus-5-5@20261001", "claude-opus-5-5")]
+    [InlineData("claude-opus-5-5[1m]", "claude-opus-5-5")]
+    [InlineData("claude-fable-5-20260301", "claude-fable-5")]
+    [InlineData("claude-fable-5-1-20261001", "claude-fable-5-1")]
     [InlineData("CLAUDE-HAIKU-5-5", "claude-haiku-5-5")]
     [InlineData("haiku", "claude-haiku-5-5")]
     [InlineData("fable", "claude-fable-5-1")]

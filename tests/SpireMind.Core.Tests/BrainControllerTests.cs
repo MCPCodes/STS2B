@@ -256,6 +256,45 @@ public class BrainControllerTests
         Assert.Contains(rig.Logged, l => l.Contains("didn't stop within"));
     }
 
+    [Fact]
+    public async Task Stop_clears_the_thinking_mark_at_once_and_again_once_the_brain_has_stopped()
+    {
+        using var rig = new Rig();
+        await rig.Init();
+        await rig.Poll("combat");
+        rig.Post("/start");
+        var api = rig.ApiBrains[0];
+        api.HoldStop = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Chat.MarkThinking(true);
+
+        rig.Post("/stop");
+        Assert.Null(rig.Chat.ThinkingSince);
+
+        // A tool result already on its way marks it again before the brain has stopped.
+        await api.StopCalled.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        rig.Chat.MarkThinking(true);
+        api.HoldStop.SetResult();
+
+        await Rig.WaitUntil(() => rig.Chat.ThinkingSince is null);
+        Assert.False(api.IsRunning);
+    }
+
+    [Theory]
+    [InlineData(BrainStopReason.Error)]
+    [InlineData(BrainStopReason.OutOfCredit)]
+    public async Task A_brain_that_stops_by_itself_clears_the_thinking_mark(BrainStopReason reason)
+    {
+        using var rig = new Rig();
+        await rig.Init();
+        await rig.Poll("combat");
+        rig.Post("/start");
+        rig.Chat.MarkThinking(true);
+
+        rig.ApiBrains[0].Finish(reason, "The API brain said why.");
+
+        Assert.Null(rig.Chat.ThinkingSince);
+    }
+
     // ---- Falling back ----
 
     [Theory]
@@ -465,6 +504,64 @@ public class BrainControllerTests
 
         Assert.True(api.IsRunning);
         Assert.Equal(0, api.StopCalls);
+    }
+
+    [Fact]
+    public async Task A_fallback_at_a_run_start_the_poll_hasnt_seen_switches_for_this_run()
+    {
+        using var rig = new Rig();
+        await rig.Init();
+        rig.Post("/start"); // at the menu, where the API brain idles
+        var mark = rig.Mark();
+        var api = rig.ApiBrains[0];
+
+        // The run started, and the brain's first request failed before the poll saw it.
+        api.LastSeenInRun = true;
+        api.Finish(BrainStopReason.OutOfCredit, "The API credit has run out.");
+
+        Assert.Equal([BrainController.SwitchingLine], rig.LinesSince(mark));
+        var sub = Assert.Single(rig.SubBrains);
+        Assert.True(sub.IsRunning);
+
+        // The poll catches up: the same run, so the subscription plays on.
+        await rig.Poll("event");
+        Assert.True(sub.IsRunning);
+        Assert.Equal(0, sub.StopCalls);
+        Assert.Single(rig.ApiBrains);
+        Assert.Single(rig.SubBrains);
+        Assert.Equal([BrainController.SwitchingLine], rig.LinesSince(mark));
+        Assert.Contains("as the fallback until the next run", rig.Post("/budget"));
+
+        // The run after it is back on the API.
+        sub.Finish(BrainStopReason.RunEnded);
+        await rig.Poll("game_over");
+        await rig.Poll("map");
+        Assert.Equal(2, rig.ApiBrains.Length);
+        Assert.True(rig.ApiBrains[1].IsRunning);
+        Assert.Equal(BrainController.BackOnApiLine, rig.LinesSince(mark)[^1]);
+    }
+
+    [Fact]
+    public async Task A_fallback_after_a_game_over_the_poll_hasnt_seen_waits_for_the_next_run()
+    {
+        using var rig = new Rig();
+        await rig.Init();
+        await rig.Poll("combat");
+        rig.Post("/start");
+        var mark = rig.Mark();
+
+        // The run ended, and a request after it failed before the poll saw the game over.
+        rig.ApiBrains[0].LastSeenInRun = false;
+        rig.ApiBrains[0].Finish(BrainStopReason.OutOfCredit, "The API credit has run out.");
+
+        Assert.Equal([BrainController.SwitchingNextRunLine], rig.LinesSince(mark));
+        Assert.Empty(rig.SubBrains);
+
+        await rig.Poll("game_over");
+        Assert.Empty(rig.SubBrains);
+        await rig.Poll("map");
+        Assert.True(Assert.Single(rig.SubBrains).IsRunning);
+        Assert.Single(rig.ApiBrains);
     }
 
     // ---- New runs ----
@@ -904,6 +1001,9 @@ file sealed class FakeBrain(BrainSettings settings) : IPlayBrain
     {
         get { lock (_gate) return _running; }
     }
+
+    /// <summary>What the brain says it saw last; tests set it before <see cref="Finish"/>.</summary>
+    public bool? LastSeenInRun { get; set; }
 
     public event Action<BrainStopReason, string>? Stopped;
 

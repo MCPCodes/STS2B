@@ -32,9 +32,12 @@ public static partial class PromptBuilder
         "- The strategy notes the prompt asks you to read are already included above under Strategy notes. Don't try to read strategy files.\n" +
         "- `runs/current.md` and `strategy/learned.md` are the only files you can use: read them with `notes_read`, add a line " +
         "with `notes_append` (use it for each floor's log line) and replace them with `notes_write` (the whole file, for the " +
-        "Build plan, Orders or the post-mortem). There is no other file access. Archiving is automatic: when you write " +
-        "`runs/current.md` with a new header line, or without the post-mortem the old journal has (a new run), the old journal " +
-        "is kept as `runs/<date>-<character>.md` for you, so keep the header line unchanged for the rest of a run.\n" +
+        "Build plan, Orders or the post-mortem). There is no other file access.\n" +
+        "- `runs/README.md` isn't readable here. The header line it describes goes in exactly this form: " +
+        "`# Ironclad, started YYYY-MM-DD, Neow: <what you picked>`, with your character and the date the journal starts, " +
+        "which is today's date from the conversation's first message. Archiving is automatic: when you " +
+        "write `runs/current.md` with a new header line, or without the post-mortem the old journal has (a new run), the old " +
+        "journal is kept as `runs/<date>-<character>.md`, named from its header line, so keep that line unchanged for the rest of a run.\n" +
         "- When the conversation gets long, it is restarted with your run journal, the recent chat and the current state. " +
         "Keep the Build plan, Orders and floor log in `runs/current.md` current so nothing is lost.\n" +
         "- When `act_sequence` is in your tools, it can play a whole turn from one snapshot; see its description.\n" +

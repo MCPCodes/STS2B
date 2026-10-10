@@ -20,8 +20,9 @@ public sealed partial class NotesTools
     public static IReadOnlyList<string> Files { get; } = [Journal, Learned];
 
     /// <summary>The largest a notes file may get, in UTF-8 bytes, through notes_write or
-    /// notes_append. Small enough that the whole file fits in one reply (ApiBrain.MaxTokens)
-    /// with room to think, so it can always be rewritten.</summary>
+    /// notes_append. Small enough that the whole file fits in one reply with room to think, even
+    /// at the smallest max_tokens the brain sends by default (16000, see ApiBrain.MaxTokensFor),
+    /// so it can always be rewritten.</summary>
     public const int MaxBytes = 32 * 1024;
 
     private readonly object _gate = new();

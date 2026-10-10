@@ -28,7 +28,8 @@ internal static class BrainWiring
     /// </summary>
     /// <param name="chat">The chat the commands and brain lines go to.</param>
     /// <param name="tools">The BotTools instance the MCP endpoint uses; the API brain calls it in-process.</param>
-    /// <param name="waiter">Reads the screen for the controller and the subscription brain.</param>
+    /// <param name="waiter">Reads the screen for the controller and the subscription brain, without
+    /// stamping a snapshot version.</param>
     /// <param name="multiplayer">Whether the run is co-op, which adds strategy/coop.md to the API
     /// brain's prompt. Called on the brain's task, so it must not touch the game.</param>
     /// <param name="port">The bridge's port, whose /mcp endpoint the subscription brain plays through.</param>
@@ -110,12 +111,13 @@ internal static class BrainWiring
     }
 
     /// <summary>The current screen ("combat", "menu"), or null when it can't be read in time.
-    /// Awaits the main thread through the waiter, never blocks it.</summary>
+    /// Awaits the main thread through the waiter, never blocks it. A peek, so the bot's snapshot
+    /// version only moves for what its own tools see.</summary>
     private static async Task<string?> CurrentScreenAsync(DecisionWaiter waiter, CancellationToken ct)
     {
         try
         {
-            return (await waiter.CaptureAsync(ct).WaitAsync(ScreenTimeout, ct)).Screen;
+            return (await waiter.PeekAsync(ct).WaitAsync(ScreenTimeout, ct)).Screen;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

@@ -123,6 +123,7 @@ public sealed class ApiBrain : IPlayBrain
     private CancellationTokenSource? _cts;
     private Task? _loop;
     private bool _running;
+    private bool? _lastSeenInRun;
     private long _lastPromptTokens;
 
     // Loop state, touched only by the loop's task.
@@ -197,8 +198,18 @@ public sealed class ApiBrain : IPlayBrain
         _delay = delay ?? Task.Delay;
     }
 
-    /// <summary>The max_tokens of every request.</summary>
-    public int MaxTokens { get; init; } = 16000;
+    /// <summary>
+    /// The max_tokens of a request at <paramref name="effort"/> when config.json doesn't set
+    /// one: 16000 at low and medium, 32000 at high, 64000 at xhigh and max. Thinking counts
+    /// toward it and runs longer at the top levels, where a smaller cap would cut replies off
+    /// mid-thought. It is only a ceiling: what isn't used isn't billed.
+    /// </summary>
+    public static int MaxTokensFor(string? effort) => effort switch
+    {
+        "xhigh" or "max" => 64_000,
+        "high" => 32_000,
+        _ => 16_000,
+    };
 
     /// <summary>A fresh conversation starts past this many prompt tokens when the bot is on the map.</summary>
     public long MapRefreshTokens { get; init; } = 60_000;
@@ -249,6 +260,12 @@ public sealed class ApiBrain : IPlayBrain
         get { lock (_gate) return _running; }
     }
 
+    /// <inheritdoc/>
+    public bool? LastSeenInRun
+    {
+        get { lock (_gate) return _lastSeenInRun; }
+    }
+
     /// <summary>The last request's whole prompt (input, cache reads and cache writes), for /budget.</summary>
     public long LastPromptTokens => Interlocked.Read(ref _lastPromptTokens);
 
@@ -268,6 +285,7 @@ public sealed class ApiBrain : IPlayBrain
             if (_running)
                 return false;
             _running = true;
+            _lastSeenInRun = null;
             var cts = new CancellationTokenSource();
             _cts = cts;
             _loop = Task.Run(() => RunAsync(cts.Token));
@@ -461,7 +479,7 @@ public sealed class ApiBrain : IPlayBrain
         }
         _conversationModel = model;
         _conversationEffort = effort;
-        var request = BuildRequest(model, effort);
+        var request = BuildRequest(model, effort, settings.MaxTokens ?? MaxTokensFor(effort));
         var sentAt = _clock();
         if (await SendAsync(request, ct) is not { } response)
         {
@@ -596,13 +614,16 @@ public sealed class ApiBrain : IPlayBrain
             : HardRefreshTokens;
 
     /// <summary>
-    /// Replaces the conversation with one user message: <paramref name="intro"/>, the run
-    /// journal, the last 10 chat lines, chat messages the model hasn't seen yet, the current
-    /// state, and <see cref="CarryOn"/>. The system text and tools are left alone.
+    /// Replaces the conversation with one user message: <paramref name="intro"/>, today's date
+    /// (for the journal's header line), the run journal, the last 10 chat lines, chat messages
+    /// the model hasn't seen yet, the current state, and <see cref="CarryOn"/>. The system text
+    /// and tools are left alone, so the date doesn't touch their cache.
     /// </summary>
     private void StartConversation(string intro)
     {
         var text = new StringBuilder(intro).Append("\n\n");
+
+        text.Append($"Today is {Today(_clock()):yyyy-MM-dd}.\n\n");
 
         var journal = _notes.ReadText(NotesTools.Journal).Trim();
         text.Append($"## Run journal ({NotesTools.Journal})\n\n")
@@ -652,7 +673,7 @@ public sealed class ApiBrain : IPlayBrain
         return (character is not null && character != _promptCharacter) || _multiplayer() != _promptMultiplayer;
     }
 
-    private JsonObject BuildRequest(string model, string? effort)
+    private JsonObject BuildRequest(string model, string? effort, int maxTokens)
     {
         var messages = new JsonArray();
         foreach (var message in _messages)
@@ -661,7 +682,7 @@ public sealed class ApiBrain : IPlayBrain
         var request = new JsonObject
         {
             ["model"] = model,
-            ["max_tokens"] = MaxTokens,
+            ["max_tokens"] = maxTokens,
             ["system"] = new JsonArray(new JsonObject
             {
                 ["type"] = "text",
@@ -863,6 +884,7 @@ public sealed class ApiBrain : IPlayBrain
             if (inRun && !_inRun)
                 _newRunPending = true;
             _inRun = inRun;
+            lock (_gate) _lastSeenInRun = inRun;
         }
     }
 
@@ -881,6 +903,11 @@ public sealed class ApiBrain : IPlayBrain
 
     private static bool HasChatMessages(JsonNode payload) =>
         payload["chat"]?["messages"] is JsonArray { Count: > 0 };
+
+    /// <summary>The player's calendar day for <paramref name="now"/>, as Claude Code's /play would
+    /// date a run: local time, with a clock time of unspecified kind taken as UTC.</summary>
+    public static DateTime Today(DateTime now) =>
+        (now.Kind == DateTimeKind.Local ? now : DateTime.SpecifyKind(now, DateTimeKind.Utc).ToLocalTime()).Date;
 
     // ---- Transcript ----
 

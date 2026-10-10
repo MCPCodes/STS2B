@@ -175,4 +175,6 @@ Written and unit tested on Linux; the game-side wiring was only compiled against
 - In co-op, the API brain's "system prompt built" log line lists `coop.md`.
 - Quitting the game while Claude Code plays logs "brain: the game is closing; stopping the brains", and `pgrep -fl claude` afterwards finds no child left. Whether `AppDomain.ProcessExit` fires at all in the game is unknown; the root's `TreeExiting` is the one relied on.
 - The usage-limit wording of CLI 2.1.287, when it comes up, matches `SubscriptionBrain`'s pattern (the chat then says the subscription hit its limit).
+- In a fight, `/stop` while the bot is thinking over a move (the "..." cloud is up) takes the cloud down at once.
+- The API brain's first `runs/current.md` starts `# <Character>, started <today's date>, Neow: ...`, and the next run archives it as `runs/<that date>-<character>.md`.
 - Speech hold: when the bot says a line and moves on outside a fight (a map node, a reward, an event option), the move comes 1.5 to 3 s after the line, and the bubble can be read before the room changes. In a fight it plays on at once.
