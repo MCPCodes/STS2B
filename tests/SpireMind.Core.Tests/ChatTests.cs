@@ -114,11 +114,181 @@ public class ChatHubTests
     }
 
     [Fact]
-    public void Commands_must_be_the_whole_message()
+    public void Built_in_commands_match_the_first_word_and_ignore_the_rest()
     {
         var hub = new ChatHub { BotName = "Ironclad" };
-        Assert.Equal(PostOutcome.Queued, hub.PostFromHuman("Mark", "/pause now").Outcome);
+        var paused = hub.PostFromHuman("Mark", "/Pause now, I want the elite");
+        Assert.Equal(PostOutcome.Command, paused.Outcome);
+        Assert.True(hub.Paused);
+        Assert.Equal(PostOutcome.Command, hub.PostFromHuman("Mark", "/resume please").Outcome);
         Assert.False(hub.Paused);
+        Assert.Equal(PostOutcome.Command, hub.PostFromHuman("Mark", "/HELP me").Outcome);
+        Assert.False(hub.HasUnread);
+
+        // "/pausers" is another word, so it isn't /pause.
+        Assert.Contains("no /pausers command", hub.PostFromHuman("Mark", "/pausers").Reply);
+        Assert.False(hub.Paused);
+    }
+
+    [Theory]
+    [InlineData("/")]
+    [InlineData("/ hi")]
+    [InlineData("/:)")]
+    [InlineData("and/or")]
+    [InlineData("Ironclad, /pause isn't a command here")]
+    public void Text_that_doesnt_start_with_a_slash_word_is_a_message(string text)
+    {
+        var hub = new ChatHub { BotName = "Ironclad" };
+        Assert.Equal(PostOutcome.Queued, hub.PostFromHuman("Mark", text).Outcome);
+        Assert.False(hub.Paused);
+        Assert.Equal(ChatLineKind.Human, Assert.Single(hub.LinesSince(0)).Kind);
+    }
+
+    [Fact]
+    public void Unknown_commands_point_at_help_and_never_reach_the_model()
+    {
+        var hub = new ChatHub { BotName = "Ironclad" };
+        var result = hub.PostFromHuman("Mark", "/dance wildly");
+        Assert.Equal(PostOutcome.Command, result.Outcome);
+        Assert.Equal("There's no /dance command. Type /help to see them.", result.Reply);
+        var line = Assert.Single(hub.LinesSince(0));
+        Assert.Equal(ChatLineKind.System, line.Kind);
+        Assert.Equal(result.Reply, line.Text);
+        Assert.False(hub.HasUnread);
+    }
+
+    [Fact]
+    public void Added_commands_get_who_and_the_trimmed_arguments_and_answer_with_a_system_line()
+    {
+        var hub = new ChatHub { BotName = "Ironclad" };
+        var calls = new List<(string From, string Args)>();
+        hub.AddCommand("model", "[opus|sonnet]", "shows or switches the model", (from, args) =>
+        {
+            calls.Add((from, args));
+            return $"  Model set to {args}.  ";
+        });
+
+        var result = hub.PostFromHuman("Mark", "  /MODEL   sonnet   ");
+        Assert.Equal(PostOutcome.Command, result.Outcome);
+        Assert.Equal("Model set to sonnet.", result.Reply);
+        Assert.Equal(("Mark", "sonnet"), Assert.Single(calls));
+
+        hub.PostFromHuman("Anna", "/model");
+        Assert.Equal(("Anna", ""), calls[1]);
+
+        var lines = hub.LinesSince(0);
+        Assert.Equal(2, lines.Count);
+        Assert.All(lines, l => Assert.Equal(ChatLineKind.System, l.Kind));
+        Assert.Equal("Model set to sonnet.", lines[0].Text);
+        Assert.False(hub.HasUnread);
+    }
+
+    [Fact]
+    public void Adding_a_command_again_replaces_it_and_names_ignore_case_and_the_slash()
+    {
+        var hub = new ChatHub();
+        hub.AddCommand("start", "", "starts", (_, _) => "first");
+        hub.AddCommand("/START", "", "starts again", (_, _) => "second");
+        Assert.Equal("second", hub.PostFromHuman("Mark", "/start").Reply);
+
+        var help = hub.PostFromHuman("Mark", "/help").Reply!;
+        Assert.Contains("/START starts again", help);
+        Assert.DoesNotContain("/start starts,", help);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("  ")]
+    [InlineData("/")]
+    [InlineData("two words")]
+    [InlineData("-dash")]
+    [InlineData("pause")]
+    [InlineData("/Resume")]
+    [InlineData("HELP")]
+    public void Command_names_must_be_one_word_and_not_built_in(string name)
+    {
+        var hub = new ChatHub();
+        Assert.Throws<ArgumentException>(() => hub.AddCommand(name, "", "", (_, _) => "x"));
+        Assert.Throws<ArgumentNullException>(() => hub.AddCommand("fine", "", "", null!));
+    }
+
+    [Fact]
+    public void A_throwing_handler_gets_a_short_line_instead_of_breaking_the_post()
+    {
+        var hub = new ChatHub();
+        hub.AddCommand("budget", "", "", (_, _) => throw new IOException("spend.json is locked\nby another process"));
+        hub.AddCommand("broken", "", "", (_, _) => throw new InvalidOperationException(""));
+        hub.AddCommand("long", "", "", (_, _) => throw new InvalidOperationException(new string('x', 500)));
+
+        var result = hub.PostFromHuman("Mark", "/budget");
+        Assert.Equal(PostOutcome.Command, result.Outcome);
+        Assert.Equal("That didn't work: spend.json is locked by another process", result.Reply);
+        Assert.Equal("That didn't work (InvalidOperationException).", hub.PostFromHuman("Mark", "/broken").Reply);
+        var cut = hub.PostFromHuman("Mark", "/long").Reply!;
+        Assert.True(cut.Length < 200);
+        Assert.EndsWith("...", cut);
+        Assert.Equal(3, hub.LinesSince(0).Count);
+    }
+
+    [Fact]
+    public void An_empty_reply_adds_no_line()
+    {
+        var hub = new ChatHub();
+        hub.AddCommand("quiet", "", "", (_, _) => "   ");
+        var result = hub.PostFromHuman("Mark", "/quiet");
+        Assert.Equal(PostOutcome.Command, result.Outcome);
+        Assert.Null(result.Reply);
+        Assert.Empty(hub.LinesSince(0));
+    }
+
+    [Fact]
+    public void Handlers_run_outside_the_lock()
+    {
+        var hub = new ChatHub { BotName = "Ironclad" };
+        var otherThreadGotIn = false;
+        hub.AddCommand("probe", "", "", (_, _) =>
+        {
+            // Another thread can only use the hub now if the handler runs with the lock released.
+            otherThreadGotIn = Task.Run(() => hub.Announce("from another thread")).Wait(TimeSpan.FromSeconds(2));
+            hub.Say("Aye.");
+            return "probed";
+        });
+
+        Assert.Equal("probed", hub.PostFromHuman("Mark", "/probe").Reply);
+        Assert.True(otherThreadGotIn);
+        Assert.Equal(["from another thread", "Aye.", "probed"], hub.LinesSince(0).Select(l => l.Text));
+    }
+
+    [Fact]
+    public void Help_lists_added_commands_with_their_usage_and_help()
+    {
+        var hub = new ChatHub();
+        hub.AddCommand("start", "", "lets the bot play by itself.", (_, _) => "");
+        hub.AddCommand("model", "[opus|sonnet]", "shows or switches the model", (_, _) => "");
+
+        var help = hub.PostFromHuman("Mark", "/help").Reply!;
+        Assert.StartsWith("Commands: /pause", help);
+        Assert.Contains("/resume hands control back, /start lets the bot play by itself, /model [opus|sonnet] shows or switches the model, /help shows this.", help);
+        Assert.EndsWith("talk to that bot only.", help);
+    }
+
+    [Fact]
+    public void Announce_adds_a_system_line_and_raises_line_added()
+    {
+        var hub = new ChatHub { BotName = "Ironclad" };
+        var seen = new List<ChatLine>();
+        hub.LineAdded += seen.Add;
+
+        var line = hub.Announce("  Switching to your\n Claude subscription.  ");
+        Assert.Equal("Switching to your Claude subscription.", line.Text);
+        Assert.Equal(ChatLineKind.System, line.Kind);
+        Assert.Equal("", line.From);
+        Assert.Equal(line, Assert.Single(seen));
+        Assert.Equal(line, Assert.Single(hub.LinesSince(0)));
+        Assert.False(hub.HasUnread);
+
+        Assert.Throws<ArgumentException>(() => hub.Announce(" \n "));
+        Assert.Single(hub.LinesSince(0));
     }
 
     [Fact]
