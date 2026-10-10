@@ -37,6 +37,9 @@ internal static class SpeechBubbles
     /// <summary>Slack after a bubble should have freed itself before we stop counting it as up.</summary>
     private const double Margin = 0.5;
 
+    /// <summary>A bubble cut short with less than this left to go isn't shown again.</summary>
+    private const double MinCarry = 0.6;
+
     /// <summary>How long the bot has been deciding before the thought cloud shows, so quick moves don't flash it.</summary>
     private static readonly TimeSpan ThinkDelay = TimeSpan.FromSeconds(2.5);
 
@@ -53,7 +56,7 @@ internal static class SpeechBubbles
     private static readonly Vector2 ShopOffset = new(60, -250);
 
     /// <summary>From the top-bar portrait's corner to beside it; the portrait's height is added to Y.</summary>
-    private static readonly Vector2 PortraitOffset = new(110, 170);
+    private static readonly Vector2 PortraitOffset = new(110, 235);
 
     /// <summary>Chunks of the bot's lines waiting their turn, escaped only when shown.</summary>
     private static readonly Queue<string> Pending = new();
@@ -62,6 +65,19 @@ internal static class SpeechBubbles
 
     /// <summary>When the bubble on screen was shown, to tell in the log how long one lasted.</summary>
     private static DateTime _bubbleShown;
+
+    /// <summary>The chunk on screen as it was queued: what a room change carries over.</summary>
+    private static string? _bubbleChunk;
+
+    /// <summary>
+    /// True when the bubble on screen sits in the room (over the creature, at the rest site or
+    /// in the shop) and so goes with it, or under whatever covers it. One by the top bar
+    /// outlives rooms.
+    /// </summary>
+    private static bool _bubbleInRoom;
+
+    /// <summary>A chunk cut short when its room went away or was covered, to show again where it can be seen.</summary>
+    private static (string Chunk, double Secs)? _carried;
 
     /// <summary>When the next chunk may replace <see cref="_bubble"/>: the moment it would start fading out by itself.</summary>
     private static DateTime _bubbleDone;
@@ -96,9 +112,9 @@ internal static class SpeechBubbles
     }
 
     /// <summary>
-    /// Every frame on the main thread: clears everything when the run or the room changes,
-    /// shows the next chunk once the one before has been up long enough, and shows or ends the
-    /// thought cloud.
+    /// Every frame on the main thread: clears everything when the run changes, carries a line
+    /// over when only the room does, shows the next chunk once the one before has been up long
+    /// enough, and shows or ends the thought cloud.
     /// </summary>
     public static void Tick(ChatHub hub)
     {
@@ -108,10 +124,26 @@ internal static class SpeechBubbles
             var place = CurrentPlace();
             if (place != _place)
             {
-                // Bubbles belong to the screen they were shown on; the rest of the line is in the log.
-                Clear();
+                if (place.Run is null || !ReferenceEquals(place.Run, _place.Run))
+                {
+                    // A new run, the end of one or the main menu: nothing said before belongs here.
+                    Clear();
+                }
+                else
+                {
+                    // Another room of the same run. The bot often speaks and moves on in the same
+                    // breath (a map node, an event's Leave), so its line carries over instead of
+                    // going with the room. The thought cloud is the room's.
+                    EndCloud();
+                    CarryOver(now);
+                }
                 _place = place;
                 _placeSince = now;
+            }
+            else if (_bubble is not null && _bubbleInRoom && RoomCovered())
+            {
+                // Rewards or the map opened over the fight the line was spoken in.
+                CarryOver(now);
             }
 
             AdvanceSpeech(now);
@@ -126,9 +158,10 @@ internal static class SpeechBubbles
     /// <summary>Drops the queued chunks and dismisses the bubble and the thought cloud on screen. Main thread.</summary>
     public static void Clear()
     {
-        if (_bubble is not null || Pending.Count > 0)
-            Trace($"cleared by a room or run change: {(_bubble is null ? "no bubble up" : $"bubble up for {(DateTime.UtcNow - _bubbleShown).TotalSeconds:0.0}s")}, {Pending.Count} chunks dropped");
+        if (_bubble is not null || _carried is not null || Pending.Count > 0)
+            Trace($"cleared by a run change: {(_bubble is null ? "no bubble up" : $"bubble up for {(DateTime.UtcNow - _bubbleShown).TotalSeconds:0.0}s")}, {Pending.Count} chunks dropped");
         Pending.Clear();
+        _carried = null;
         DismissBubble();
         EndCloud();
     }
@@ -139,20 +172,47 @@ internal static class SpeechBubbles
     {
         // A bubble frees itself when its time is up (and with its room). Past that, one still
         // around is faded out here, so it can't hang over the screen.
+        if (_bubble is not null && !GodotObject.IsInstanceValid(_bubble))
+            CarryOver(now); // freed with its room before this tick saw the room change
         if (_bubble is not null && (now >= _bubbleGone || !GodotObject.IsInstanceValid(_bubble)))
             DismissBubble();
 
-        if (Pending.Count == 0 || (_bubble is not null && now < _bubbleDone)) return;
+        if ((_carried is null && Pending.Count == 0) || (_bubble is not null && now < _bubbleDone)) return;
 
         DismissBubble();
         EndCloud();
-        var chunk = Pending.Dequeue();
-        var secs = Seconds(chunk);
-        _bubble = Show(Escape(chunk), secs);
+        string chunk;
+        double secs;
+        if (_carried is { } carried)
+        {
+            (chunk, secs) = carried;
+            _carried = null;
+        }
+        else
+        {
+            chunk = Pending.Dequeue();
+            secs = Seconds(chunk);
+        }
+        _bubble = Show(Escape(chunk), secs, out _bubbleInRoom);
+        _bubbleChunk = chunk;
         _bubbleShown = now;
         _bubbleDone = now + TimeSpan.FromSeconds(FadeIn + Math.Max(secs - 1, 1));
         _bubbleGone = _bubbleDone + TimeSpan.FromSeconds(FadeOut + Margin);
         Trace($"shown for {secs:0.0}s {Where(_bubble)}: \"{(chunk.Length > 40 ? chunk[..40] + "..." : chunk)}\"");
+    }
+
+    /// <summary>
+    /// Takes down a bubble that sits in the room and queues what is left of its time to be
+    /// shown again, by the top bar if the room is gone or covered. A bubble already by the top
+    /// bar stays as it is. One with too little time left to read is just dropped.
+    /// </summary>
+    private static void CarryOver(DateTime now)
+    {
+        if (_bubble is null || !_bubbleInRoom || _bubbleChunk is not { } chunk) return;
+        var left = (_bubbleDone - now).TotalSeconds;
+        Trace($"carried over after {(now - _bubbleShown).TotalSeconds:0.0}s with {Math.Max(left, 0):0.0}s left");
+        DismissBubble();
+        if (left >= MinCarry) _carried = (chunk, Math.Max(left + 1 - FadeIn, MinSeconds));
     }
 
     /// <summary>Where a bubble ended up, for the log: its parent, position and whether it can be seen.</summary>
@@ -180,8 +240,9 @@ internal static class SpeechBubbles
     /// it. A spot the game won't give falls through to the top-bar portrait, then the fixed
     /// screen spot; null when none works.
     /// </summary>
-    private static NSpeechBubbleVfx? Show(string text, double secs)
+    private static NSpeechBubbleVfx? Show(string text, double secs, out bool inRoom)
     {
+        inRoom = false;
         var ctx = GameContext.Capture();
         var color = BubbleColor(ctx.Me);
         if (!ctx.InRun || NGame.Instance?.MainMenu is not null)
@@ -197,8 +258,12 @@ internal static class SpeechBubbles
             else if (ctx.Run?.CurrentRoom?.RoomType == RoomType.Shop)
                 bubble = Place(ShopSpot(), text, secs, color);
         }
-        return bubble
-            ?? Place(PortraitSpot(), text, secs, color)
+        if (bubble is not null)
+        {
+            inRoom = true;
+            return bubble;
+        }
+        return Place(PortraitSpot(), text, secs, color)
             ?? Place(ScreenSpot(), text, secs, color)
             ?? NoSpot();
     }
