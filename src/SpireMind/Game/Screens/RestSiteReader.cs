@@ -298,18 +298,7 @@ internal sealed class RestSiteReader : IScreen
         };
 
         // What the next boss is decides between resting and which card to upgrade.
-        if (rs.Act is { } act)
-        {
-            var boss = Describe.SafeText(() => act.BossEncounter?.Title);
-            if (boss.Length > 0) state["boss"] = boss;
-            // As on the map: Golden Compass and Spoils maps have no second boss node even when the
-            // act rolled a second boss, so only name one the map will actually lead to.
-            if (rs.Map?.SecondBossMapPoint is not null)
-            {
-                var second = Describe.SafeText(() => act.SecondBossEncounter?.Title);
-                if (second.Length > 0) state["second_boss"] = second;
-            }
-        }
+        Describe.AddBosses(state, rs);
 
         state["player"] = player;
         state["potions"] = PotionActions.Describe(ctx, false);

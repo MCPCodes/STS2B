@@ -1040,32 +1040,22 @@ internal sealed class CardSelectReader : IScreen
         state["player"] = player;
     }
 
-    /// <summary>A small picture of the fight for choices made mid-combat (discover, pick from a pile).</summary>
+    /// <summary>
+    /// A small picture of the fight for choices made mid-combat (discover, pick from a pile). The
+    /// enemies are the combat snapshots' own entries: the same roster, so each keeps the "i" (the
+    /// j of e&lt;j&gt;) it has for the whole fight, with intents and the incoming damage total.
+    /// Hand cards carry their live text but no "i", since no action here names a hand card.
+    /// </summary>
     private static JsonObject? CombatSummary(GameContext ctx)
     {
         if (!ctx.InCombat || ctx.Me is not { } me || ctx.Combat is not { } cs || ctx.MyCombat is not { } pcs) return null;
         try
         {
             var hand = new JsonArray();
-            foreach (var card in pcs.Hand.Cards) hand.Add(Describe.CardName(card));
+            foreach (var card in pcs.Hand.Cards) hand.Add(Describe.Card(card, PileType.Hand));
 
-            var enemies = new JsonArray();
-            foreach (var enemy in cs.Enemies)
-            {
-                if (!enemy.IsAlive) continue;
-                var json = Describe.Creature(enemy);
-                try
-                {
-                    json["intents"] = Describe.Intents(enemy, cs);
-                }
-                catch
-                {
-                    // Intents are a bonus here; the choice itself is what matters.
-                }
-                enemies.Add(json);
-            }
-
-            return new JsonObject
+            var roster = CombatReader.EnemyRoster(cs);
+            var json = new JsonObject
             {
                 ["turn"] = pcs.TurnNumber,
                 ["energy"] = pcs.Energy,
@@ -1074,8 +1064,11 @@ internal sealed class CardSelectReader : IScreen
                 ["hand"] = hand,
                 ["draw_count"] = pcs.DrawPile.Cards.Count,
                 ["discard_count"] = pcs.DiscardPile.Cards.Count,
-                ["enemies"] = enemies,
+                ["exhaust_count"] = pcs.ExhaustPile.Cards.Count,
+                ["enemies"] = CombatReader.EnemiesJson(cs, roster),
             };
+            if (CombatReader.IncomingDamage(cs, roster) is { } incoming) json["incoming_damage"] = incoming;
+            return json;
         }
         catch
         {

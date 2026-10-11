@@ -258,7 +258,7 @@ public static class ClaudeCli
             var root = Path.GetPathRoot(full) ?? "/";
             var resolved = root;
             var hops = 0;
-            var parts = new Stack<string>(full[root.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries).Reverse());
+            var parts = new Stack<string>(Enumerable.Reverse(full[root.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries)));
             while (parts.Count > 0)
             {
                 var next = Path.Combine(resolved, parts.Pop());
@@ -274,7 +274,7 @@ public static class ClaudeCli
                 var landed = Path.GetFullPath(target, resolved);
                 var landedRoot = Path.GetPathRoot(landed) ?? "/";
                 resolved = landedRoot;
-                foreach (var part in landed[landedRoot.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries).Reverse())
+                foreach (var part in Enumerable.Reverse(landed[landedRoot.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries)))
                     parts.Push(part);
             }
             return resolved;

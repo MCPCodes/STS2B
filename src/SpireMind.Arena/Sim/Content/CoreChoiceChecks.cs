@@ -240,7 +240,8 @@ public sealed class CoreChoiceChecks : IArenaChecks
             c.Sequence(["card:0", "card:2"], s.Actions.Select(a => a.Id), "one action per listed card, under the first copy's index; no confirm, no cancel");
             c.Equal("Select Bash+", s.Actions[1].Label, "the label");
             c.Equal(97, f.Enemy(0).Hp, "the hit came before the question");
-            c.Sequence(["turn", "energy", "max_energy", "me", "hand", "draw_count", "discard_count", "enemies"], s.State["combat"]!.AsObject().Select(kv => kv.Key), "the small picture of the fight");
+            c.Sequence(["turn", "energy", "max_energy", "me", "hand", "draw_count", "discard_count", "exhaust_count", "enemies", "incoming_damage"], s.State["combat"]!.AsObject().Select(kv => kv.Key), "the small picture of the fight");
+            c.Equal(0, s.State["combat"]!["enemies"]![0]!["i"]!.GetValue<int>(), "enemies keep their e<j> index");
             f.Do("card:2");
             c.Equal("combat", f.Snapshot().Screen, "picking the one card finishes the choice");
             c.Equal("Bash+", f.DrawPile[0].Title, "the chosen card is on top of the draw pile");

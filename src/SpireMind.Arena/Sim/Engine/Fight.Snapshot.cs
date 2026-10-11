@@ -410,19 +410,15 @@ public sealed partial class Fight
 
     private static PileType PileOrDeck(CardInstance card) => card.Pile == PileType.None ? PileType.Deck : card.Pile;
 
-    /// <summary>The small picture of the fight the card selection screens carry.</summary>
+    /// <summary>
+    /// The small picture of the fight the card selection screens carry (CardSelectReader.CombatSummary):
+    /// hand cards with their text but no "i" (no action here names a hand card), and the combat
+    /// board's own enemy entries and incoming damage, so each enemy keeps its e&lt;j&gt; index.
+    /// </summary>
     private JsonObject CombatSummary()
     {
         var hand = new JsonArray();
-        foreach (var card in _s.Hand) hand.Add(card.Title);
-        var enemies = new JsonArray();
-        foreach (var enemy in _s.Enemies)
-        {
-            if (!enemy.IsAlive) continue;
-            var json = CreatureJson(enemy);
-            json["intents"] = IntentsJson(enemy);
-            enemies.Add(json);
-        }
+        foreach (var card in _s.Hand) hand.Add(CardJson(card, PileType.Hand));
         return new JsonObject
         {
             ["turn"] = _s.Turn,
@@ -432,7 +428,9 @@ public sealed partial class Fight
             ["hand"] = hand,
             ["draw_count"] = _s.Draw.Count,
             ["discard_count"] = _s.Discard.Count,
-            ["enemies"] = enemies,
+            ["exhaust_count"] = _s.Exhaust.Count,
+            ["enemies"] = EnemiesJson(),
+            ["incoming_damage"] = IncomingDamage(),
         };
     }
 

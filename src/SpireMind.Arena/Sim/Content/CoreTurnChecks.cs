@@ -387,7 +387,7 @@ public sealed class CoreTurnChecks : IArenaChecks
                 var f = CheckKit.VsDummy(seed: 5);
                 f.Clear(PileType.Draw);
                 string[] cards = ["Bash", "StrikeIronclad", "DefendIronclad", "Slimed", "Wound", "StrikeIronclad+"];
-                foreach (var card in reversed ? cards.Reverse() : cards) f.Put(card, PileType.Discard);
+                foreach (var card in reversed ? Enumerable.Reverse(cards) : cards) f.Put(card, PileType.Discard);
                 f.Shuffle();
                 return f.DrawPile.Select(x => x.Title).ToList();
             }

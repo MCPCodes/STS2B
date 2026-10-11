@@ -249,12 +249,12 @@ internal sealed class CardRewardReader : IScreen
             cards.Add(json);
         }
 
-        return new JsonObject
-        {
-            ["run"] = Describe.RunInfo(rs),
-            ["player"] = Describe.PlayerRun(me, includeDeck: true),
-            ["cards"] = cards,
-        };
+        var state = new JsonObject { ["run"] = Describe.RunInfo(rs) };
+        // Which boss the deck has to beat bears on which card to take.
+        Describe.AddBosses(state, rs);
+        state["player"] = Describe.PlayerRun(me, includeDeck: true);
+        state["cards"] = cards;
+        return state;
     }
 
     private static string AlternativeLabel(Alternative alt)
