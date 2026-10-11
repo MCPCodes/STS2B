@@ -9,10 +9,12 @@ namespace SpireMind.Core;
 /// snapshot can go stale while it runs (Mark gave the bot Block and it played its Defends
 /// anyway). act_sequence looks before each step for changes its own steps don't explain, to
 /// the numbers a plan rests on: the bot's Block, energy, HP and powers, the planned targets'
-/// HP, Block and powers, which enemies are still there, and incoming_damage. On one it stops
-/// and hands back the fresh snapshot to plan from. A lone act or a sequence sent on an older
-/// snapshot runs when only teammates changed things since and none of those numbers moved.
-/// None of this runs in a solo fight.
+/// HP, Block and powers, which enemies are still there, and incoming_damage. The game side's
+/// own record of what the others did (state.team_since and team_changed, docs/coop.md) is a
+/// second, more precise sign: a line the model hasn't seen, in a snapshot that says a line
+/// touched the bot, its pet or an enemy, when no line the model knew can have set that. On
+/// either it stops and hands back the fresh snapshot to plan from. A lone act or a sequence sent on an older snapshot runs when only teammates
+/// changed things since and neither sign shows. None of this runs in a solo fight.
 /// </summary>
 public sealed partial class BotTools
 {
@@ -51,9 +53,10 @@ public sealed partial class BotTools
     /// <summary>
     /// The snapshot the model's ids came from: <paramref name="current"/> when version is its
     /// version. Otherwise, in a co-op fight, the older snapshot it was handed, as long as the bot
-    /// has done nothing since, it is still the same turn and screen with the same hand, and what
-    /// changed is nothing the plan rests on (<see cref="TeammateChanges"/>). Plan is null when
-    /// nothing may run, and Why says why.
+    /// has done nothing since, it is still the same turn and screen with the same hand, the
+    /// record shows no new line that touched anything (<see cref="TeamNews"/>), and what changed
+    /// is nothing the plan rests on (<see cref="TeammateChanges"/>). Plan is null when nothing
+    /// may run, and Why says why.
     /// </summary>
     private (GameSnapshot? Plan, string? Why) PlanFrom(long version, GameSnapshot current, IEnumerable<string> ids)
     {
@@ -72,6 +75,8 @@ public sealed partial class BotTools
         // The bot did nothing since, so a different hand is a teammate's doing (Huddle Up).
         if (!SameHand(older, current))
             return (null, "A teammate acted since that snapshot: your hand changed. Nothing was done; plan from the current snapshot.");
+        if (TeamNews(TeamRecord.Of(older), TeamRecord.Of(current), mayBeCleared: false) is { } lines)
+            return (null, $"A teammate acted since that snapshot: {lines}. Nothing was done; plan from the current snapshot.");
         if (TeammateChanges(older, current, own: null, Targets(ids)) is { } changes)
             return (null, $"A teammate acted since that snapshot: {changes}. Nothing was done; plan from the current snapshot.");
         return (older, null);
@@ -126,6 +131,117 @@ public sealed partial class BotTools
         if (!SameTurn(start, fresh))
             return "Your turn ended.";
         return null;
+    }
+
+    /// <summary>
+    /// state.team_since, what the other players did since the bot's last action (docs/coop.md,
+    /// What the others just did): its lines without the "(N earlier lines left out)" one, that N
+    /// (0 without it), and whether team_changed is set. No lines and no flag when there are none:
+    /// solo, the arena, nothing to tell.
+    /// </summary>
+    private readonly record struct TeamRecord(int LeftOut, List<string> Lines, bool Changed)
+    {
+        public static TeamRecord Of(GameSnapshot s)
+        {
+            var lines = new List<string>();
+            var leftOut = 0;
+            if (s.State["team_since"] is JsonArray list)
+                foreach (var item in list)
+                {
+                    if (Str(item) is not { Length: > 0 } line)
+                        continue;
+                    if (LeftOutPattern.Match(line) is { Success: true } m)
+                        leftOut = int.TryParse(m.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var n) ? n : 0;
+                    else
+                        lines.Add(line);
+                }
+            var changed = s.State["team_changed"] is JsonValue v && v.TryGetValue<bool>(out var c) && c;
+            return new TeamRecord(leftOut, lines, changed);
+        }
+    }
+
+    private static readonly Regex LeftOutPattern = new(@"^\((\d+) earlier lines? left out\)$", RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// What a teammate did that the model hasn't seen and that touched the bot, its pet or an
+    /// enemy: the lines of <paramref name="now"/> not in <paramref name="known"/>
+    /// (<see cref="Unknown"/>), joined with "; ". Null when there are none, or when now's
+    /// team_changed isn't set: lines alone (a teammate buffing themselves) never count. The flag
+    /// is for all the lines together, so it speaks for the new ones only when no known line can
+    /// have set it: known had no flag, or its lines are gone. Nothing clears lines but the bot's
+    /// own action, so they can be gone only when <paramref name="mayBeCleared"/> (the first check
+    /// after a sequence's first step); then none of now's lines may match one, nor may any have
+    /// slid out of view.
+    /// </summary>
+    private static string? TeamNews(TeamRecord known, TeamRecord now, bool mayBeCleared)
+    {
+        if (!now.Changed)
+            return null;
+        var fresh = Unknown(known, now);
+        if (fresh.Count == 0)
+            return null;
+        var knownLeft = fresh.Count < now.Lines.Count || now.LeftOut > 0;
+        if (known.Changed && (!mayBeCleared || knownLeft))
+            return null;
+        return string.Join("; ", fresh);
+    }
+
+    /// <summary>
+    /// The lines of <paramref name="now"/> not in <paramref name="known"/>, as multisets of exact
+    /// strings: a line twice in now and once in known is new once. In now's order. Known's first
+    /// lines that now's larger left-out count says slid out of view are left out of the match,
+    /// so a new line with the same text as one of them is still new.
+    /// </summary>
+    private static List<string> Unknown(TeamRecord known, TeamRecord now)
+    {
+        var left = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var line in known.Lines.Skip(Math.Max(0, now.LeftOut - known.LeftOut)))
+            left[line] = left.GetValueOrDefault(line) + 1;
+        var fresh = new List<string>();
+        foreach (var line in now.Lines)
+        {
+            if (left.GetValueOrDefault(line) is var n and > 0)
+                left[line] = n - 1;
+            else
+                fresh.Add(line);
+        }
+        return fresh;
+    }
+
+    /// <summary>
+    /// The team_since lines a co-op act_sequence has already judged. At first those the model
+    /// planned with: the snapshot the ids came from, plus the new lines of the capture the first
+    /// step ran on when that is newer (<see cref="PlanFrom"/> let them pass). After that, those
+    /// of the last snapshot a check passed. A line stays in every snapshot until the bot's own
+    /// action clears it, so one judged once is not judged again, while one with the same text
+    /// that comes after it was cleared is a new play. The exception is the first check: the first
+    /// step clears the lines the model planned with, and a line with the same text as one of them
+    /// is taken for it (the numbers still see what it did).
+    /// </summary>
+    private sealed class TeamSeen
+    {
+        private TeamRecord _known;
+        private bool _first = true;
+
+        public TeamSeen(GameSnapshot start, GameSnapshot first)
+        {
+            // Nothing cleared between the two (PlanFrom), so first's new lines follow start's.
+            var a = TeamRecord.Of(start);
+            var b = TeamRecord.Of(first);
+            _known = new TeamRecord(a.LeftOut, [.. a.Lines, .. Unknown(a, b)], a.Changed || b.Changed);
+        }
+
+        /// <summary>The new lines of <paramref name="now"/> that its team_changed speaks for
+        /// (<see cref="TeamNews"/>). Null when none, and now's lines are judged then.</summary>
+        public string? Check(GameSnapshot now)
+        {
+            var record = TeamRecord.Of(now);
+            if (TeamNews(_known, record, mayBeCleared: _first) is { } news)
+                return news;
+            _known = record;
+            _first = false;
+            return null;
+        }
     }
 
     /// <summary>
