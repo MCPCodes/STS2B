@@ -166,3 +166,10 @@ Gains for 1 to 4 are predicted from tested positions; none has been played by Op
 3. Let arena fights read the wiki, so the test matches the real bot.
 
 Files: this folder's `vantom1`, `vantom2`, `beast`, `leaks`, `strengths`, `stats` (each has PROGRESS.md and out/), `TOOL.md`, and `synth/` (compare.py for the three runs, the three re-runs, replays of the high-effort run).
+
+## 10. Notes from applying items 1 to 4 and 10 (cloud, 692a460)
+
+- Item 3's learned.md sentence is not in the repo: this checkout's `strategy/learned.md` has no line 7. Add it to the Mac's local copy before running the new arm, or item 3 is only half applied.
+- Section 6 gives the next two enemy turns after boss-878005 T4 as 27 and 22. In The Kin's table those are enemy turns 5 and 6; enemy turn 4 deals 7. Worth checking how the arena counts turns.
+- Item 4's Strength line was narrowed to Flex Potion: per `wiki/potions.md` Strength Potion lasts the fight, so the existing "buff potions before attacks" line covers it. Item 2 drops Infernal Blade (no offer to pick from) and says the card stays for the rest of the fight unless it exhausts, costing 0 only this turn.
+- The prompt hash changes with play.md step 3 (act_sequence through hand picks), so old and new arms differ in that line too.
