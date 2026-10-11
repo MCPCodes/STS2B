@@ -89,7 +89,7 @@ Sources disagree on several rules. Items marked (unverified) should be confirmed
 - **Decide Block last, from a fresh snapshot.** A teammate's Lift, Rally or Block Potion changes how much you still need. Play your attacks and debuffs first, then look at your Block and incoming_damage again before you spend cards on defense.
 - **Keep sequences short while a teammate hasn't ended their turn** (team[].ended_turn is false). A few cards, then look again. Once everyone else has ended, the board only changes from your own plays and a whole-turn sequence is safe.
 - **When act_sequence stops with "A teammate acted: ...", re-plan.** It says what changed (your Block 0 -> 11, an enemy gone) and returns the fresh snapshot in next. Plan the rest of the turn from that snapshot, not from your old plan. An act sent on an older snapshot is refused the same way.
-- The game side is adding a field to the snapshot that lists what teammates did since you last looked. Read it when it shows up.
+- **`team_since` says what your teammates just did** ("Mark played Shrug It Off on you: +8 Block"), up to 8 lines since your last action; `team_changed: true` means a line touched you, your pet or an enemy. Read it before you plan, and count what it gave you before playing your own Block.
 
 ## How a good AI teammate behaves
 1. **Complement, don't copy.**
