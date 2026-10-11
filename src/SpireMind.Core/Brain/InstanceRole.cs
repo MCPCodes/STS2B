@@ -10,7 +10,10 @@ public enum InstanceKind { Human, Bot }
 /// <summary>
 /// What this copy of the game is in co-op, and where it keeps its files. Mark plays in his own
 /// copy (the human copy, port 17772); each bot is a second copy on the same machine, started
-/// with <c>--sts2bot=1</c> and its own port. Only a bot copy runs a brain in a co-op run.
+/// with <c>--sts2bot=1</c>, without Steam, and on its own port. Only a bot copy runs a brain in
+/// a co-op run. A copy that runs with Steam is always the human copy, whatever its command line
+/// says, so a stray <c>--sts2bot=1</c> in Steam's launch options can't turn Mark's own game into
+/// a bot copy.
 /// <list type="bullet">
 /// <item><see cref="ConfigDir"/> holds this copy's config.json, transcripts and autostart flag.
 /// <see cref="SharedConfigDir"/> (<c>~/.config/spiremind</c>) holds what every copy shares:
@@ -87,13 +90,23 @@ public sealed record InstanceRole
     /// <param name="port">This copy's bridge port.</param>
     /// <param name="getEnv">Environment lookup for tests; defaults to <see cref="Environment.GetEnvironmentVariable(string)"/>.</param>
     /// <param name="home">The home folder; defaults to the user profile.</param>
+    /// <param name="steamRunning">True when this copy runs with Steam (the game brings Steam up,
+    /// or skips it, before it loads mods). Asked only when the bot flag is set. A copy with Steam
+    /// is the human copy whatever its flag says, and so is one where this throws, since then
+    /// nobody can tell; both add a warning. Null means no Steam (tests, the dev host).</param>
     public static InstanceRole Detect(IReadOnlyList<string> args, int port,
-        Func<string, string?>? getEnv = null, string? home = null)
+        Func<string, string?>? getEnv = null, string? home = null, Func<bool>? steamRunning = null)
     {
         getEnv ??= Environment.GetEnvironmentVariable;
         home ??= Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var warnings = new List<string>();
         var kind = HasBotFlag(args) ? InstanceKind.Bot : InstanceKind.Human;
+        if (kind == InstanceKind.Bot && SteamBlocksBot(steamRunning) is { } why)
+        {
+            kind = InstanceKind.Human;
+            warnings.Add($"{BotArg}=1 is on the command line, but {why}, so the flag is ignored and this copy runs as the human copy. " +
+                         "A bot copy is started without Steam (--force-steam=off).");
+        }
         var shared = Path.Combine(home, ".config", "spiremind");
         var fallback = kind == InstanceKind.Bot ? Path.Combine(shared, $"bot-{port}") : shared;
 
@@ -146,6 +159,22 @@ public sealed record InstanceRole
     /// <summary>The role in one line for the log.</summary>
     public override string ToString() =>
         $"{(IsBot ? "bot copy" : "human copy")} {InstanceId} on port {Port}; config in {ConfigDir}; shared {SharedConfigDir}";
+
+    // Why the bot flag can't count (this copy runs with Steam, or that can't be told), or null
+    // when it can.
+    private static string? SteamBlocksBot(Func<bool>? steamRunning)
+    {
+        if (steamRunning is null)
+            return null;
+        try
+        {
+            return steamRunning() ? "this copy runs with Steam" : null;
+        }
+        catch (Exception ex)
+        {
+            return $"whether this copy runs with Steam couldn't be told ({ex.GetType().Name}: {ex.Message})";
+        }
+    }
 
     // True when args hold --sts2bot=<v> or --sts2bot <v> with v 1 or true. The first occurrence decides.
     private static bool HasBotFlag(IReadOnlyList<string> args)

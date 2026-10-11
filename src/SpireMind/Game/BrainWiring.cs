@@ -24,6 +24,12 @@ internal static class BrainWiring
 
     private static int _shutDown;
     private static volatile bool _quiet;
+    private static volatile string? _notesRoot;
+
+    /// <summary>Where the brain keeps its notes (the repo, or the shared config folder), as
+    /// resolved at <see cref="Start"/>; null before it or when the brain couldn't be set up. The
+    /// co-op relay writes the party plan under it.</summary>
+    internal static string? NotesRoot => _notesRoot;
 
     /// <summary>
     /// Builds the controller, starts it (it starts a brain by itself when autostart is on) and
@@ -106,7 +112,9 @@ internal static class BrainWiring
                         announce: line => chat.Announce(line),
                         log: info,
                         blocked: blocked,
-                        fights: fights);
+                        fights: fights,
+                        // A bot copy's party plan from the co-op planning sessions, for fresh conversations.
+                        partyPlan: () => tools.Party?.PlanText);
                 },
                 createSubscription: settings =>
                 {
@@ -139,7 +147,7 @@ internal static class BrainWiring
             // The folders as they stand now; each brain start resolves them again, so a repo
             // set in config.json applies at the next /start. Initialize logs the settings (the
             // key only as where it came from) and their warnings.
-            paths.Resolve(controller.Settings);
+            _notesRoot = paths.Resolve(controller.Settings).NotesRoot;
             HookExit(controller, info, warn);
             controller.Initialize();
             return controller;

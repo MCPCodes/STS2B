@@ -16,8 +16,15 @@ namespace SpireMind.Core.Coop;
 /// finds bot copies on localhost (GET /coop/info), sends them what he types and the commands
 /// that belong to them (/start, /pause, /model and the rest, answered with each bot's name in
 /// front), reads their chat logs (GET /chat?since=) into his log and onto their players as
-/// speech bubbles (<see cref="ICoopBots.ShowLine"/>), and passes each bot's lines to the other
-/// bots as party chat. It adds /bots, /bot add and /party. Runs only in the human's copy.
+/// speech bubbles (<see cref="ICoopBots.ShowLine"/>) with a thought cloud while a bot decides,
+/// and passes each bot's lines to the other bots as party chat. It adds /bots, /bot add,
+/// /bot stop, /party and /plan, and asks the bots to look for the lobby when the human's copy opens
+/// one (<see cref="NudgeBots"/>). It owns the <see cref="PartyConductor"/>, which runs the party's
+/// planning sessions over the same workers (POST /coop/party). Runs only in the human's copy.
+///
+/// Each bot goes by its nameplate on the human's screen ("Ironclad", "Ironclad 2", from
+/// <see cref="ICoopBots.NameOf"/>), else its character, numbered from the second bot on one
+/// character. Chat labels, /bots and addressing a bot by name ("Ironclad 2, block") all use it.
 ///
 /// Every bot has one worker task that makes that bot's HTTP calls strictly in order (the lines
 /// and commands to send, and a poll of its log when there is nothing to send), so a poll never
@@ -45,11 +52,16 @@ public sealed partial class CoopRelay : IDisposable
         "In co-op, /start, /stop, /pause, /resume, /budget, /model and /effort go to every bot; put a bot's name first to send to one (/model Silent sonnet, /help Silent).";
 
     private const string NotAnsweringYet = "No bot copy is answering yet; try again in a moment.";
-    private const string BotUsage = "Use /bot add [Ironclad|Silent|Defect|Regent|Necrobinder|Random].";
+    private const string BotUsage = "Use /bot add [Ironclad|Silent|Defect|Regent|Necrobinder|Random] or /bot stop [name].";
+    private const string QuitPath = "/coop/quit";
+    private const string JoinNowPath = "/coop/join-now";
+    private const string PartyPath = "/coop/party";
     private const string NoLauncher = "This build can't start bot copies; start one with scripts/coop-bot.sh.";
     private const int MaxFailureLength = 160;
     private const int MaxResponseBytes = 4 * 1024 * 1024;
     private static readonly TimeSpan PartyWindow = TimeSpan.FromMinutes(1);
+    // The game side waits up to ten seconds for its copies to quit, then ends the stragglers.
+    private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(30);
 
     private readonly ChatHub _chat;
     private readonly CoopRelayOptions _options;
@@ -72,10 +84,12 @@ public sealed partial class CoopRelay : IDisposable
     private int _starting;
     private int _started;
     private int _disposed;
+    private int _cloudFailed;
     private volatile bool _partyChat;
     private Func<string, string, string, string?>? _filter;
     private Action<ChatLine>? _onLine;
-    private Func<string, string, string>? _botsCommand, _botCommand, _partyCommand;
+    private Func<string, string, string>? _botsCommand, _botCommand, _partyCommand, _planCommand;
+    private readonly PartyConductor _conductor;
 
     /// <param name="chat">The human copy's chat hub.</param>
     /// <param name="options">Ports, timings and limits.</param>
@@ -105,7 +119,12 @@ public sealed partial class CoopRelay : IDisposable
         // Each call has its own deadline.
         _http.Timeout = System.Threading.Timeout.InfiniteTimeSpan;
         _http.MaxResponseContentBufferSize = MaxResponseBytes;
+        _conductor = new PartyConductor(SendPartyOp, Announce, line => _log(line), _clock, options.PartyTimings,
+            options.Planning, options.PartyPlanFile, options.HumanName, options.HumanCharacter);
     }
+
+    /// <summary>The party's planning sessions, run from here.</summary>
+    public PartyConductor Conductor => _conductor;
 
     /// <summary>
     /// The handler the relay uses when the options give none: no proxy from the environment, and
@@ -146,7 +165,8 @@ public sealed partial class CoopRelay : IDisposable
         {
             lock (_gate)
                 return _peers.Values.OrderBy(l => l.Port)
-                    .Select(l => new BotPeer(l.Port, l.Session, l.Character, l.NetId, l.Playing, l.Paused, l.Live))
+                    .Select(l => new BotPeer(l.Port, l.Session, l.Character, l.NetId, l.Playing, l.Paused, l.Live,
+                        LabelLocked(l), l.Status, l.Thinking))
                     .ToArray();
         }
     }
@@ -172,13 +192,17 @@ public sealed partial class CoopRelay : IDisposable
         _botCommand = BotCommand;
         _partyCommand = PartyCommand;
         _chat.AddCommand("bots", "", "lists the bot copies", _botsCommand);
-        _chat.AddCommand("bot", "add [character]", "starts a bot copy", _botCommand);
+        _chat.AddCommand("bot", "add [character] | stop [name]", "starts a bot copy, or asks one (or all) to leave and quit", _botCommand);
         _chat.AddCommand("party", "[on|off]", "sets whether bots hear each other", _partyCommand);
+        _planCommand = (from, args) => _conductor.Command(from, args);
+        _chat.AddCommand("plan", "[skip|show|on|off]", "starts or ends the bots' planning session, shows the plan, or turns the automatic ones on or off", _planCommand);
         _filter = Filter;
         _chat.CommandFilter = _filter;
         _onLine = OnLine;
         _chat.LineAdded += _onLine;
         _ = Task.Run(() => LoopAsync(_stopToken));
+        _conductor.Load();
+        _ = Task.Run(() => _conductor.RunAsync(_stopToken));
         _log($"looking for bot copies on ports {string.Join(", ", CandidatePorts())}");
     }
 
@@ -195,6 +219,7 @@ public sealed partial class CoopRelay : IDisposable
         if (_botsCommand is not null) _chat.RemoveCommand("bots", _botsCommand);
         if (_botCommand is not null) _chat.RemoveCommand("bot", _botCommand);
         if (_partyCommand is not null) _chat.RemoveCommand("party", _partyCommand);
+        if (_planCommand is not null) _chat.RemoveCommand("plan", _planCommand);
         lock (_gate)
         {
             foreach (var link in _peers.Values) link.Live = false;
@@ -325,6 +350,8 @@ public sealed partial class CoopRelay : IDisposable
         _log($"linked the bot copy on port {port} (session {session}, reading after line {link.Since})");
         RefreshHelpNote();
         Announce(announcement);
+        SyncCloud(link);
+        FeedConductor(link);
         _ = Task.Run(() => WorkAsync(link));
         return true;
     }
@@ -345,10 +372,12 @@ public sealed partial class CoopRelay : IDisposable
         catch (ObjectDisposedException) { /* already gone */ }
 
         _log($"dropped the bot copy on port {link.Port}");
+        _conductor.Gone(link.Port);
+        SyncCloud(link);
         RefreshHelpNote();
         while (link.Jobs.TryDequeue(out var job))
         {
-            if (job.Kind == JobKind.Command)
+            if (job.Kind is JobKind.Command or JobKind.Quit)
                 Announce($"{label} didn't answer (its copy may have closed).");
         }
         if (announcement is not null)
@@ -373,7 +402,7 @@ public sealed partial class CoopRelay : IDisposable
                     pollNow = polled == Polled.Again;
                     if (polled == Polled.Down)
                     {
-                        Drop(link, $"{Label(link)}'s copy stopped answering.");
+                        Drop(link, GoneLine(link));
                         return;
                     }
                     if (polled == Polled.NotABot)
@@ -399,7 +428,7 @@ public sealed partial class CoopRelay : IDisposable
         catch (Exception ex)
         {
             _log($"the worker for port {link.Port} failed: {ex}");
-            Drop(link, $"{Label(link)}'s copy stopped answering.");
+            Drop(link, GoneLine(link));
         }
         finally
         {
@@ -415,6 +444,10 @@ public sealed partial class CoopRelay : IDisposable
                     Volatile.Write(ref _liveCount, _peers.Values.Count(l => l.Live));
                 }
             }
+            // A cloud still up over a bot whose worker ended (the relay stopping) comes down,
+            // unless the relay is gone, when the game is quitting anyway.
+            if (Volatile.Read(ref _disposed) == 0)
+                SyncCloud(link);
             link.Cancel.Dispose();
             link.Signal.Dispose();
         }
@@ -449,12 +482,16 @@ public sealed partial class CoopRelay : IDisposable
             link.Since = 0;
             link.Skip.Clear();
             Announce($"{label}'s copy restarted.");
+            SyncCloud(link);
+            FeedConductor(link);
             return Polled.Again;
         }
 
         if (Long(log["last_seq"]) is { } last && last < link.Since)
             link.Since = last;
         lock (_gate) UpdateIdentity(link, log);
+        SyncCloud(link);
+        FeedConductor(link);
 
         var lines = (log["lines"] as JsonArray ?? [])
             .OfType<JsonObject>()
@@ -489,8 +526,19 @@ public sealed partial class CoopRelay : IDisposable
     // A bot's own line: into the human's log, as a bubble over its player, and to the other bots.
     private void ShowBotLine(Link link, string? from, string text)
     {
-        var label = Label(link);
-        var who = string.IsNullOrWhiteSpace(from) || from == "Bot" ? label : from;
+        string label;
+        string? character;
+        var known = KnownBots();
+        lock (_gate)
+        {
+            label = LabelLocked(link, known);
+            character = CharacterLocked(link, known);
+        }
+        // A bot signs its lines with its character; the label tells two of one character apart.
+        var who = string.IsNullOrWhiteSpace(from) || from == "Bot"
+                  || (character is not null && string.Equals(CleanCharacter(from), character, StringComparison.OrdinalIgnoreCase))
+            ? label
+            : from;
         ChatLine shown;
         try
         {
@@ -552,12 +600,33 @@ public sealed partial class CoopRelay : IDisposable
 
     private async Task PostAsync(Link link, Job job, CancellationToken ct)
     {
-        var reply = await PostJsonAsync(link.Port, "/chat", job.Body, _options.PostTimeout, ct);
-        if (job.Kind != JobKind.Command)
+        var reply = await PostJsonAsync(link.Port, job.Path, job.Body, _options.PostTimeout, ct);
+        switch (job.Kind)
         {
-            if (reply is null)
-                _log($"couldn't pass a {(job.Kind == JobKind.Party ? "party" : "chat")} line to the bot copy on port {link.Port}");
-            return;
+            case JobKind.Line or JobKind.Party:
+                if (reply is null)
+                    _log($"couldn't pass a {(job.Kind == JobKind.Party ? "party" : "chat")} line to the bot copy on port {link.Port}");
+                return;
+            case JobKind.Nudge:
+                if (reply is null)
+                    _log($"couldn't ask the bot copy on port {link.Port} to look for the lobby now");
+                return;
+            case JobKind.PartyOp:
+                if (reply is null)
+                    _log($"party: couldn't send an op to the bot copy on port {link.Port}");
+                else if (reply["ok"] is JsonValue ok && ok.TryGetValue<bool>(out var good) && !good)
+                    _log($"party: the bot copy on port {link.Port} turned an op down: {Text(reply["error"]) ?? "no reason given"}");
+                return;
+            case JobKind.Quit:
+                var who = Label(link);
+                if (reply is null)
+                {
+                    Announce($"{who} didn't take the request to quit (its copy may have closed already).");
+                    return;
+                }
+                link.Quitting = true;
+                AnnounceFrom(who, Text(reply["reply"]) is { } said && !string.IsNullOrWhiteSpace(said) ? said : "Leaving the game and quitting.");
+                return;
         }
 
         var label = Label(link);
@@ -586,20 +655,33 @@ public sealed partial class CoopRelay : IDisposable
 
     // Mark's own lines (typed in his window or posted to his /chat). In co-op they go to every
     // bot, and each bot decides by name whether it is for it. Outside co-op a line goes only to
-    // the linked bot whose character it starts with ("Silent, ready?"), as this copy's own bot
-    // is the one he talks to there.
+    // the linked bot whose name it starts with ("Silent, ready?"), as this copy's own bot is the
+    // one he talks to there. A line that starts with a bot's label ("Ironclad 2, block") skips
+    // the other bots on that character, who would each take a line starting with their
+    // character as theirs.
     private void OnLine(ChatLine line)
     {
         if (line.Kind != ChatLineKind.Human || line.Remote)
             return;
+        // A planning session takes his lines into the bots' briefs and the plan.
+        _conductor.OnHumanLine(line.From, line.Text);
         var inCoop = InCoop;
         var body = new JsonObject { ["from"] = line.From, ["text"] = line.Text }.ToJsonString();
-        var named = inCoop ? null : TargetWord().Match(line.Text) is { Success: true } m ? m.Groups["word"].Value : null;
+        var known = KnownBots();
         lock (_gate)
         {
-            foreach (var link in _peers.Values.Where(l => l.Live))
+            var labels = LabelsLocked(known);
+            var (target, _) = MatchLabel(line.Text, labels);
+            var named = target is null && !inCoop && TargetWord().Match(line.Text) is { Success: true } m ? m.Groups["word"].Value : null;
+            var targetCharacter = target is null ? null : CharacterLocked(target, known);
+            foreach (var link in labels.Keys)
             {
-                if (inCoop || (named is not null && string.Equals(link.Character, named, StringComparison.OrdinalIgnoreCase)))
+                bool send;
+                if (target is not null)
+                    send = link == target || (inCoop && !string.Equals(CharacterLocked(link, known) ?? "", targetCharacter ?? "-", StringComparison.OrdinalIgnoreCase));
+                else
+                    send = inCoop || (named is not null && string.Equals(CharacterLocked(link, known), named, StringComparison.OrdinalIgnoreCase));
+                if (send)
                     EnqueueLocked(link, new Job(JobKind.Line, body));
             }
         }
@@ -623,17 +705,11 @@ public sealed partial class CoopRelay : IDisposable
             return null;
 
         var inCoop = InCoop;
-        var (word, rest) = SplitTarget(args);
+        var known = KnownBots();
         lock (_gate)
         {
             var live = _peers.Values.Where(l => l.Live).OrderBy(l => l.Port).ToList();
-            Link? target = null;
-            string? missing = null;
-            if (word is not null)
-            {
-                target = live.Find(l => string.Equals(l.Character, word, StringComparison.OrdinalIgnoreCase));
-                if (target is null) missing = CharacterName(word, live);
-            }
+            var (target, rest, missing) = ResolveTargetLocked(args, live, known);
 
             List<Link> targets;
             if (target is null && !inCoop)
@@ -673,18 +749,22 @@ public sealed partial class CoopRelay : IDisposable
         return "";
     }
 
-    // The first word of a command's arguments (after an optional "the") when it is a
-    // character's name, and the arguments after it; else (null, args).
-    private (string? Word, string Remainder) SplitTarget(string args)
+    // Caller holds _gate. The bot a command's arguments name first, by its label ("Ironclad 2")
+    // or else its character, and the arguments after the name. Missing is the proper name of
+    // a character the arguments start with that no live bot plays; both null when the
+    // arguments don't start with a name.
+    private (Link? Target, string After, string? Missing) ResolveTargetLocked(string args, List<Link> live,
+        IReadOnlyList<(int Port, ulong NetId, string Character)> known)
     {
+        var (target, rest) = MatchLabel(args, LabelsLocked(known));
+        if (target is not null)
+            return (target, rest, null);
+
         var match = TargetWord().Match(args);
-        if (!match.Success)
-            return (null, args);
-        var word = match.Groups["word"].Value;
-        bool known;
-        lock (_gate)
-            known = CharacterName(word, _peers.Values.Where(l => l.Live)) is not null;
-        return known ? (word, match.Groups["rest"].Value.Trim()) : (null, args);
+        if (!match.Success || CharacterName(match.Groups["word"].Value, live) is not { } character)
+            return (null, args, null);
+        target = live.Find(l => string.Equals(CharacterLocked(l, known), character, StringComparison.OrdinalIgnoreCase));
+        return target is null ? (null, args, character) : (target, match.Groups["rest"].Value.Trim(), null);
     }
 
     // The proper name of a character ("silent" gives "Silent"), from the chat's names and the
@@ -695,7 +775,7 @@ public sealed partial class CoopRelay : IDisposable
             .Concat(live.Select(l => l.Character).OfType<string>())
             .FirstOrDefault(n => n.Equals(word, StringComparison.OrdinalIgnoreCase));
 
-    // /bots: one line about every bot copy.
+    // /bots: one line about every bot copy, with where it stands when it says.
     private string ListBots(string from, string args)
     {
         var parts = new List<string>();
@@ -703,7 +783,8 @@ public sealed partial class CoopRelay : IDisposable
         HashSet<int> linked, down;
         lock (_gate)
         {
-            var live = _peers.Values.Where(l => l.Live).OrderBy(l => l.Port).ToArray();
+            var labels = LabelsLocked(known);
+            var live = labels.Keys.OrderBy(l => l.Port).ToArray();
             linked = live.Select(l => l.Port).ToHashSet();
             down = _peers.Values.Where(l => !l.Live).Select(l => l.Port).ToHashSet();
             foreach (var link in live)
@@ -717,23 +798,47 @@ public sealed partial class CoopRelay : IDisposable
                     case "none": details.Add("not playing"); break;
                 }
                 if (link.Paused) details.Add("paused");
-                var name = link.Character ?? KnownCharacter(link.Port, known) ?? "a bot";
-                parts.Add(details.Count > 0 ? $"{name} on {link.Port} ({string.Join(", ", details)})" : $"{name} on {link.Port}");
+                if (link.Thinking) details.Add("deciding");
+                var head = details.Count > 0 ? $"{labels[link]} on {link.Port} ({string.Join(", ", details)})" : $"{labels[link]} on {link.Port}";
+                parts.Add(StatusText(link.Status) is { } where ? $"{head}: {where}." : $"{head}.");
             }
         }
         // The game's copies that haven't answered yet, or stopped answering.
         foreach (var k in known.Where(k => !linked.Contains(k.Port) && k.Port != _options.OwnPort).OrderBy(k => k.Port))
-            parts.Add($"{CleanCharacter(k.Character) ?? "a bot"} on {k.Port} ({(down.Contains(k.Port) ? "not answering" : "starting")})");
+            parts.Add($"{CleanCharacter(k.Character) ?? "A bot"} on {k.Port} ({(down.Contains(k.Port) ? "not answering" : "starting")}).");
 
         var starting = Volatile.Read(ref _starting) != 0;
         if (parts.Count == 0)
             return starting ? "A bot copy is starting." : "No bot copies are running. /bot add [character] starts one.";
-        return $"Bots: {string.Join(", ", parts)}." + (starting ? " Another is starting." : "");
+        if (starting)
+            parts.Add("Another bot copy is starting.");
+        return string.Join("\n", parts);
     }
 
-    // /bot add [character]: starts a bot copy through the game.
+    // Where a bot copy says it stands, for /bots: "in the run", or the lobby driver's line
+    // ("joined; picked Silent; ready; waiting for the host to start"). Null when it says nothing.
+    private static string? StatusText(BotStatus? status)
+    {
+        if (status is null)
+            return null;
+        if (status.InRun)
+            return "in the run";
+        var line = status.Line is { } l ? Whitespace().Replace(l, " ").Trim().TrimEnd('.') : "";
+        if (line.Length > MaxFailureLength)
+            line = line[..(MaxFailureLength - 3)].TrimEnd() + "...";
+        if (status.JoinStopped && !line.StartsWith("stopped", StringComparison.OrdinalIgnoreCase))
+            return line.Length > 0 ? $"stopped trying to join ({line})" : "stopped trying to join";
+        return line.Length > 0 ? line : null;
+    }
+
+    // /bot add [character]: starts a bot copy through the game. /bot stop [name]: asks one bot
+    // copy, or every one, to leave and quit.
     private string BotCommand(string from, string args)
     {
+        var words = args.Trim().Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (words.Length > 0 && words[0].Equals("stop", StringComparison.OrdinalIgnoreCase))
+            return StopCommand(from, words.Length > 1 ? words[1] : null);
+
         var match = BotAdd().Match(args);
         if (!match.Success)
             return BotUsage;
@@ -792,6 +897,132 @@ public sealed partial class CoopRelay : IDisposable
             // Look for the new copy now rather than at the next round.
             try { _wake.Release(); }
             catch (ObjectDisposedException) { /* stopping */ }
+        }
+    }
+
+    // /bot stop [name]. With a name, that bot copy is asked through its bridge to leave the
+    // lobby or run and quit. Without one, the game stops every copy it started, and the ones it
+    // didn't start (scripts/coop-bot.sh) are asked through their bridges. Never waits.
+    private string StopCommand(string from, string? who)
+    {
+        var body = new JsonObject { ["from"] = from }.ToJsonString();
+        var known = KnownBots();
+        var coopBots = _coopBots;
+        if (who is null)
+        {
+            var byGame = coopBots is not null && known.Any(k => k.Port != _options.OwnPort);
+            var gamePorts = known.Select(k => k.Port).ToHashSet();
+            var asked = 0;
+            lock (_gate)
+            {
+                foreach (var link in _peers.Values.Where(l => l.Live))
+                {
+                    if (byGame && gamePorts.Contains(link.Port))
+                        continue;
+                    EnqueueLocked(link, new Job(JobKind.Quit, body, QuitPath));
+                    asked++;
+                }
+            }
+            if (byGame)
+                _ = Task.Run(() => StopAllAsync(coopBots!));
+            else if (asked == 0)
+                return "No bot copies are running.";
+            return "Asking every bot copy to leave and quit...";
+        }
+
+        var name = CleanCharacter(who) ?? who;
+        if (name.Equals("all", StringComparison.OrdinalIgnoreCase) || name.Equals("everyone", StringComparison.OrdinalIgnoreCase))
+            return StopCommand(from, null);
+        lock (_gate)
+        {
+            var labels = LabelsLocked(known);
+            var (target, rest) = MatchLabel(name, labels);
+            if (target is null || rest.Length > 0)
+            {
+                // Not a whole label ("Ironclad 3" where only "Ironclad" plays): the first bot on
+                // that character, if the name is one.
+                target = labels.Keys.OrderBy(l => l.Port)
+                    .FirstOrDefault(l => string.Equals(CharacterLocked(l, known), name, StringComparison.OrdinalIgnoreCase));
+            }
+            if (target is not null)
+            {
+                EnqueueLocked(target, new Job(JobKind.Quit, body, QuitPath));
+                return $"Asking {labels[target]} to leave and quit...";
+            }
+        }
+        if (known.Any(k => k.Port != _options.OwnPort && string.Equals(CleanCharacter(k.Character), name, StringComparison.OrdinalIgnoreCase)))
+            return $"{name} isn't answering, so it can't be asked by name. /bot stop with no name stops every bot copy this game started.";
+        return $"No bot is called {name}. /bots lists them.";
+    }
+
+    // The game side's stop of every copy it started, given StopTimeout.
+    private async Task StopAllAsync(ICoopBots coopBots)
+    {
+        try
+        {
+            var line = await coopBots.StopAllAsync(_stopToken).WaitAsync(StopTimeout, _stopToken);
+            if (!string.IsNullOrWhiteSpace(line))
+                Announce(line);
+        }
+        catch (OperationCanceledException) when (_stopToken.IsCancellationRequested)
+        {
+            // The relay is stopping.
+        }
+        catch (TimeoutException)
+        {
+            _log($"/bot stop: the game side's stop didn't finish within {StopTimeout.TotalSeconds.ToString("0", CultureInfo.InvariantCulture)} s");
+            Announce("The bot copies didn't all quit in time. /bots shows what is still running.");
+        }
+        catch (Exception ex)
+        {
+            Announce($"Couldn't stop the bot copies: {Describe(ex)}");
+        }
+    }
+
+    /// <summary>
+    /// Asks every linked bot copy, and every one the game started that isn't linked yet, to look
+    /// for the host's lobby now (POST /coop/join-now) instead of at its next retry. The game side
+    /// calls it when the human's copy enters a co-op lobby. Returns at once; any thread.
+    /// </summary>
+    public void NudgeBots()
+    {
+        if (Volatile.Read(ref _disposed) != 0 || Volatile.Read(ref _started) == 0)
+            return;
+        var known = KnownBots();
+        int linked;
+        int[] unlinked;
+        lock (_gate)
+        {
+            var live = _peers.Values.Where(l => l.Live).ToList();
+            foreach (var link in live)
+                EnqueueLocked(link, new Job(JobKind.Nudge, "{}", JoinNowPath));
+            linked = live.Count;
+            unlinked = known.Select(k => k.Port)
+                .Where(p => p is >= 1 and <= 65535 && p != _options.OwnPort && live.All(l => l.Port != p))
+                .Distinct()
+                .ToArray();
+        }
+        foreach (var port in unlinked)
+            _ = Task.Run(() => NudgeUnlinkedAsync(port));
+        if (linked + unlinked.Length > 0)
+            _log($"a co-op lobby opened here: asked {linked + unlinked.Length} bot {(linked + unlinked.Length == 1 ? "copy" : "copies")} to look for it now");
+    }
+
+    // A copy the game started that hasn't answered /coop/info yet (it may still be loading):
+    // one quiet try, since it looks for the lobby by itself anyway.
+    private async Task NudgeUnlinkedAsync(int port)
+    {
+        try
+        {
+            await PostJsonAsync(port, JoinNowPath, "{}", _options.ProbeTimeout, _stopToken, quiet: true);
+        }
+        catch (OperationCanceledException)
+        {
+            // The relay is stopping.
+        }
+        catch (Exception ex)
+        {
+            _log($"asking port {port} to look for the lobby failed: {ex.Message}");
         }
     }
 
@@ -860,12 +1091,147 @@ public sealed partial class CoopRelay : IDisposable
 
     private string Label(Link link)
     {
-        lock (_gate) return LabelLocked(link);
+        var known = KnownBots();
+        lock (_gate) return LabelLocked(link, known);
     }
 
-    // Caller holds _gate. The bot's character, else "The bot on 17773".
-    private string LabelLocked(Link link) =>
-        link.Character ?? KnownCharacter(link.Port, KnownBots()) ?? $"The bot on {link.Port}";
+    // Caller holds _gate. What the chat calls the bot (see LabelsLocked).
+    private string LabelLocked(Link link) => LabelLocked(link, KnownBots());
+
+    private string LabelLocked(Link link, IReadOnlyList<(int Port, ulong NetId, string Character)> known) =>
+        link.Live && LabelsLocked(known).TryGetValue(link, out var label)
+            ? label
+            : NameplateLocked(link, known) ?? CharacterLocked(link, known) ?? $"The bot on {link.Port}";
+
+    // Caller holds _gate. What the chat calls each live bot: its nameplate on the human's screen
+    // in a local co-op game ("Ironclad 2"), else its character, numbered from the second live
+    // bot on one character by port, else "The bot on 17773". Never two the same.
+    private Dictionary<Link, string> LabelsLocked(IReadOnlyList<(int Port, ulong NetId, string Character)> known)
+    {
+        var live = _peers.Values.Where(l => l.Live).OrderBy(l => l.Port).ToList();
+        var labels = new Dictionary<Link, string>();
+        var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var link in live)
+        {
+            if (NameplateLocked(link, known) is { } plate && taken.Add(plate))
+                labels[link] = plate;
+        }
+        foreach (var link in live)
+        {
+            if (labels.ContainsKey(link))
+                continue;
+            if (CharacterLocked(link, known) is not { } character)
+            {
+                labels[link] = $"The bot on {link.Port}";
+                continue;
+            }
+            var name = character;
+            for (var n = 2; !taken.Add(name); n++)
+                name = $"{character} {n.ToString(CultureInfo.InvariantCulture)}";
+            labels[link] = name;
+        }
+        return labels;
+    }
+
+    // Caller holds _gate. The bot's character as it reported it, else as the game started it.
+    private static string? CharacterLocked(Link link, IReadOnlyList<(int Port, ulong NetId, string Character)> known) =>
+        link.Character ?? KnownCharacter(link.Port, known);
+
+    // Caller holds _gate. The bot's nameplate on the human's screen, or null outside a local
+    // co-op game, before its NetId is known, or without the game side.
+    private string? NameplateLocked(Link link, IReadOnlyList<(int Port, ulong NetId, string Character)> known)
+    {
+        if (_coopBots is null || NetIdLocked(link, known) is not { } netId)
+            return null;
+        try
+        {
+            return _coopBots.NameOf(netId) is { } name ? CleanCharacter(Whitespace().Replace(name, " ")) : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    // The live bot whose label the text starts with (after an optional "the"), the longest label
+    // winning ("Ironclad 2" over "Ironclad"), and the text after the name; else (null, text).
+    private static (Link? Link, string After) MatchLabel(string text, Dictionary<Link, string> labels)
+    {
+        Link? best = null;
+        var bestLength = -1;
+        var rest = text;
+        foreach (var (link, label) in labels)
+        {
+            if (label.Length > bestLength && StartsWithName(text, label, out var after))
+            {
+                best = link;
+                bestLength = label.Length;
+                rest = after;
+            }
+        }
+        return (best, best is null ? text : rest);
+    }
+
+    // True when the text starts with the name (any case, after an optional "the") followed by
+    // its end, a space or punctuation; rest is what follows, without the punctuation.
+    private static bool StartsWithName(string text, string name, out string rest)
+    {
+        rest = text;
+        var t = text.TrimStart();
+        if (!name.StartsWith("the ", StringComparison.OrdinalIgnoreCase)
+            && t.StartsWith("the ", StringComparison.OrdinalIgnoreCase))
+            t = t[4..].TrimStart();
+        if (name.Length == 0 || !t.StartsWith(name, StringComparison.OrdinalIgnoreCase))
+            return false;
+        var after = t[name.Length..];
+        if (after.Length > 0 && !char.IsWhiteSpace(after[0]) && !NamePunctuation.Contains(after[0]))
+            return false;
+        rest = after.TrimStart(NamePunctuation).Trim();
+        return true;
+    }
+
+    private static readonly char[] NamePunctuation = [',', ':', ';', '.', '!', '?'];
+
+    // What the chat says when a bot copy's polls fail for good.
+    private string GoneLine(Link link) =>
+        link.Quitting ? $"{Label(link)} left, and its copy has quit." : $"{Label(link)}'s copy stopped answering.";
+
+    // Shows or takes away the thought cloud over the bot's player on the human's screen, to
+    // match what its copy last said (a cloud only while it is linked and deciding). Called with
+    // no lock held, after every identity update and when the link goes; the game's side is only
+    // called on a change. A failure is logged once.
+    private void SyncCloud(Link link)
+    {
+        if (_coopBots is not { } coopBots)
+            return;
+        var known = KnownBots();
+        ulong? off = null, on = null;
+        lock (_gate)
+        {
+            var netId = NetIdLocked(link, known);
+            var want = link.Live && link.Thinking && netId is not null && Volatile.Read(ref _disposed) == 0;
+            if (link.CloudNetId is { } shown && (!want || shown != netId))
+            {
+                off = shown;
+                link.CloudNetId = null;
+            }
+            if (want && link.CloudNetId is null)
+            {
+                on = netId;
+                link.CloudNetId = netId;
+            }
+        }
+        try
+        {
+            if (off is { } a) coopBots.Thinking(a, false);
+            if (on is { } b) coopBots.Thinking(b, true);
+        }
+        catch (Exception ex)
+        {
+            if (Interlocked.Exchange(ref _cloudFailed, 1) == 0)
+                _log($"showing a bot's thought cloud failed: {ex.Message}");
+        }
+    }
 
     private ulong? NetIdFor(Link link)
     {
@@ -905,10 +1271,68 @@ public sealed partial class CoopRelay : IDisposable
     // NetId it no longer reports (between runs) keeps the last one, so labels stay put.
     private static void UpdateIdentity(Link link, JsonObject json)
     {
+        link.Status = ReadStatus(json["status"] as JsonObject);
         if (CleanCharacter(Text(json["character"])) is { } character) link.Character = character;
+        else if (NiceCharacter(link.Status?.Character) is { } held) link.Character = held;
         if (ULong(json["net_id"]) is { } netId) link.NetId = netId;
         link.Playing = Text(json["playing"]);
         link.Paused = Bool(json["paused"]);
+        link.Thinking = Bool(json["thinking"]);
+        link.Party = json["party"] is JsonObject party ? (JsonObject)party.DeepClone() : null;
+    }
+
+    // Hands what the bot last reported to the planning sessions' conductor, with no lock held.
+    private void FeedConductor(Link link)
+    {
+        if (Volatile.Read(ref _disposed) != 0)
+            return;
+        var known = KnownBots();
+        string label, session;
+        string? playing;
+        bool paused, live;
+        bool? inRun;
+        JsonObject? party;
+        lock (_gate)
+        {
+            live = link.Live;
+            label = LabelLocked(link, known);
+            session = link.Session;
+            playing = link.Playing;
+            paused = link.Paused;
+            inRun = link.Status?.InRun;
+            party = link.Party;
+        }
+        if (!live)
+            return;
+        try { _conductor.Observe(link.Port, label, session, playing, paused, inRun, party); }
+        catch (Exception ex) { _log($"party: reading port {link.Port} failed: {ex.Message}"); }
+    }
+
+    // The conductor's op for one bot, queued on that bot's worker. Never waits.
+    private void SendPartyOp(int port, JsonObject op)
+    {
+        var body = op.ToJsonString();
+        lock (_gate)
+        {
+            if (_peers.TryGetValue(port, out var link))
+                EnqueueLocked(link, new Job(JobKind.PartyOp, body, PartyPath));
+        }
+    }
+
+    // The "status" object a bot copy reports, or null.
+    private static BotStatus? ReadStatus(JsonObject? json) =>
+        json is null ? null : new BotStatus(Text(json["line"]), Text(json["character"]), Bool(json["in_run"]), Bool(json["join_stopped"]));
+
+    // The game's id of a character as the chat names it: "SILENT" gives "Silent".
+    private static string? NiceCharacter(string? id)
+    {
+        var clean = CleanCharacter(id);
+        if (clean is null)
+            return null;
+        if (clean.Any(char.IsLower))
+            return clean;
+        var lower = clean.ToLowerInvariant();
+        return char.ToUpperInvariant(lower[0]) + lower[1..];
     }
 
     // "3 minutes", "90 seconds", "1 second".
@@ -971,8 +1395,9 @@ public sealed partial class CoopRelay : IDisposable
         }
     }
 
-    // A POST of a JSON body; the reply object when the status is 2xx, else null (logged).
-    private async Task<JsonObject?> PostJsonAsync(int port, string path, string body, TimeSpan timeout, CancellationToken ct)
+    // A POST of a JSON body; the reply object when the status is 2xx, else null (logged unless quiet).
+    private async Task<JsonObject?> PostJsonAsync(int port, string path, string body, TimeSpan timeout, CancellationToken ct,
+        bool quiet = false)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(timeout);
@@ -982,7 +1407,7 @@ public sealed partial class CoopRelay : IDisposable
             using var res = await _http.PostAsync(Url(port, path), content, deadline.Token);
             if (!res.IsSuccessStatusCode)
             {
-                _log($"POST {path} on port {port} answered HTTP {(int)res.StatusCode}");
+                if (!quiet) _log($"POST {path} on port {port} answered HTTP {(int)res.StatusCode}");
                 return null;
             }
             return JsonNode.Parse(await res.Content.ReadAsStringAsync(deadline.Token)) as JsonObject ?? new JsonObject();
@@ -994,7 +1419,7 @@ public sealed partial class CoopRelay : IDisposable
         catch (Exception ex) when (ex is OperationCanceledException or HttpRequestException or JsonException
                                        or ObjectDisposedException or InvalidOperationException or IOException)
         {
-            _log($"POST {path} on port {port} failed: {Describe(ex)}");
+            if (!quiet) _log($"POST {path} on port {port} failed: {Describe(ex)}");
             return null;
         }
     }
@@ -1024,12 +1449,13 @@ public sealed partial class CoopRelay : IDisposable
 
     private enum Polled { Ok, Failed, Down, Again, NotABot }
 
-    private enum JobKind { Line, Command, Party }
+    private enum JobKind { Line, Command, Party, Quit, Nudge, PartyOp }
 
-    private sealed record Job(JobKind Kind, string Body);
+    private sealed record Job(JobKind Kind, string Body, string Path = "/chat");
 
-    // A linked bot copy. Session, the identity fields and Live change under the relay's gate;
-    // Since, Failures and Skip belong to the link's worker alone.
+    // A linked bot copy. Session, the identity fields, CloudNetId and Live change under the
+    // relay's gate; Since, Failures and Skip belong to the link's worker alone. Quitting is set
+    // once the copy took a /bot stop, so its going is told as a quit.
     private sealed class Link(int port, string session, long since, CancellationTokenSource cancel)
     {
         public int Port { get; } = port;
@@ -1039,6 +1465,11 @@ public sealed partial class CoopRelay : IDisposable
         public ulong? NetId { get; set; }
         public string? Playing { get; set; }
         public bool Paused { get; set; }
+        public bool Thinking { get; set; }
+        public BotStatus? Status { get; set; }
+        public JsonObject? Party { get; set; }  // the bot's "party" report (PartyBot.Identity), or null
+        public ulong? CloudNetId { get; set; }  // the player a thought cloud is up over, else null
+        public volatile bool Quitting;
         public bool Live { get; set; } = true;
         public int Failures { get; set; }
         public HashSet<long> Skip { get; } = [];

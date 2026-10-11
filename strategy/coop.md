@@ -84,6 +84,13 @@ Sources disagree on several rules. Items marked (unverified) should be confirmed
 - **Damage carry:** the deck with the best scaling engine gets the damage relics and Coordinate, Believe in You and Tag Team targets.
 - **Everyone still needs their own block.** Personal Block isn't shared unless a card says so.
 
+## Your turn with a teammate
+- **They act in the same window as you.** While you plan, a teammate can give you Block or Energy, buff you, debuff an enemy, hit your target or kill it. A plan made from one snapshot can be stale two cards later.
+- **Decide Block last, from a fresh snapshot.** A teammate's Lift, Rally or Block Potion changes how much you still need. Play your attacks and debuffs first, then look at your Block and incoming_damage again before you spend cards on defense.
+- **Keep sequences short while a teammate hasn't ended their turn** (team[].ended_turn is false). A few cards, then look again. Once everyone else has ended, the board only changes from your own plays and a whole-turn sequence is safe.
+- **When act_sequence stops with "A teammate acted: ...", re-plan.** It says what changed (your Block 0 -> 11, an enemy gone) and returns the fresh snapshot in next. Plan the rest of the turn from that snapshot, not from your old plan. An act sent on an older snapshot is refused the same way.
+- The game side is adding a field to the snapshot that lists what teammates did since you last looked. Read it when it shows up.
+
 ## How a good AI teammate behaves
 1. **Complement, don't copy.**
    - Before each card pick, check what the humans' decks lack (AoE, block, draw, debuffs, Artifact strip, a boss answer). Draft to fill that gap.
@@ -112,3 +119,13 @@ Sources disagree on several rules. Items marked (unverified) should be confirmed
 11. **Respect the human.**
     - If the human calls a plan, follow it unless it is provably lethal. Then say why in one line.
     - Never take actions on the human's behalf (their cards, their rewards).
+
+## Planning sessions
+
+- The mod runs short planning sessions: at the start of each act while the Ancient's offer is up, around the middle of the act, and before the boss. Mark can start one with /plan and end one with /plan skip.
+- While one runs, your card, relic, shop and rest picks are held. wait_for_decision returns when it is your turn to speak, with `party` in the result: what to answer, the pitches so far and Mark's lines. Answer with one party_pitch call, then call wait_for_decision.
+- Pitch a lane that fits your character and your offers and complements the others: one deck carries damage, one applies Weak and Vulnerable early, someone can protect. Two decks chasing the same cards both end up weak.
+- Mark's orders outrank the party plan, and the plan outranks your own preferences. If Mark says what he is building, build around it.
+- During a session, answer Mark's lines in your pitch rather than with a separate say, unless he asked you something by name.
+- Ask Mark at most one short question per session, in your pitch. If he doesn't answer before the final round, go with your best guess and say what you guessed.
+- After a session, pick screens carry `party.yours` (your part of the plan) and `party.calls` (the party's calls). Check them before every card, relic and shop pick. On the map, vote the plan's route call only when Mark hasn't voted after the wait; once he votes, follow him.

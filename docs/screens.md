@@ -106,6 +106,20 @@ While a human has typed `/pause`, every snapshot the tools return (`get_state`, 
 
 The versioner never sees this copy. `chat.paused` is true. `act` and `act_sequence` are refused (see Refusals under The common envelope).
 
+### Held view (co-op planning sessions)
+
+In a co-op bot copy, while the party's planning session holds a pick screen (`docs/brain.md`, Planning sessions), the tools show that snapshot the same way as the paused view, except that `waiting` is `"held for the party's planning session"` and `chat.paused` is not set. Held screens: `card_reward`, `rewards`, `shop`, `treasure`, `rest`, `event` and `card_select` off combat; before a session opens, only the act-start Ancient event, for up to 15 s. `map`, `combat`, `hand_select` and `crystal_sphere` are never held. `act` and `act_sequence` on a held screen are refused first of all (see Refusals). The arena has no co-op and never shows this.
+
+### The party key (co-op planning sessions)
+
+`BotTools.WithParty` adds a top-level `"party"` in a bot copy that takes part in planning sessions (`BotTools.Party` set). Solo play and Mark's own copy never show it. It comes in three forms, merged into one object when more than one applies:
+
+- **On a pick screen once a plan exists**, inside the snapshot: `"party": {"yours": "<the bot's own section of the plan>", "calls": ["<party call>", ...]}`. `calls` may be empty.
+- **On any result while it is the bot's turn to pitch**, until it pitches: `{"session": "A2-start", "kind": "act_start" | "mid" | "boss" | "manual", "round": 1, "rounds": 2, "your_turn": true, "seconds_left": 35, "ask": "<what to answer>", "said": [<pitches so far>], "mark": [<Mark's lines>], "plan": "<the plan so far>" | null}`.
+- **Once, on the first result after a session the bot was in closed**: `{"closed": "A2-start", "note": "<what to do now>", "plan"?: "<the whole plan, markdown>", "yours"?: "...", "calls"?: [...]}`.
+
+MCP calls mark the turn brief and the closed news delivered; `/state` and `/act` only peek. Like `chat`, it never changes `version`.
+
 ### The chat key
 
 `BotTools.WithChat` adds a top-level `"chat"` to **any** object result: snapshots, `act` and `act_sequence` results, errors, `get_deck`, `say` and `get_persona`. It is added only when there are unread messages for this bot or the bot is paused. In `act` results it sits beside `done` and `next`, not inside `next`.
@@ -309,15 +323,18 @@ Refusals for potion ids:
 | `get_deck` | none | see get_deck | false, even when it carries `error` |
 | `say` | `text` (string, required) | `{"said": "<text as shown>"}` | false (true on a refusal, see Refusals) |
 | `get_persona` | none | `{"name", "title"?, "id", "pronouns"?: {"subject"?, "object"?, "possessive"?}, "tone"?, "voice_lines"?: [string]}` | false (true before a character is known, see Refusals) |
+| `party_pitch` | `say` (string, required), `role` (`debuffer`, `protector`, `damage`, `support` or `flex`), `archetype` (string), `wants`, `needs`, `gives`, `calls` (up to 4 strings each), `question` (string) | `{"pitched": true, "said": "<say as shown>"}`, or `"say_failed": "<why>"` in place of `said` when the chat refused the line (the pitch still counts). The API brain adds `"next": <what its wait after the pitch returned>` | true outside the bot's turn (`Not your turn in the planning session; call wait_for_decision.`) or without `say` (`say is required: your line to the party.`). Fields are cut to their limits (say 200 characters, items 80, question 150); an unknown role counts as flex |
 
-All of them can also carry `chat`.
+All of them can also carry `chat`, and in a co-op bot copy `party`. `party_pitch` is listed only in a bot copy that takes part in planning sessions.
 
 **wait_for_decision**:
 
 - Returns the first decision that has kept the same version for 300 ms.
 - Returns at once, settled or not, when an unread human message arrives or the bot is stopped with `/stop`. That snapshot may have `awaiting_decision: false`.
 - On timeout it returns whatever the game shows, which may be waiting.
-- While paused it never hands over a decision.
+- While paused it never hands over a decision, and a screen held for a planning session is no decision either.
+- In a co-op bot copy it also returns at once when the planning session has news for the bot: its turn to pitch, or the plan once a session closed (the `party` key).
+- In co-op (a snapshot that lists teammates), a decision with the same version as the one the last `wait_for_decision` handed over is held back for up to 60 s (`RepeatWaitHold`, never past the timeout), until the snapshot changes or a message arrives, so a bot waiting on Mark's map vote really waits. `act` and `act_sequence` reset it. The API brain holds such repeats in its own loop instead, so the two holds don't add up.
 - A newer `wait_for_decision` cancels the one still running.
 
 **act** runs these steps:
@@ -334,6 +351,8 @@ On a decision it returns `done` and `next`. Key order is `done`, `next`, `warnin
 
 Without `version`, `act` is refused before step 1 with `version is required: ...` (see Refusals) and nothing runs. The curl route `POST /act` is the same tool, so it needs `version` too.
 
+In a co-op fight (`combat` or `hand_select` with a non-empty `team`, or `teammates`), an `act` whose `version` is older than the current one can still run: when the version is one of the last 16 co-op fight snapshots handed to the model, the bot has acted on nothing since, it is the same turn, screen, hand selection and hand (name, cost and type), and nothing it rests on moved (the bot's Block, energy, HP and powers, the target's HP, Block and powers, which enemies are left, `incoming_damage`). The id is then found again in the current snapshot by its label, and `done` is the id that ran. Otherwise the refusal says what teammates changed (see Refusals). `docs/brain.md` (act_sequence, In a co-op fight) has the rules.
+
 **act_sequence**:
 
 - Every id is checked against the snapshot named by `version` before anything runs, except the picks for a hand choice (below).
@@ -344,6 +363,7 @@ Without `version`, `act` is refused before step 1 with `version is required: ...
   - A play of a card picked earlier in the sequence for an upgrade (`state.selection.mode` `upgrade`) is found only under the upgraded name, the card's name followed by `+` or `+N` with the rest of the label unchanged, at the same target (twin tags dropped).
 - Picks for a hand choice: in a sequence whose snapshot is `combat`, a `select:<i>` or `confirm` that is not the first id answers the `hand_select` a card before it opens. `i` is the card's index in that snapshot's `state.hand`; up front it must name a card there. When the choice is open, `select:<i>` runs as the offered `select:` whose hand entry has the same `name`, the same entry first (as for copies above), and `confirm` runs while offered. A confirm reached after the choice closed by itself is not run and goes in `not_needed`. A pick with no hand choice open, or not offered in it, stops the sequence, and so does a `select:<i>` whose `i` is a card the sequence already played or picked, even while a copy with the same name is offered. With only one valid card the game takes it without a prompt, so no choice opens and the picks stop the sequence; the model is told to leave them out. Any other id runs only once the screen is back on `combat`.
 - `card:<n>` and `bundle:<n>` after the first id of a `combat` sequence are refused up front: a `card_select`'s cards aren't in the snapshot.
+- In a co-op fight, an older `version` is taken as for `act` (above), and the first id is then found again by its label too. Before each later step the sequence also looks for what teammates changed, first against what the last step's card explains, then in a fresh capture taken once that step settled (waiting if a teammate's card is resolving), and stops on any change. A solo fight never runs these checks.
 - Key order is `done`, `not_needed` if a confirm was skipped, then `stopped` and `not_run` if it stopped early, otherwise `warning` if there is one, then `next`.
 - `done[].id` is the id actually run (it may be a re-found index). `not_run` lists the ids as sent, from the first one that did not run.
 - `stopped` texts, in the order they are checked:
@@ -354,6 +374,8 @@ Without `version`, `act` is refused before step 1 with `version is required: ...
   - `Your turn ended after '<label>'.` (`state.turn` or `state.round` changed; both are absent off combat, so this never fires there)
   - `Paused by <name>. Call wait_for_decision; you can still talk with say.`
   - `A chat message arrived.`
+  - In a co-op fight, from the fresh capture: `The game is still busy (<waiting, or "no decision yet">). Call wait_for_decision before acting again.`, `The screen changed to <screen>.` or `Your turn ended.`
+  - In a co-op fight: `A teammate acted: <changes>. Plan the rest of your turn from next.`, where `<changes>` is one or more of `your Block 0 -> 11`, `your energy 1 -> 2`, `your HP 40 -> 46`, `your <power> 0 -> 2`, `<enemy> (e<j>) is gone`, `<enemy> (e<j>) HP 30 -> 22`, `<enemy> (e<j>) Block 0 -> 6`, `<enemy> (e<j>) <power> 0 -> 2`, `incoming damage 12 -> 0`, joined with `; `
   - `'Select <card>' was planned for a choice from your hand, but none is open.` (or `'Confirm selection' ...`), followed by ` If only one card could be picked, the game took it without asking.` when the step before was a play that opened no choice
   - `'Select <card>' names a card this sequence already played or picked, so nothing was picked in its place.`
   - `'<label>' is no longer offered.` (for a pick, `'Select <card>'` or `'Confirm selection'`)
@@ -378,10 +400,10 @@ Argument errors return `{"error": "<text>"}` with `isError` true and no snapshot
 - `say` past the burst limit: `Too many chat lines: at most 6 in 10 seconds. Slow down: wait a little and keep it brief.`
 - `get_persona` before a character is known: `no character yet; call get_persona again once the run has started`
 
-State refusals return `{"error": "<text>", "current": <snapshot>}` with `isError` true. Nothing ran. They are checked in this order:
+State refusals return `{"error": "<text>", "current": <snapshot>}` with `isError` true. Nothing ran. In a co-op bot copy, a screen held for a planning session is refused before anything else: `Held for the party's planning session (<key>, up to <n> s more): pick after the plan is set. Call wait_for_decision; it returns at your turn to speak or when the plan is out.` Otherwise they are checked in this order:
 
 1. `Paused by <name>. Call wait_for_decision; you can still talk with say.`
-2. `Snapshot changed (you sent version <v>, current is <c>). Pick from the current actions.`
+2. `Snapshot changed (you sent version <v>, current is <c>). Pick from the current actions.` In a co-op fight, an older version that teammates moved past gets one of these instead, when it is a snapshot the bot was handed: `A teammate acted since that snapshot: <changes>. Nothing was done; plan from the current snapshot.` or `A teammate acted since that snapshot: your hand changed. Nothing was done; plan from the current snapshot.` One accepted this way can still fail to find its id again: `'<label>' is no longer offered. Pick from the current actions.` (`act`), or the sequence stops with `'<label>' is no longer offered.`
 3. `Not your decision right now (<waiting, or screen>). Call wait_for_decision.`
 4. For `act`, `'<id>' is not a legal action now.` For `act_sequence`, `'<id>' is not a legal action now, so nothing was played.` (the first illegal id), or for a pick, `'select:<i>' names no card in your hand, so nothing was played. A pick for a card's choice uses the card's hand index in this snapshot.`, or `'card:<n>' can't be planned from combat: the cards of that pick aren't in this snapshot. End the sequence at the card that opens it. Nothing was played.`
 
@@ -558,6 +580,8 @@ An `act_sequence` that stopped early. The `next` snapshot is shortened here:
 - Potions: `AnyPlayer` potions that can be thrown get one `>p<j>` id per living player in combat, labelled `"on yourself"` for you. Twin tags `" (p<j>)"` mark players who share a name.
 - What teammates do changes your snapshot, so the version moves without you. That causes more stale refusals and game-side refusals from races.
 - `chat.messages[].teammate: true` marks relayed bot lines. They never interrupt a wait.
+- In a fight, `act` and `act_sequence` check for what teammates changed and accept an older version when only teammates moved on (Tools and their results). `wait_for_decision` holds back a decision it already handed over for up to 60 s.
+- A bot copy that takes part in planning sessions gets the held view, the `party` key and the `party_pitch` tool (above).
 
 ### Left out on purpose
 

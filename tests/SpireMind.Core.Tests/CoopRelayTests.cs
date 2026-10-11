@@ -29,22 +29,31 @@ public sealed class CoopRelayTests : IDisposable
         public required BridgeServer Server { get; init; }
         public required ChatHub Chat { get; init; }
         public required InstanceInfo Info { get; init; }
+        public PartyBot? Party { get; init; }
         public int Port => Server.Port;
         public ConcurrentQueue<string> ModelArgs { get; } = new();
         public ConcurrentQueue<string> EffortArgs { get; } = new();
+        public ConcurrentQueue<string> Quits { get; } = new();
+        public int Nudges;
         public void Dispose() => Server.Dispose();
     }
 
-    private Bot StartBot(string character, ulong netId, int? port = null, bool keep = true)
+    private Bot StartBot(string character, ulong netId, int? port = null, bool keep = true, PartyBot? party = null)
     {
         var game = new FakeGame();
         var versioner = new SnapshotVersioner();
         var chat = new ChatHub { BotName = character };
-        var tools = new BotTools(game, new DecisionWaiter(game, versioner), versioner, chat);
+        var tools = new BotTools(game, new DecisionWaiter(game, versioner), versioner, chat) { Party = party };
         var p = port ?? BridgeTests.FreePort();
         var info = new InstanceInfo(true, p, $"bot-{p}") { NetId = netId };
         var server = new BridgeServer(p, tools, chat, "test", _ => { }) { Instance = info };
-        var bot = new Bot { Server = server, Chat = chat, Info = info };
+        var bot = new Bot { Server = server, Chat = chat, Info = info, Party = party };
+        info.Quit = from =>
+        {
+            bot.Quits.Enqueue(from);
+            return $"{character} is leaving.";
+        };
+        info.RetryJoin = () => Interlocked.Increment(ref bot.Nudges);
         chat.AddCommand("model", "[name]", "sets the model", (_, args) =>
         {
             bot.ModelArgs.Enqueue(args);
@@ -109,6 +118,20 @@ public sealed class CoopRelayTests : IDisposable
 
         public ConcurrentQueue<(ulong NetId, string Text)> Shown { get; } = new();
         public void ShowLine(ulong netId, string text) => Shown.Enqueue((netId, text));
+
+        public ConcurrentQueue<(ulong NetId, bool On)> Clouds { get; } = new();
+        public void Thinking(ulong netId, bool on) => Clouds.Enqueue((netId, on));
+
+        public ConcurrentDictionary<ulong, string> Names { get; } = new();
+        public string? NameOf(ulong netId) => Names.TryGetValue(netId, out var name) ? name : null;
+
+        public int Stops;
+        public TaskCompletionSource<string> NextStop { get; set; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task<string> StopAllAsync(CancellationToken ct)
+        {
+            Interlocked.Increment(ref Stops);
+            return NextStop.Task;
+        }
 
         public ConcurrentQueue<string?> Starts { get; } = new();
         public TaskCompletionSource<string> NextStart { get; set; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -413,7 +436,7 @@ public sealed class CoopRelayTests : IDisposable
         Assert.Equal("No bot copy is answering yet; try again in a moment.", mark.PostFromHuman("Mark", "/pause").Reply);
         Assert.False(mark.Paused);
         Assert.EndsWith(CoopRelay.CoopHelpNote, mark.PostFromHuman("Mark", "/help").Reply);
-        Assert.Equal($"Bots: Defect on {port} (starting).", mark.PostFromHuman("Mark", "/bots").Reply);
+        Assert.Equal($"Defect on {port} (starting).", mark.PostFromHuman("Mark", "/bots").Reply);
 
         // Its port comes from Known, not ProbePorts. Until it reports a character, the game's name labels it.
         var defect = StartBot("Defect", 1002, port);
@@ -588,12 +611,12 @@ public sealed class CoopRelayTests : IDisposable
 
         var expected = new[]
         {
-            (silent.Port, $"Silent on {silent.Port} (NetId 1000, playing on API credit, paused)"),
-            (defect.Port, $"Defect on {defect.Port} (not playing)"),
-            (startingPort, $"Regent on {startingPort} (starting)"),
+            (silent.Port, $"Silent on {silent.Port} (NetId 1000, playing on API credit, paused)."),
+            (defect.Port, $"Defect on {defect.Port} (not playing)."),
+            (startingPort, $"Regent on {startingPort} (starting)."),
         };
-        var linked = string.Join(", ", expected.Take(2).OrderBy(e => e.Item1).Select(e => e.Item2));
-        Assert.Equal($"Bots: {linked}, {expected[2].Item2}.", mark.PostFromHuman("Mark", "/bots").Reply);
+        var linked = expected.Take(2).OrderBy(e => e.Item1).Select(e => e.Item2);
+        Assert.Equal(string.Join("\n", linked.Append(expected[2].Item2)), mark.PostFromHuman("Mark", "/bots").Reply);
     }
 
     [Fact]
@@ -602,7 +625,7 @@ public sealed class CoopRelayTests : IDisposable
         var (_, plain, _) = StartRelay(Options(BridgeTests.FreePort()));
         Assert.Equal("No bot copies are running. /bot add [character] starts one.", plain.PostFromHuman("Mark", "/bots").Reply);
         Assert.Equal("This build can't start bot copies; start one with scripts/coop-bot.sh.", plain.PostFromHuman("Mark", "/bot add").Reply);
-        const string usage = "Use /bot add [Ironclad|Silent|Defect|Regent|Necrobinder|Random].";
+        const string usage = "Use /bot add [Ironclad|Silent|Defect|Regent|Necrobinder|Random] or /bot stop [name].";
         Assert.Equal(usage, plain.PostFromHuman("Mark", "/bot add Watcher").Reply);
         Assert.Equal(usage, plain.PostFromHuman("Mark", "/bot remove").Reply);
         Assert.Equal(usage, plain.PostFromHuman("Mark", "/bot").Reply);
@@ -686,12 +709,14 @@ public sealed class CoopRelayTests : IDisposable
         Assert.Throws<InvalidOperationException>(relay.Start);
         await Until(() => relay.BotsExist, "the bot to link");
         Assert.NotNull(mark.CommandFilter);
+        Assert.Equal(PartyPrompts.NoPlan, mark.PostFromHuman("Mark", "/plan show").Reply);
 
         relay.Dispose();
         Assert.False(relay.BotsExist);
         Assert.Null(mark.CommandFilter);
         Assert.Null(mark.HelpNote);
         Assert.StartsWith("There's no /bots command", mark.PostFromHuman("Mark", "/bots").Reply);
+        Assert.StartsWith("There's no /plan command", mark.PostFromHuman("Mark", "/plan").Reply);
         Assert.Equal("Ironclad paused. Type /resume to hand back control.", mark.PostFromHuman("Mark", "/pause").Reply);
         mark.PostFromHuman("Mark", "after the relay");
         await Settle();
@@ -704,6 +729,207 @@ public sealed class CoopRelayTests : IDisposable
         mark.CommandFilter = other;
         again.Dispose();
         Assert.Same(other, mark.CommandFilter);
+    }
+
+    [Fact]
+    public async Task A_bots_party_report_reaches_the_conductor_and_its_ops_reach_the_bot()
+    {
+        var party = new PartyBot();
+        var silent = StartBot("Silent", 1000, party: party);
+        silent.Info.Playing = () => "api";
+        silent.Info.Status = () => new BotStatus("in the run", "SILENT", InRun: true, JoinStopped: false);
+        var options = Options(BridgeTests.FreePort(), silent.Port) with
+        {
+            HumanName = "Mark",
+            PartyTimings = new PartyTimings { GatherTime = TimeSpan.FromMilliseconds(50), TickInterval = TimeSpan.FromMilliseconds(20) },
+        };
+        var (relay, mark, log) = StartRelay(options);
+
+        // Hello reaches the bot over POST /coop/party once it is linked.
+        await Until(() => party.Identity()["auto"]!.GetValue<bool>(), "hello to reach the bot");
+
+        // The bot reaches the act's Ancient: the relay's poll carries the due key to the conductor.
+        party.Observe(PartyBotTests.Ancient());
+        await Until(() => party.Identity()["session"] is not null, "the session to open on the bot");
+        Assert.Equal("A1-start", relay.Conductor.CurrentSession);
+        Assert.True(Has(mark, "Planning for act 1 (up to 2.5 minutes; the bots hold their Ancient picks). Mark, tell them what you're building, or /plan skip."));
+        Assert.Contains(log, l => l == "party: opening A1-start with Silent");
+        // The bot's chat never sees the /plan command.
+        Assert.Equal(PartyPrompts.Skipped, mark.PostFromHuman("Mark", "/plan skip").Reply);
+        await Until(() => party.Identity()["session"] is null, "the close to reach the bot");
+        Assert.Contains("A1-start", party.Identity()["settled"]!.AsArray().Select(k => k!.GetValue<string>()));
+        Assert.Contains("Mark skipped it", party.Brief(take: true)!["note"]!.GetValue<string>());
+        Assert.DoesNotContain(silent.Chat.LinesSince(0), l => l.Text.StartsWith("/plan", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Bot_stop_with_a_name_asks_that_copy_only_and_tells_its_quit()
+    {
+        var silent = StartBot("Silent", 1000, keep: false);
+        var defect = StartBot("Defect", 1001);
+        var (relay, mark, _) = StartRelay(Options(BridgeTests.FreePort(), silent.Port, defect.Port), new FakeCoopBots());
+        await Until(() => relay.Peers.Count(p => p.Live) == 2, "both bots to link");
+
+        Assert.Equal("Asking Silent to leave and quit...", mark.PostFromHuman("Mark", "/bot stop the silent").Reply);
+        await Until(() => Has(mark, "Silent: Silent is leaving."), "Silent's answer");
+        Assert.Equal(["Mark"], silent.Quits);
+
+        // Its copy quits: the relay says so once its polls fail.
+        silent.Dispose();
+        await Until(() => Has(mark, "Silent left, and its copy has quit."), "the quit line");
+        Assert.False(Has(mark, "Silent's copy stopped answering."));
+        Assert.Empty(defect.Quits);
+
+        Assert.Equal("No bot is called Regent. /bots lists them.", mark.PostFromHuman("Mark", "/bot stop Regent").Reply);
+        Assert.Equal("No bot is called Silent. /bots lists them.", mark.PostFromHuman("Mark", "/bot stop Silent").Reply);
+        await Settle();
+        Assert.Empty(defect.Quits);
+    }
+
+    [Fact]
+    public async Task Bot_stop_alone_stops_the_games_copies_through_the_game_and_the_rest_through_their_bridges()
+    {
+        var silent = StartBot("Silent", 1000);   // the game started this one
+        var defect = StartBot("Defect", 1001);   // started by hand
+        var coopBots = new FakeCoopBots();
+        coopBots.SetKnown((silent.Port, 1000UL, "Silent"));
+        var (relay, mark, _) = StartRelay(Options(BridgeTests.FreePort(), defect.Port), coopBots);
+        await Until(() => relay.Peers.Count(p => p.Live) == 2, "both bots to link");
+
+        Assert.Equal("Asking every bot copy to leave and quit...", mark.PostFromHuman("Mark", "/bot stop").Reply);
+        await Until(() => Volatile.Read(ref coopBots.Stops) == 1, "the game's stop");
+        await Until(() => defect.Quits.Count == 1, "Defect's request");
+        await Until(() => Has(mark, "Defect: Defect is leaving."), "Defect's answer");
+        coopBots.NextStop.SetResult("Silent's copy left and quit.");
+        await Until(() => Has(mark, "Silent's copy left and quit."), "the game's line");
+        await Settle();
+        Assert.Empty(silent.Quits);
+
+        // "all" is the same, and with nothing running there is nothing to stop.
+        coopBots.NextStop = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Assert.Equal("Asking every bot copy to leave and quit...", mark.PostFromHuman("Mark", "/bot stop all").Reply);
+        await Until(() => Volatile.Read(ref coopBots.Stops) == 2, "the second stop");
+        var (_, plain, _) = StartRelay(Options(BridgeTests.FreePort()));
+        Assert.Equal("No bot copies are running.", plain.PostFromHuman("Mark", "/bot stop").Reply);
+    }
+
+    [Fact]
+    public async Task Bots_shows_where_each_bot_stands()
+    {
+        var silent = StartBot("Silent", 1000);
+        silent.Info.Status = () => new BotStatus("joined; picked Silent; ready; waiting for the host to start", "SILENT", false, false);
+        var defect = StartBot("Defect", 1001);
+        defect.Info.Status = () => new BotStatus("in a run", "DEFECT", true, false);
+        var regent = StartBot("Regent", 1002);
+        regent.Chat.BotName = null; // not named yet: the character it holds in the lobby names it
+        regent.Info.Status = () => new BotStatus("stopped: version mismatch (host v0.107.1)", "REGENT", false, true);
+        var (relay, mark, _) = StartRelay(Options(BridgeTests.FreePort(), silent.Port, defect.Port, regent.Port));
+        await Until(() => relay.Peers.Count(p => p.Live && p.Status is not null) == 3, "the three statuses");
+        defect.Chat.MarkThinking(true);
+        await Until(() => relay.Peers.Single(p => p.Port == defect.Port).Thinking, "Defect deciding");
+
+        var lines = mark.PostFromHuman("Mark", "/bots").Reply!.Split('\n');
+        Assert.Equal(3, lines.Length);
+        Assert.Contains($"Silent on {silent.Port} (NetId 1000): joined; picked Silent; ready; waiting for the host to start.", lines);
+        Assert.Contains($"Defect on {defect.Port} (NetId 1001, deciding): in the run.", lines);
+        Assert.Contains($"Regent on {regent.Port} (NetId 1002): stopped: version mismatch (host v0.107.1).", lines);
+        Assert.Equal("Regent", relay.Peers.Single(p => p.Port == regent.Port).Character);
+    }
+
+    [Fact]
+    public async Task Opening_a_lobby_nudges_linked_bots_and_the_games_unlinked_ones()
+    {
+        var silent = StartBot("Silent", 1000);
+        var defect = StartBot("Defect", 1001);
+        var coopBots = new FakeCoopBots();
+        // One bot at most, so the game's Defect, known once Silent is linked, stays unlinked.
+        var (relay, _, log) = StartRelay(Options(BridgeTests.FreePort(), silent.Port) with { MaxBots = 1 }, coopBots);
+        await Until(() => relay.Peers.Any(p => p.Live && p.Port == silent.Port), "Silent to link");
+        coopBots.SetKnown((defect.Port, 1001UL, "Defect"));
+        await Settle();
+        Assert.DoesNotContain(relay.Peers, p => p.Port == defect.Port && p.Live);
+
+        relay.NudgeBots();
+        await Until(() => Volatile.Read(ref silent.Nudges) == 1 && Volatile.Read(ref defect.Nudges) == 1, "both nudges");
+        Assert.Contains(log, l => l.Contains("asked 2 bot copies to look for it now"));
+
+        // A copy that isn't up yet is tried quietly.
+        coopBots.SetKnown((defect.Port, 1001UL, "Defect"), (BridgeTests.FreePort(), 1002UL, "Regent"));
+        relay.NudgeBots();
+        await Until(() => Volatile.Read(ref silent.Nudges) == 2, "the second nudge");
+        await Settle();
+        Assert.DoesNotContain(log, l => l.Contains("join-now") && l.Contains("failed"));
+    }
+
+    [Fact]
+    public async Task A_deciding_bot_gets_a_thought_cloud_until_it_acts_or_goes()
+    {
+        var silent = StartBot("Silent", 1000, keep: false);
+        var coopBots = new FakeCoopBots();
+        var (relay, _, _) = StartRelay(Options(BridgeTests.FreePort(), silent.Port), coopBots);
+        await Until(() => relay.BotsExist, "the bot to link");
+        await Settle();
+        Assert.Empty(coopBots.Clouds);
+
+        silent.Chat.MarkThinking(true);
+        await Until(() => coopBots.Clouds.Count == 1, "the cloud");
+        silent.Chat.MarkThinking(false);
+        await Until(() => coopBots.Clouds.Count == 2, "the cloud going");
+        silent.Chat.MarkThinking(true);
+        await Until(() => coopBots.Clouds.Count == 3, "the next cloud");
+        await Settle();
+        Assert.Equal([(1000UL, true), (1000UL, false), (1000UL, true)], coopBots.Clouds);
+
+        // A copy that stops answering takes its cloud with it.
+        silent.Dispose();
+        await Until(() => coopBots.Clouds.Count == 4, "the cloud of a gone copy");
+        Assert.Equal((1000UL, false), coopBots.Clouds.Last());
+    }
+
+    [Fact]
+    public async Task Two_bots_on_one_character_go_by_their_nameplates()
+    {
+        var first = StartBot("Ironclad", 1000);
+        var second = StartBot("Ironclad", 1001);
+        var (a, b) = first.Port < second.Port ? (first, second) : (second, first);
+        var coopBots = new FakeCoopBots();
+        var (relay, mark, _) = StartRelay(Options(BridgeTests.FreePort(), first.Port, second.Port), coopBots);
+        await Until(() => relay.Peers.Count(p => p.Live) == 2, "both bots to link");
+
+        // Without nameplates (outside a co-op game) the second by port is numbered.
+        Assert.Equal(["Ironclad", "Ironclad 2"], relay.Peers.OrderBy(p => p.Port).Select(p => p.Label));
+        b.Chat.Say("Block up.");
+        await Until(() => Has(mark, "Block up."), "the line");
+        Assert.Equal("Ironclad 2", mark.LinesSince(0).Single(l => l.Text == "Block up.").From);
+
+        // The screen numbers them the other way round: the chat follows it.
+        coopBots.Names[a.Info.NetId!.Value] = "Ironclad 2";
+        coopBots.Names[b.Info.NetId!.Value] = "Ironclad";
+        Assert.Equal(["Ironclad 2", "Ironclad"], relay.Peers.OrderBy(p => p.Port).Select(p => p.Label));
+
+        mark.PostFromHuman("Mark", "/model Ironclad 2 sonnet");
+        await Until(() => Has(mark, "Ironclad 2: Ironclad now uses sonnet."), "the numbered bot's reply");
+        Assert.Equal(["sonnet"], a.ModelArgs);
+        mark.PostFromHuman("Mark", "/model ironclad, big");
+        await Until(() => b.ModelArgs.Count == 1, "the other bot's model");
+        Assert.Equal(["big"], b.ModelArgs);
+        Assert.Equal(["sonnet"], a.ModelArgs);
+
+        // In co-op a line for one of them skips the other, who would take it as its own.
+        mark.PostFromHuman("Mark", "Ironclad 2, block this turn");
+        await Until(() => Has(a.Chat, "Ironclad 2, block this turn"), "the line at Ironclad 2");
+        mark.PostFromHuman("Mark", "nice");
+        await Until(() => Has(a.Chat, "nice") && Has(b.Chat, "nice"), "a line for everyone");
+        Assert.False(Has(b.Chat, "Ironclad 2, block this turn"));
+
+        var bots = mark.PostFromHuman("Mark", "/bots").Reply!.Split('\n');
+        Assert.Equal([$"Ironclad 2 on {a.Port} (NetId {a.Info.NetId})", $"Ironclad on {b.Port} (NetId {b.Info.NetId})"],
+            bots.Select(l => l.TrimEnd('.')));
+
+        Assert.Equal("Asking Ironclad 2 to leave and quit...", mark.PostFromHuman("Mark", "/bot stop Ironclad 2").Reply);
+        await Until(() => a.Quits.Count == 1, "the quit request");
+        await Settle();
+        Assert.Empty(b.Quits);
     }
 
     [Theory]

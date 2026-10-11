@@ -47,6 +47,24 @@ public sealed record CoopRelayOptions
     /// <summary>Whether bots hear each other's lines at first; /party changes it.</summary>
     public bool PartyChat { get; init; } = true;
 
+    /// <summary>Whether the party's planning sessions open by themselves at first (act start,
+    /// mid-act, before the boss); /plan on|off changes it. /plan works either way.</summary>
+    public bool Planning { get; init; } = true;
+
+    /// <summary>Where the party plan is written (runs/party/plan.md under the notes root), or null
+    /// to keep it in memory only.</summary>
+    public string? PartyPlanFile { get; init; }
+
+    /// <summary>The human's name ("Mark"), for the planning sessions' chat lines and the plan.</summary>
+    public string? HumanName { get; init; }
+
+    /// <summary>The human's character for the plan's heading, or null. Called with no lock held;
+    /// it may read the chat hub.</summary>
+    public Func<string?>? HumanCharacter { get; init; }
+
+    /// <summary>The planning sessions' timings; tests shorten them.</summary>
+    public PartyTimings PartyTimings { get; init; } = new();
+
     /// <summary>For tests. Null uses <see cref="CoopRelay.NewLoopbackHandler"/>: no proxy, no redirects.</summary>
     public HttpMessageHandler? Handler { get; init; }
 

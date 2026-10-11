@@ -2,7 +2,7 @@ Run journals. The bot keeps the run in progress in `current.md` and writes a pos
 
 `current.md` starts with a header line that names its run, such as `# Ironclad, started 2026-10-10, Neow: <what was picked>`: the character, the start date and the Neow pick. Then three parts, in this order:
 
-1. **Build plan**, written at Neow and rewritten when the run pivots: the archetype, the key cards and relics wanted, what to avoid, and what the deck still lacks for the act boss.
+1. **Build plan**, written at Neow and rewritten when the run pivots: the archetype, the key cards and relics wanted, what to avoid, what the deck still lacks for the act boss, and a `Packages:` line counting each package's pieces (`Packages: Strength 3 (Inflame, Demon Form, Brand), Vulnerable 2 (Tremble, Taunt)`), rewritten after every pick that changes a count.
 2. **Orders**: standing orders from the human ("go for a Strength build", "always take elites"), one per line. They hold until the run ends.
 3. **Log**: one line per floor (floor, what happened, HP, what to do differently), then the post-mortem.
 

@@ -23,17 +23,27 @@ public static class DevCoop
     /// <c>--bot</c>: serves the fake fight on the port as a bot copy playing
     /// <see cref="DevHostOptions.Character"/> with <see cref="DevHostOptions.BotNetId"/>, with
     /// stub brain commands and, with <c>--echo</c>, an answer to each message for it. Runs until
-    /// Ctrl+C.
+    /// Ctrl+C, or until the relay's /bot stop asks it to quit.
     /// </summary>
     public static async Task<int> RunBotAsync(DevHostOptions options)
     {
         var chat = DevChat.Create(Console.Out, options.Character);
         AddStubCommands(chat);
+        var quit = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var info = new InstanceInfo(true, options.Port, $"bot-{options.Port}")
         {
             NetId = options.BotNetId,
             // The dev host has no brain, so /bots in the relay says this bot isn't playing.
             Playing = () => "none",
+            Status = () => new BotStatus("a dev host: no game, so no lobby", options.Character.ToUpperInvariant(), false, false),
+            Quit = from =>
+            {
+                Console.WriteLine($"{from} asked this fake bot copy to quit; quitting in a moment.");
+                // The reply goes out first, as the game's own quit runs on a later frame.
+                _ = Task.Delay(200).ContinueWith(_ => quit.TrySetResult(), TaskScheduler.Default);
+                return "Leaving the game and quitting (dev host).";
+            },
+            RetryJoin = () => Console.WriteLine("asked to look for the host's lobby now (a dev host has none)"),
         };
 
         using var server = new BridgeServer(options.Port, FakeTools(chat), chat, "dev", Console.WriteLine) { Instance = info };
@@ -43,7 +53,7 @@ public static class DevCoop
         Console.WriteLine($"Fake bot copy: {options.Character}, NetId {options.BotNetId}, port {options.Port}" +
                           (options.Echo ? ", answering every message for it" : "") + ". Ctrl+C to stop.");
 
-        await UntilCtrlC();
+        await Task.WhenAny(UntilCtrlC(), quit.Task);
         stop.Cancel();
         await echo;
         return 0;
@@ -134,8 +144,9 @@ public static class DevCoop
 
     /// <summary>
     /// Stands in for the game side's bot launcher and bubbles: it can't start a copy, so it says
-    /// how to start a fake one; a bubble is printed; it knows of no copies (the relay finds the
-    /// fake bots by probing their ports).
+    /// how to start a fake one; a bubble or a thought cloud is printed; it knows of no copies (the
+    /// relay finds the fake bots by probing their ports, and /bot stop asks them through their
+    /// bridges) and shows no nameplates.
     /// </summary>
     public sealed class FakeCoopBots(TextWriter output) : ICoopBots
     {
@@ -153,6 +164,12 @@ public static class DevCoop
         }
 
         public void ShowLine(ulong netId, string text) => output.WriteLine($"bubble over {netId}: {text}");
+
+        public Task<string> StopAllAsync(CancellationToken ct) => Task.FromResult("(dev host) this host started no bot copies.");
+
+        public void Thinking(ulong netId, bool on) => output.WriteLine(on ? $"thought cloud over {netId}" : $"no thought cloud over {netId}");
+
+        public string? NameOf(ulong netId) => null;
     }
 
     // The fake fight's tools, which the bridge needs; co-op chat never uses them.

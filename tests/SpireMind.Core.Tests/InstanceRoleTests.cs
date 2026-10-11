@@ -50,6 +50,40 @@ public class InstanceRoleTests
     }
 
     [Fact]
+    public void A_copy_with_Steam_is_the_human_copy_whatever_its_flag_says()
+    {
+        // A stray --sts2bot=1 in Mark's Steam launch options.
+        var role = InstanceRole.Detect(["--sts2bot=1"], 17772, Env(), Home, steamRunning: () => true);
+        Assert.Equal(InstanceKind.Human, role.Kind);
+        Assert.False(role.IsBot);
+        Assert.Equal(Shared, role.ConfigDir);
+        Assert.Equal("main", role.InstanceId);
+        var warning = Assert.Single(role.Warnings);
+        Assert.Contains("--sts2bot=1", warning);
+        Assert.Contains("runs with Steam", warning);
+        Assert.Contains("ignored", warning);
+
+        // Without Steam the flag counts, and Steam is only asked about when the flag is there.
+        var bot = InstanceRole.Detect(["--sts2bot=1"], 17773, Env(), Home, steamRunning: () => false);
+        Assert.True(bot.IsBot);
+        Assert.Empty(bot.Warnings);
+        var asked = false;
+        var human = InstanceRole.Detect(["--fastmp", "host_standard"], 17772, Env(), Home, steamRunning: () => asked = true);
+        Assert.False(human.IsBot);
+        Assert.False(asked);
+        Assert.Empty(human.Warnings);
+    }
+
+    [Fact]
+    public void A_copy_that_cant_tell_whether_Steam_runs_is_the_human_copy()
+    {
+        var role = InstanceRole.Detect(["--sts2bot", "1"], 17773, Env(), Home,
+            steamRunning: () => throw new MissingMemberException("SteamInitializer.Initialized"));
+        Assert.False(role.IsBot);
+        Assert.Contains(role.Warnings, w => w.Contains("couldn't be told") && w.Contains("ignored"));
+    }
+
+    [Fact]
     public void The_human_copy_keeps_everything_in_the_shared_folder()
     {
         var role = Detect(["--fastmp", "host_standard"], port: 17772);

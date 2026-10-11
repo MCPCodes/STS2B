@@ -18,7 +18,12 @@ namespace SpireMind.Core;
 ///   POST /chat    {"from": "Mark", "text": "..."}, posts as the in-game chat box does;
 ///                 with "teammate": true it is another bot's line relayed in (party chat)
 ///   GET  /chat?since=n  the chat log after line n, with the bot's name, the pause flag and who this copy is
-///   GET  /coop/info  who this copy is, for the co-op relay: role, port, instance, session, NetId, character
+///   GET  /coop/info  who this copy is, for the co-op relay: role, port, instance, session, NetId,
+///                 character, brain, whether it is deciding, and in a bot copy where it stands
+///   POST /coop/quit  {"from": "Mark"}, bot copies only: leave the lobby or run and quit (/bot stop)
+///   POST /coop/join-now  bot copies only: look for the host's lobby now, as it has just opened
+///   POST /coop/party  {"op": "hello"|"open"|"turn"|"close", ...}, bot copies only: the party's
+///                 planning session as the human's copy runs it (PartyBot.Handle)
 ///   GET  /debug/screenshot  saves what the game is drawing to a PNG and returns its path (when the host offers it)
 /// /state and /act go through the tools and show unread chat messages like them, but leave
 /// them unread, so a curl doesn't take them from the model.
@@ -180,6 +185,21 @@ public sealed class BridgeServer : IDisposable
                     await Send(res, 200, info);
                     return;
 
+                case ("POST", "/coop/quit"):
+                    var (quitStatus, quitReply) = CoopQuit(await ReadBody(req));
+                    await Send(res, quitStatus, quitReply);
+                    return;
+
+                case ("POST", "/coop/party"):
+                    var (partyStatus, partyReply) = CoopParty(await ReadBody(req));
+                    await Send(res, partyStatus, partyReply);
+                    return;
+
+                case ("POST", "/coop/join-now"):
+                    var (joinStatus, joinReply) = CoopJoinNow();
+                    await Send(res, joinStatus, joinReply);
+                    return;
+
                 case ("GET", "/debug/screenshot") when DebugScreenshot is { } shoot:
                     await Send(res, 200, await shoot(_stop.Token));
                     return;
@@ -224,8 +244,47 @@ public sealed class BridgeServer : IDisposable
         return log;
     }
 
-    // Who this copy is, for the co-op relay: the same fields on /coop/info and /chat (playing
-    // too, so the relay's /bots stays current from its polls).
+    // POST /coop/quit: a bot copy is asked to leave and quit. The game's side returns at once
+    // (the leaving runs on the main thread), so this never waits on the game.
+    private (int Status, JsonObject Body) CoopQuit(string body)
+    {
+        if (Instance is not { IsBot: true } instance)
+            return (403, new JsonObject { ["error"] = "not a bot copy" });
+        if (instance.Quit is not { } quit)
+            return (501, new JsonObject { ["error"] = "this copy can't be asked to quit" });
+        var message = string.IsNullOrWhiteSpace(body) ? null : JsonNode.Parse(body) as JsonObject;
+        var from = Text(message?["from"])?.Trim() is { Length: > 0 } who ? who : "Player";
+        _log($"coop: {from} asked this copy to quit");
+        return (200, new JsonObject { ["reply"] = quit(from) });
+    }
+
+    // POST /coop/join-now: the human's copy has just opened a lobby. Returns at once.
+    private (int Status, JsonObject Body) CoopJoinNow()
+    {
+        if (Instance is not { IsBot: true } instance)
+            return (403, new JsonObject { ["error"] = "not a bot copy" });
+        if (instance.RetryJoin is not { } retry)
+            return (501, new JsonObject { ["error"] = "this copy can't be asked to join" });
+        retry();
+        return (200, new JsonObject { ["ok"] = true });
+    }
+
+    // POST /coop/party: an op of the party's planning session from the human's copy. PartyBot
+    // never touches the game, so this answers at once.
+    private (int Status, JsonObject Body) CoopParty(string body)
+    {
+        if (Instance is not { IsBot: true })
+            return (403, new JsonObject { ["ok"] = false, ["error"] = "not a bot copy" });
+        if (_tools.Party is not { } party)
+            return (501, new JsonObject { ["ok"] = false, ["error"] = "this copy can't plan with the party" });
+        if (JsonNode.Parse(body) is not JsonObject op)
+            return (400, new JsonObject { ["ok"] = false, ["error"] = "body must be a JSON object" });
+        // {ok: false, error} is still a 200: the op arrived, and the relay logs the error.
+        return (200, party.Handle(op));
+    }
+
+    // Who this copy is, for the co-op relay: the same fields on /coop/info and /chat (playing,
+    // thinking and status too, so the relay's /bots and thought clouds stay current from its polls).
     private void AddIdentity(JsonObject json)
     {
         json["role"] = Instance?.IsBot == true ? "bot" : "human";
@@ -235,6 +294,21 @@ public sealed class BridgeServer : IDisposable
         json["net_id"] = Instance?.NetId;
         json["character"] = _chat.BotName;
         json["playing"] = Instance?.ReadPlaying();
+        json["thinking"] = _chat.ThinkingSince is not null;
+        if (Instance?.ReadStatus() is { } status)
+        {
+            json["status"] = new JsonObject
+            {
+                ["line"] = status.Line,
+                ["character"] = status.Character,
+                ["in_run"] = status.InRun,
+                ["join_stopped"] = status.JoinStopped,
+            };
+        }
+        // The party's planning sessions, in a bot copy that can plan: what is due, what is settled,
+        // whether a pick is held and its latest pitch (PartyBot.Identity).
+        if (Instance?.IsBot == true && _tools.Party is { } party)
+            json["party"] = party.Identity();
         json["last_seq"] = _chat.LastSeq;
     }
 

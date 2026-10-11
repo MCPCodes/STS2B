@@ -10,12 +10,12 @@ namespace SpireMind.Core.Tests;
 /// <summary>The bridge's co-op routes: /coop/info, the identity on /chat and teammate posts.</summary>
 public class BridgeCoopTests
 {
-    private static (BridgeServer Server, ChatHub Chat, int Port) Serve(InstanceInfo? instance, string? botName = "Silent")
+    private static (BridgeServer Server, ChatHub Chat, int Port) Serve(InstanceInfo? instance, string? botName = "Silent", PartyBot? party = null)
     {
         var game = new FakeGame();
         var versioner = new SnapshotVersioner();
         var chat = new ChatHub { BotName = botName };
-        var tools = new BotTools(game, new DecisionWaiter(game, versioner), versioner, chat);
+        var tools = new BotTools(game, new DecisionWaiter(game, versioner), versioner, chat) { Party = party };
         var port = BridgeTests.FreePort();
         var server = new BridgeServer(port, tools, chat, "0.1.0", _ => { }) { Instance = instance };
         server.Start();
@@ -171,6 +171,121 @@ public class BridgeCoopTests
         // Missing from: a teammate is "Bot", a human "Player", as before.
         await Post(http, port, """{"text":"anyone?","teammate":true}""");
         Assert.Equal("Bot", chat.LinesSince(0).Last().From);
+    }
+
+    private static async Task<(HttpStatusCode Status, JsonObject Body)> PostTo(HttpClient http, int port, string path, string json)
+    {
+        var res = await http.PostAsync($"http://127.0.0.1:{port}{path}", new StringContent(json, Encoding.UTF8, "application/json"));
+        return (res.StatusCode, JsonNode.Parse(await res.Content.ReadAsStringAsync())!.AsObject());
+    }
+
+    [Fact]
+    public async Task A_bot_copy_reports_where_it_stands_and_whether_it_is_deciding()
+    {
+        var info = new InstanceInfo(true, 17773, "bot-17773")
+        {
+            Status = () => new BotStatus("joined; picked Silent; ready", "SILENT", false, false),
+        };
+        var (server, chat, port) = Serve(info);
+        using var _ = server;
+        using var http = new HttpClient();
+
+        var json = await Get(http, port, "/coop/info");
+        Assert.False(json["thinking"]!.GetValue<bool>());
+        var status = json["status"]!.AsObject();
+        Assert.Equal("joined; picked Silent; ready", status["line"]!.GetValue<string>());
+        Assert.Equal("SILENT", status["character"]!.GetValue<string>());
+        Assert.False(status["in_run"]!.GetValue<bool>());
+        Assert.False(status["join_stopped"]!.GetValue<bool>());
+
+        // The chat log the relay polls says the same; a failing status is left out.
+        chat.MarkThinking(true);
+        info.Status = () => new BotStatus(null, null, true, true);
+        var log = await Get(http, port, "/chat?since=0");
+        Assert.True(log["thinking"]!.GetValue<bool>());
+        Assert.True(log["status"]!["in_run"]!.GetValue<bool>());
+        Assert.True(log["status"]!["join_stopped"]!.GetValue<bool>());
+        Assert.Null(log["status"]!["line"]);
+        info.Status = () => throw new InvalidOperationException("not yet");
+        Assert.False((await Get(http, port, "/coop/info")).ContainsKey("status"));
+    }
+
+    [Fact]
+    public async Task A_bot_copy_takes_quit_and_join_now_and_the_human_copy_refuses_them()
+    {
+        var quits = new List<string>();
+        var nudges = 0;
+        var info = new InstanceInfo(true, 17773, "bot-17773")
+        {
+            Quit = from => { lock (quits) quits.Add(from); return "Leaving the game and quitting."; },
+            RetryJoin = () => Interlocked.Increment(ref nudges),
+        };
+        var (server, _, port) = Serve(info);
+        using var _s = server;
+        using var http = new HttpClient();
+
+        var quit = await PostTo(http, port, "/coop/quit", """{"from":"Mark"}""");
+        Assert.Equal(HttpStatusCode.OK, quit.Status);
+        Assert.Equal("Leaving the game and quitting.", quit.Body["reply"]!.GetValue<string>());
+        var anonymous = await PostTo(http, port, "/coop/quit", "");
+        Assert.Equal(HttpStatusCode.OK, anonymous.Status);
+        Assert.Equal(["Mark", "Player"], quits);
+
+        var join = await PostTo(http, port, "/coop/join-now", "{}");
+        Assert.Equal(HttpStatusCode.OK, join.Status);
+        Assert.Equal(1, nudges);
+
+        // Only POST counts.
+        var get = await http.GetAsync($"http://127.0.0.1:{port}/coop/quit");
+        Assert.Equal(HttpStatusCode.NotFound, get.StatusCode);
+        Assert.Equal(2, quits.Count);
+
+        // A bot copy that wasn't wired, and the human's copy.
+        var (unwired, _, unwiredPort) = Serve(new InstanceInfo(true, 17774, "bot-17774"));
+        using var _u = unwired;
+        Assert.Equal(HttpStatusCode.NotImplemented, (await PostTo(http, unwiredPort, "/coop/quit", "{}")).Status);
+        Assert.Equal(HttpStatusCode.NotImplemented, (await PostTo(http, unwiredPort, "/coop/join-now", "{}")).Status);
+        var human = new InstanceInfo(false, 17772, "main") { Quit = _ => throw new InvalidOperationException("never"), RetryJoin = () => nudges = 99 };
+        var (main, _, mainPort) = Serve(human);
+        using var _m = main;
+        Assert.Equal(HttpStatusCode.Forbidden, (await PostTo(http, mainPort, "/coop/quit", "{}")).Status);
+        Assert.Equal(HttpStatusCode.Forbidden, (await PostTo(http, mainPort, "/coop/join-now", "{}")).Status);
+        var (none, _, nonePort) = Serve(null);
+        using var _n = none;
+        Assert.Equal(HttpStatusCode.Forbidden, (await PostTo(http, nonePort, "/coop/quit", "{}")).Status);
+        Assert.Equal(1, nudges);
+    }
+
+    [Fact]
+    public async Task Coop_party_takes_ops_in_a_bot_copy_that_can_plan_and_its_identity_reports_the_party()
+    {
+        using var http = new HttpClient();
+        var party = new PartyBot();
+        var (server, _, port) = Serve(new InstanceInfo(true, 17773, "bot-17773"), party: party);
+        using var _s = server;
+        var (status, body) = await PostTo(http, port, "/coop/party", """{"op":"hello","auto":true}""");
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.True(body["ok"]!.GetValue<bool>());
+        (status, body) = await PostTo(http, port, "/coop/party", """{"op":"turn","session":"A1-start"}""");
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.False(body["ok"]!.GetValue<bool>());
+        Assert.Contains("no session", body["error"]!.GetValue<string>());
+        Assert.Equal(HttpStatusCode.BadRequest, (await PostTo(http, port, "/coop/party", "[1]")).Status);
+
+        var info = await Get(http, port, "/coop/info");
+        Assert.Equal(1, info["party"]!["v"]!.GetValue<int>());
+        Assert.True(info["party"]!["auto"]!.GetValue<bool>());
+        Assert.True((await Get(http, port, "/chat?since=0"))["party"]!["auto"]!.GetValue<bool>());
+
+        // 501 in a bot copy that can't plan, 403 in the human's copy.
+        var (plain, _, plainPort) = Serve(new InstanceInfo(true, 17774, "bot-17774"));
+        using var _p = plain;
+        Assert.Equal(HttpStatusCode.NotImplemented, (await PostTo(http, plainPort, "/coop/party", """{"op":"hello"}""")).Status);
+        Assert.Null((await Get(http, plainPort, "/coop/info"))["party"]);
+        var (main, _, mainPort) = Serve(new InstanceInfo(false, 17772, "main"), party: new PartyBot());
+        using var _m = main;
+        Assert.Equal(HttpStatusCode.Forbidden, (await PostTo(http, mainPort, "/coop/party", """{"op":"hello"}""")).Status);
+        Assert.Null((await Get(http, mainPort, "/coop/info"))["party"]);
     }
 
     [Fact]

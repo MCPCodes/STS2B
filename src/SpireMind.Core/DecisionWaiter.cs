@@ -41,8 +41,10 @@ public sealed class DecisionWaiter
     /// once without waiting for it to settle (a chat message for the model arrived).</param>
     /// <param name="hold">While true no decision is handed over and the wait runs on until
     /// <paramref name="interrupt"/> or the timeout (the human paused the bot).</param>
+    /// <param name="holdFor">Like <paramref name="hold"/>, but given each decision: true holds that
+    /// one (a pick screen held for the party's planning session).</param>
     public async Task<GameSnapshot> WaitAsync(long? afterVersion, TimeSpan timeout, CancellationToken ct,
-        Func<bool>? interrupt = null, Func<bool>? hold = null)
+        Func<bool>? interrupt = null, Func<bool>? hold = null, Func<GameSnapshot, bool>? holdFor = null)
     {
         var deadline = DateTime.UtcNow + timeout;
         GameSnapshot? candidate = null;
@@ -56,7 +58,7 @@ public sealed class DecisionWaiter
                 return snap;
 
             var isNew = afterVersion is null || snap.Version > afterVersion;
-            if (snap.AwaitingDecision && isNew && hold?.Invoke() != true)
+            if (snap.AwaitingDecision && isNew && hold?.Invoke() != true && holdFor?.Invoke(snap) != true)
             {
                 if (candidate is null || candidate.Version != snap.Version)
                 {

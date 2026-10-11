@@ -12,3 +12,5 @@ sts2-decompiled/
 runs/*.log
 # Co-op bot copies' run journals (runs/bot-<port>/), written while playing.
 runs/bot-*/
+# The co-op party plan (runs/party/plan.md and its archives), written by the planning sessions.
+runs/party/
