@@ -41,8 +41,8 @@ internal static class InstancePoll
     }
 
     /// <summary>
-    /// The local player's NetId, or null outside a lobby and a run, and whether that is a co-op
-    /// session. Where this copy stands comes from <see cref="Coop.CoopBots.Look"/>, the read the
+    /// The local player's NetId in a co-op lobby or run (null anywhere else, solo included), and
+    /// whether this copy is in one. Where this copy stands comes from <see cref="Coop.CoopBots.Look"/>, the read the
     /// co-op code, names and bubbles use, so every lobby counts here too: character select,
     /// custom and daily runs, and a saved co-op run being continued. In a run, LocalContext's
     /// NetId is set at launch; the run's net service has it before that. Any failure (a run
@@ -53,11 +53,14 @@ internal static class InstancePoll
     {
         try
         {
+            // Only a co-op session's NetId means anything to the other copies: a solo run or
+            // character select has a net service too, whose NetId is always the host's 1.
             var sight = Coop.CoopBots.Look();
+            if (sight.Net is not { } net || !IsCoop(net.Type)) return (null, false);
             return sight.Place switch
             {
-                Coop.CoopBots.Place.Run when sight.Net is { } net => ((ulong?)(LocalContext.NetId ?? net.NetId), IsCoop(net.Type)),
-                Coop.CoopBots.Place.Lobby or Coop.CoopBots.Place.LoadedLobby when sight.Net is { } net => ((ulong?)net.NetId, IsCoop(net.Type)),
+                Coop.CoopBots.Place.Run => ((ulong?)(LocalContext.NetId ?? net.NetId), true),
+                Coop.CoopBots.Place.Lobby or Coop.CoopBots.Place.LoadedLobby => ((ulong?)net.NetId, true),
                 _ => ((ulong?)null, false),
             };
         }
