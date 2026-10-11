@@ -173,3 +173,19 @@ Files: this folder's `vantom1`, `vantom2`, `beast`, `leaks`, `strengths`, `stats
 - Section 6 gives the next two enemy turns after boss-878005 T4 as 27 and 22. In The Kin's table those are enemy turns 5 and 6; enemy turn 4 deals 7. Worth checking how the arena counts turns.
 - Item 4's Strength line was narrowed to Flex Potion: per `wiki/potions.md` Strength Potion lasts the fight, so the existing "buff potions before attacks" line covers it. Item 2 drops Infernal Blade (no offer to pick from) and says the card stays for the rest of the fight unless it exhausts, costing 0 only this turn.
 - The prompt hash changes with play.md step 3 (act_sequence through hand picks), so old and new arms differ in that line too.
+
+## 11. Notes on the position-test result (cloud, after the 40 + 40 runs)
+
+The result (the four cross-turn rules did not change the lines Opus takes, and it skipped the "write one line before you play" step) points away from more prompt text. Thoughts on the next arms, for the Mac to weigh:
+
+- **Effort is already on in the game.** The live API brain plays elite and boss rooms at high effort (`BrainSettings.EffortFor`, default high for both), which is what fixed three of these moments on 2026-10-10. If the position runs were at medium, an arm at high effort (old and new notes) would show whether the rules matter once Opus has the time, and how far the game already is from the arena result.
+- **A `plan` field, if the snapshot forecast alone does not move the plays.** Proposed shape, so the tool schema stays the same in every room (it is part of the cached prompt):
+  - `act` and `act_sequence` gain an optional string `plan`.
+  - In an elite or boss fight (`state.run.room` Elite or Boss), the first `act` or `act_sequence` of each player turn without a `plan` of at least about 40 characters is refused once that turn: "Elite or boss turn: put your count in plan first: the enemy's damage over its next 3 turns (next_moves), your HP, the Block left in your deck, the turn you expect to kill." A second call that turn runs with or without it, so a refusal never loops.
+  - The plan is logged with the turn (transcript and fights.jsonl), which also gives the post-mortems something real to read.
+  - BotTools takes a switch for it (off by default), so the arena can run it as an arm through the same code; the game turns it on only if it wins.
+  - Cost: at most one extra request per elite or boss turn, usually only the first time in a conversation.
+- **Prompt length as its own arm.** "Agreed with and then not applied" may get worse as the notes grow. A trimmed general.md (combat rules only, no draft and event advice in fights) against the full one would say whether the length itself costs decisions.
+- The package-counting and setup-card rules (general.md 8.8 and 12) are prompt rules too, so the same caveat holds for them. The setup-card rule is the in-fight one; the forecast in the snapshot gives it the numbers it needs without lookups.
+- **Mark's rule for every test from here (2026-10-11 23:09 UTC):** run under the game's own conditions, even at more usage: the live effort per room (medium in hallways, high in elites and bosses; `--effort-by-tier` on), the same model, notes, tools and snapshot fields as the installed mod. The position arms above should be rerun that way before any of them decides what ships.
+- **Mark, 2026-10-11 23:10 UTC: tests run on the subscription only.** No API credit for tests, not even short confirmation runs on the mod's own brain loop. The gap between Claude Code and the mod's brain is accepted; the API credit is for real play.
