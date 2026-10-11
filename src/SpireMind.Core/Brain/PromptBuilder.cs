@@ -42,9 +42,13 @@ public static partial class PromptBuilder
         "`strategy/wiki/README.md` isn't readable here; the prompt gives its conventions.\n" +
         "- Your only files are `runs/current.md`, `strategy/learned.md` and the wiki's pages, `strategy/wiki/<slug>.md` or " +
         "`strategy/wiki/<folder>/<slug>.md` in lowercase words joined by hyphens: read one with `notes_read`, add a line " +
-        "with `notes_append` (each floor's log line, a dated lesson at the end of a page) and replace one with `notes_write` " +
-        "(the whole file, for the Build plan, Orders, the post-mortem, a new or corrected page; on a page with Facts it refuses " +
-        "any change above `## Lessons`). There is no other file access.\n" +
+        "with `notes_append` (each floor's log line, a lesson for a page's `## Lessons` or `strategy/learned.md`) and replace one " +
+        "with `notes_write` (the whole file, for the Build plan, Orders, the post-mortem, a new or corrected page; on a page with " +
+        "Facts it refuses any change above `## Lessons`). There is no other file access.\n" +
+        "- Lessons are held for review: a lesson you add to a page or to `strategy/learned.md` is saved in a pending file, not " +
+        "on the page, so you won't see it in `notes_read` or in later prompts. Put a lesson under a page's `## Lessons`, never in its " +
+        $"summary or another section. Write each as one line: `{NotesTools.LessonForm}`, " +
+        "the source being the fight's id (date, act and floor, as in `2026-10-11 A1 F7`) or the floor.\n" +
         "- `runs/README.md` isn't readable here. The header line it describes goes in exactly this form: " +
         "`# Ironclad, started YYYY-MM-DD, Neow: <what you picked>`, with your character and the date the journal starts, " +
         "which is today's date from the conversation's first message. Archiving is automatic: when you " +

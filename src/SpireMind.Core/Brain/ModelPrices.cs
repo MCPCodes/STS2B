@@ -131,6 +131,32 @@ public static class ModelPrices
         CacheRead: Table.Values.Max(p => p.CacheRead),
         Output: Table.Values.Max(p => p.Output));
 
+    /// <summary>The models that take <c>thinking: {"type": "adaptive", "display": "summarized"}</c>:
+    /// the price table's, and their siblings the docs list with the same thinking options. Thinking
+    /// is on by default on all of them, so the field changes only what comes back: a readable
+    /// summary in each thinking block instead of an empty string (billing is the same). Opus 4.8
+    /// and 4.7 take the field too but are left out on purpose: thinking is off there unless the
+    /// request turns it on, so sending it would make them think and cost more than before.
+    /// Checked against the API docs on 2026-10-11.</summary>
+    public static IReadOnlySet<string> SummarizedThinkingModels { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "claude-opus-5-5", "claude-opus-5",
+        "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5",
+        "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
+    };
+
+    /// <summary>True when <paramref name="model"/> (a full id, a dated snapshot of one, or an
+    /// alias) is in <see cref="SummarizedThinkingModels"/>. Other models get no thinking field,
+    /// as before.</summary>
+    public static bool TakesSummarizedThinking(string? model)
+    {
+        if (string.IsNullOrWhiteSpace(model))
+            return false;
+        var id = BrainSettings.ResolveModel(model);
+        return SummarizedThinkingModels.Contains(id)
+               || SummarizedThinkingModels.Any(k => id.Length > k.Length && id.StartsWith(k, StringComparison.OrdinalIgnoreCase) && IsSnapshotSuffix(id.AsSpan(k.Length)));
+    }
+
     /// <summary>True when <paramref name="model"/> (a full id, a dated snapshot of one, or an
     /// alias such as "sonnet") has an entry in <see cref="Table"/>.</summary>
     public static bool IsKnown(string? model) => Lookup(model) is not null;

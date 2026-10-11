@@ -141,6 +141,7 @@ public sealed class ApiBrain : IPlayBrain
     private readonly Func<DateTime> _clock;
     private readonly Func<TimeSpan, CancellationToken, Task> _delay;
     private readonly Func<string?>? _blocked;
+    private readonly FightLog? _fights;
 
     private readonly object _gate = new();
     private CancellationTokenSource? _cts;
@@ -177,6 +178,7 @@ public sealed class ApiBrain : IPlayBrain
     private int _turn;
     private int _transcribed;
     private bool _heldBack; // the last step found the brain blocked and sent nothing
+    private bool _refreshDeferred; // this conversation passed HardRefreshTokens in a fight (logged once)
 
     /// <param name="api">The Messages API (<see cref="ClaudeClient"/>).</param>
     /// <param name="tools">The game tools: <see cref="BotToolsHost"/> around the <see cref="BotTools"/> instance the MCP endpoint uses.</param>
@@ -204,6 +206,8 @@ public sealed class ApiBrain : IPlayBrain
     /// and before every act or act_sequence, so a brain the controller hasn't stopped yet (its
     /// poll runs every few seconds) never sends or acts once a co-op run starts. Must return at
     /// once and not touch the game; one that throws counts as null.</param>
+    /// <param name="fights">Optional record of each fight, fed from the snapshots the brain sees
+    /// and its own requests. It never throws.</param>
     public ApiBrain(
         IClaudeApi api,
         IToolHost tools,
@@ -219,7 +223,8 @@ public sealed class ApiBrain : IPlayBrain
         Action<string>? log = null,
         Func<DateTime>? clock = null,
         Func<TimeSpan, CancellationToken, Task>? delay = null,
-        Func<string?>? blocked = null)
+        Func<string?>? blocked = null,
+        FightLog? fights = null)
     {
         _api = api;
         _host = tools;
@@ -236,6 +241,7 @@ public sealed class ApiBrain : IPlayBrain
         _clock = clock ?? (() => DateTime.UtcNow);
         _delay = delay ?? Task.Delay;
         _blocked = blocked;
+        _fights = fights;
     }
 
     /// <summary>
@@ -272,8 +278,17 @@ public sealed class ApiBrain : IPlayBrain
     public long MapRefreshTokens { get; init; } = 60_000;
 
     /// <summary>A fresh conversation starts past this many prompt tokens on any screen, or
-    /// sooner on a model with a long-prompt tier (see <see cref="LongPromptMargin"/>).</summary>
+    /// sooner on a model with a long-prompt tier (see <see cref="LongPromptMargin"/>). In a fight
+    /// it waits for the fight's end, up to <see cref="FightRefreshTokens"/>.</summary>
     public long HardRefreshTokens { get; init; } = 150_000;
+
+    /// <summary>In a fight (the combat and hand_select screens, and a card choice that opens
+    /// mid-fight), the refresh at <see cref="HardRefreshTokens"/> waits until the fight is over or
+    /// the conversation passes this many prompt tokens, so a fresh conversation doesn't cut a
+    /// fight in half and drop its earlier turns and the pages read. Not on a model with a
+    /// long-prompt tier, where <see cref="LongPromptMargin"/> rules. A full context window or a
+    /// prompt the API calls too long still starts a fresh conversation at once.</summary>
+    public long FightRefreshTokens { get; init; } = 300_000;
 
     /// <summary>On a model whose long-prompt tier starts below <see cref="HardRefreshTokens"/>
     /// (Haiku 5.5 bills every rate 5x past 100k prompt tokens), a fresh conversation starts
@@ -629,6 +644,7 @@ public sealed class ApiBrain : IPlayBrain
         var billedModel = response.Model ?? model;
         var cost = response.Cost(model);
         _spend.Add(cost.Usd, receivedAt);
+        _fights?.Response(cost.Usd, _currentEffort, response.StopReason == "max_tokens");
         var usage = response.Usage;
         Interlocked.Exchange(ref _lastPromptTokens, usage.PromptTokens);
         _conversationBaseTokens ??= usage.PromptTokens;
@@ -769,10 +785,18 @@ public sealed class ApiBrain : IPlayBrain
 
         var total = Interlocked.Read(ref _lastPromptTokens);
         var grown = total - (_conversationBaseTokens ?? 0) >= MinRefreshGrowth;
-        if (grown && (total > HardRefreshLimit() || (total > MapRefreshTokens && _lastScreen == "map")))
+        var limit = HardRefreshLimit();
+        if (grown && (total > limit || (total > MapRefreshTokens && _lastScreen == "map")))
         {
             Log($"brain: {total} prompt tokens on {_lastScreen ?? "an unknown screen"}; starting a fresh conversation");
             StartConversation(Refreshed);
+        }
+        else if (grown && total > HardRefreshTokens && !_refreshDeferred)
+        {
+            // Past the usual limit in a fight: the first screen after it (rewards, game over)
+            // goes back to the usual limit and refreshes there.
+            _refreshDeferred = true;
+            Log($"brain: {total} prompt tokens on {_lastScreen}; the fresh conversation waits until the fight is over");
         }
     }
 
@@ -843,11 +867,24 @@ public sealed class ApiBrain : IPlayBrain
                             || ex.ApiMessage.Contains("output_config", StringComparison.OrdinalIgnoreCase)
                             || ex.ApiMessage.Contains("effort", StringComparison.OrdinalIgnoreCase));
 
-    // HardRefreshTokens, or LongPromptMargin below the model's long-prompt tier when that comes first.
-    private long HardRefreshLimit() =>
-        ModelPrices.For(_conversationModel, out _).LongPromptThreshold is { } tier
-            ? Math.Min(HardRefreshTokens, tier - LongPromptMargin)
-            : HardRefreshTokens;
+    // HardRefreshTokens, or LongPromptMargin below the model's long-prompt tier when that comes
+    // first. In a fight, on a model without such a tier, FightRefreshTokens.
+    private long HardRefreshLimit()
+    {
+        if (ModelPrices.For(_conversationModel, out _).LongPromptThreshold is { } tier)
+            return Math.Min(HardRefreshTokens, tier - LongPromptMargin);
+        return InFight(_lastSnapshot) ? Math.Max(HardRefreshTokens, FightRefreshTokens) : HardRefreshTokens;
+    }
+
+    /// <summary>True when <paramref name="snapshot"/> is part of a fight: the combat and
+    /// hand_select screens, and a card selection with a combat summary (a pile choice mid-fight).</summary>
+    public static bool InFight(JsonObject? snapshot) =>
+        Str(snapshot?["screen"]) switch
+        {
+            "combat" or "hand_select" => true,
+            "card_select" => snapshot!["state"]?["combat"] is JsonObject,
+            _ => false,
+        };
 
     /// <summary>
     /// Replaces the conversation with one user message: <paramref name="intro"/>, today's date
@@ -887,10 +924,12 @@ public sealed class ApiBrain : IPlayBrain
         _effortMessageUnsent = false;
         _unseenChat.Clear();
         _conversationBaseTokens = null;
+        _refreshDeferred = false;
         _endTurnsInRow = 0;
         _waitShown = null;
         _conversation++;
         _turn = 0;
+        _fights?.ConversationStarted(refresh: intro == Refreshed);
         _transcribed = 0;
     }
 
@@ -938,6 +977,10 @@ public sealed class ApiBrain : IPlayBrain
         };
         if (!string.IsNullOrWhiteSpace(effort))
             request["output_config"] = new JsonObject { ["effort"] = effort };
+        // Thinking is already on for these models; this asks for its summary instead of empty
+        // thinking blocks, so the transcript says why a move was made. Other models are left as they were.
+        if (ModelPrices.TakesSummarizedThinking(model))
+            request["thinking"] = new JsonObject { ["type"] = "adaptive", ["display"] = "summarized" };
         if (_effortMessages)
             request[ClaudeClient.BetasField] = new JsonArray(PerMessageEffortBeta);
         return request;
@@ -1141,6 +1184,7 @@ public sealed class ApiBrain : IPlayBrain
     // hasn't seen, both for a fresh conversation.
     private void Observe(JsonNode payload)
     {
+        _fights?.Observe(payload);
         if (payload is not JsonObject json)
             return;
         if (json["chat"]?["messages"] is JsonArray messages)
@@ -1231,6 +1275,9 @@ public sealed class ApiBrain : IPlayBrain
         entry["stop_reason"] = response.StopReason;
         if (response.Raw["stop_details"] is { } details)
             entry["stop_details"] = details.DeepClone();
+        var thinking = Transcript.ThinkingSummaries(response.Content);
+        if (thinking.Count > 0)
+            entry["thinking"] = new JsonArray(thinking.Select(t => (JsonNode)JsonValue.Create(t)!).ToArray());
         entry["content"] = response.Content.DeepClone();
         entry["usage"] = response.UsageJson?.DeepClone();
         entry["cost_usd"] = cost;

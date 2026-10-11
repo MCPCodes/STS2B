@@ -27,6 +27,16 @@ public sealed record NotesOptions
     /// strategy/learned.md, whose whole text is in the prompt, is taken as seen either way.
     /// </summary>
     public bool ReadPagesBeforeRewrite { get; init; }
+
+    /// <summary>
+    /// True (the default): a lesson the bot writes to strategy/learned.md or a wiki page's
+    /// Lessons goes to its pending file instead (<see cref="NotesTools.PendingFileFor"/>), which
+    /// nothing the brain reads loads, so a held lesson can't reach a later prompt. Only lesson
+    /// lines are held: the rest of a page the bot writes (a new page's summary, a section above
+    /// Lessons on a page without Facts) is written at once, and a wiki write without a
+    /// ## Lessons heading is refused. False writes lessons straight to the file, as before.
+    /// </summary>
+    public bool HoldLessons { get; init; } = true;
 }
 
 /// <summary>
@@ -53,6 +63,16 @@ public sealed record NotesOptions
 /// prompt lists the pages without their text. notes_append is never refused, since it loses
 /// nothing.</item>
 /// </list>
+///
+/// Lessons are held for review (<see cref="NotesOptions.HoldLessons"/>): notes_append to
+/// learned.md or a wiki page (it lands at the end, which is the page's Lessons section) puts the
+/// line in the file's pending file under <see cref="PendingFolder"/> instead, and a notes_write
+/// there puts the lesson lines it adds in the pending file and writes the rest. Removing a line
+/// works at once. Every held line must have the one lesson form, <see cref="LessonForm"/>. The
+/// pending files are outside the wiki and aren't notes files, so the prompt, the wiki index,
+/// notes_read and notes_list never see them. Only lessons are held: what a write adds above a
+/// page's ## Lessons (allowed only on pages without Facts, and on new pages) is written at once,
+/// so it does show in the index and notes_read; a wiki write without that heading is refused.
 /// </summary>
 public sealed partial class NotesTools
 {
@@ -61,6 +81,16 @@ public sealed partial class NotesTools
 
     /// <summary>The wiki's folder, which holds its pages and the conventions in README.md.</summary>
     public const string WikiFolder = "strategy/wiki";
+
+    /// <summary>Where held lessons wait for review: the file's path below strategy/, under this
+    /// folder (see <see cref="PendingFileFor"/>).</summary>
+    public const string PendingFolder = "strategy/pending";
+
+    /// <summary>The one form of a lesson line, in learned.md and on wiki pages.</summary>
+    public const string LessonForm = "- (Character, YYYY-MM-DD, <fight id or floor>) <lesson>";
+
+    /// <summary>A lesson line in <see cref="LessonForm"/>, for errors and descriptions.</summary>
+    public const string LessonExample = "- (Ironclad, 2026-10-11, 2026-10-11 A1 F7) Jaw Worm's Chomp hit for 11 on turn 1; Defend first, Bash on turn 2.";
 
     /// <summary>The fixed files the tools accept besides wiki pages, exactly as written here.</summary>
     public static IReadOnlyList<string> Files { get; } = [Journal, Learned];
@@ -91,6 +121,7 @@ public sealed partial class NotesTools
     private readonly string _journalFile;
     private readonly string? _lockFile;
     private readonly bool _readPages;
+    private readonly bool _holdLessons;
 
     // The shared files' content as this instance last saw it, by file: the SHA-256 of its bytes,
     // or "" when it was missing. No entry means it hasn't seen the file at all. Under _gate.
@@ -114,6 +145,7 @@ public sealed partial class NotesTools
         JournalPath = Path.Combine(Root, journal.Replace('/', Path.DirectorySeparatorChar));
         _lockFile = string.IsNullOrWhiteSpace(options.LockFile) ? null : options.LockFile;
         _readPages = options.ReadPagesBeforeRewrite;
+        _holdLessons = options.HoldLessons;
         SeedSeen();
     }
 
@@ -133,7 +165,10 @@ public sealed partial class NotesTools
             "Replace one of your notes files with new content: runs/current.md, strategy/learned.md or a wiki page (a new " +
             "page is created, with its folder). Send the whole file, not a diff; read it first if you only want to change " +
             "part of it. On a wiki page with a Facts section, everything above its ## Lessons heading must stay exactly as it " +
-            $"is. Use notes_append to add a line instead. A file can be at most {MaxBytes / 1024} KB. " +
+            "is. New lines in strategy/learned.md or under a page's ## Lessons are lessons: they are saved for review instead " +
+            "(see notes_append) and the rest is written; removing a line works at once. A wiki page must keep its ## Lessons " +
+            "heading, and a lesson belongs under it, not in the summary or another section. " +
+            $"Use notes_append to add a line instead. A file can be at most {MaxBytes / 1024} KB. " +
             "If someone else changed the file since you last read it, the write is refused: read it again first.",
             Schema(new JsonObject
             {
@@ -142,8 +177,10 @@ public sealed partial class NotesTools
             }, ["file", "content"])),
         new("notes_append",
             "Add text to the end of one of your notes files without sending the whole file, such as the floor's line in the " +
-            "runs/current.md log or a dated line in a wiki page's Lessons, its last section. It goes on a new line; a missing " +
-            "file is created.",
+            "runs/current.md log. It goes on a new line; a missing file is created. A lesson for strategy/learned.md or a wiki " +
+            $"page (it lands under Lessons, the page's last section) is one line in this form: {LessonForm}. It is saved for " +
+            "review in a pending file instead of the page, so it won't show in notes_read or in your prompt until it has been " +
+            "checked; don't add it again.",
             Schema(new JsonObject
             {
                 ["file"] = FileProperty(),
@@ -267,12 +304,41 @@ public sealed partial class NotesTools
                 return Error($"{file} has a Facts section, verified from the game files, so a rewrite must keep everything above " +
                              "its ## Lessons heading exactly as it is and change only the Lessons. Read the page with notes_read and " +
                              "write it again, or add a line with notes_append.");
+
+            // The lessons this write adds wait for review; the rest is written.
+            string? pendingText = null;
+            var held = new List<string>();
+            if (_holdLessons && IsGuarded(file))
+            {
+                // Without the heading nothing on the page would count as a lesson, so every line
+                // the write adds would go on the page untested.
+                if (IsWikiPage(file) && !content.Split('\n').Any(l => LessonsHeading().IsMatch(l.TrimEnd('\r'))))
+                    return Error($"{file} needs a ## Lessons heading as its last section, even with nothing under it yet: lessons " +
+                                 "go under it and are saved for review. Add the heading and write the page again. Nothing was written.");
+                (content, held) = SplitNewLessons(file, old is null ? "" : Decode(old), content);
+                if (held.FirstOrDefault(l => !IsLessonLine(l)) is { } bad)
+                    return Error(LessonFormError(bad) + " Nothing was written.");
+                if (held.Count > 0)
+                {
+                    pendingText = PendingText(file, held, out var error);
+                    if (pendingText is null)
+                        return error!;
+                }
+                bytes = Utf8.GetByteCount(content);
+            }
+
             var reply = new JsonObject { ["file"] = file, ["written"] = true, ["bytes"] = bytes };
             if (file == Journal && ArchiveIfAnotherRun(path, content) is { } archived)
                 reply["archived_previous_as"] = archived;
             ConfigFiles.WriteAtomic(path, content);
             if (IsGuarded(file))
                 _seen[file] = Hash(Utf8.GetBytes(content));
+            if (pendingText is not null)
+            {
+                ConfigFiles.WriteAtomic(PathOf(PendingFileFor(file)), pendingText);
+                reply["held_for_review"] = new JsonArray(held.Select(l => (JsonNode)JsonValue.Create(l)!).ToArray());
+                reply["note"] = HeldNote(file, held.Count) + " The rest of the file was written.";
+            }
             return new ToolOutcome(reply);
         });
     }
@@ -285,6 +351,8 @@ public sealed partial class NotesTools
     {
         if (content is null || content.Trim().Length == 0)
             return Error("content is required: the text to add.");
+        if (_holdLessons && IsGuarded(file))
+            return AppendLesson(file, content.Trim());
 
         return Locked(() =>
         {
@@ -304,6 +372,106 @@ public sealed partial class NotesTools
             return new ToolOutcome(new JsonObject { ["file"] = file, ["appended"] = true, ["bytes"] = bytes });
         });
     }
+
+    // A lesson for learned.md or a wiki page: one line in LessonForm, added to the file's
+    // pending file (once) instead of the file, which is left alone, so the guard's view of it
+    // doesn't change either.
+    private ToolOutcome? AppendLesson(string file, string line)
+    {
+        if (line.Contains('\n') || !IsLessonLine(line))
+            return Error(LessonFormError(line.Split('\n')[0].Trim()) +
+                         (IsWikiPage(file) ? " To start a new page, use notes_write with the whole page." : ""));
+        return Locked(() =>
+        {
+            if (PendingText(file, [line], out var error) is not { } text)
+                return error!;
+            ConfigFiles.WriteAtomic(PathOf(PendingFileFor(file)), text);
+            return new ToolOutcome(new JsonObject
+            {
+                ["file"] = file,
+                ["appended"] = false,
+                ["held_for_review"] = true,
+                ["note"] = HeldNote(file, 1),
+            });
+        });
+    }
+
+    /// <summary>The pending file for <paramref name="file"/> (strategy/learned.md or a wiki
+    /// page): its path below strategy/, under <see cref="PendingFolder"/>, so
+    /// strategy/pending/learned.md and strategy/pending/wiki/enemies/jaw-worm.md.</summary>
+    public static string PendingFileFor(string file) =>
+        $"{PendingFolder}/{file["strategy/".Length..]}";
+
+    /// <summary>True when <paramref name="line"/> is one lesson line in <see cref="LessonForm"/>.</summary>
+    public static bool IsLessonLine(string line) => LessonLine().IsMatch(line);
+
+    // The pending file with the lines it doesn't hold yet added at the end, or null (and an
+    // error) when that would pass MaxBytes. A new pending file starts with a heading naming the
+    // file its lessons are for. Caller holds the locks.
+    private string? PendingText(string file, IReadOnlyList<string> lines, out ToolOutcome? error)
+    {
+        error = null;
+        var path = PathOf(PendingFileFor(file));
+        var old = File.Exists(path) ? File.ReadAllText(path) : $"# Held for review: {file}\n\n";
+        var have = old.Split('\n').Select(l => l.Trim()).ToHashSet(StringComparer.Ordinal);
+        var text = new StringBuilder(old);
+        if (text.Length > 0 && text[^1] != '\n')
+            text.Append('\n');
+        foreach (var line in lines.Distinct(StringComparer.Ordinal))
+            if (have.Add(line))
+                text.Append(line).Append('\n');
+        var bytes = Utf8.GetByteCount(text.ToString());
+        if (bytes > MaxBytes)
+        {
+            error = Error($"{PendingFileFor(file)}, where lessons wait for review, is full ({MaxBytes / 1024} KB) until someone checks it. " +
+                          "Keep the lesson in runs/current.md for now.");
+            return null;
+        }
+        return text.ToString();
+    }
+
+    // The new content without the lesson lines it adds, and those lines (trimmed, in order, once
+    // each). For learned.md every line counts; for a wiki page, the lines under its ## Lessons
+    // heading. A line counts as added when the old file has no such line anywhere (so moving or
+    // reordering adds nothing); blank lines and headings never count.
+    private static (string Kept, List<string> Held) SplitNewLessons(string file, string oldText, string newText)
+    {
+        var have = oldText.Replace("\r\n", "\n").Split('\n').Select(l => l.Trim()).ToHashSet(StringComparer.Ordinal);
+        var lines = newText.Split('\n');
+        var start = 0;
+        if (IsWikiPage(file))
+        {
+            start = Array.FindIndex(lines, l => LessonsHeading().IsMatch(l.TrimEnd('\r')));
+            if (start < 0)
+                return (newText, []);
+            start++;
+        }
+        var held = new List<string>();
+        var kept = new List<string>(lines.Length);
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i].Trim();
+            if (i >= start && line.Length > 0 && !line.StartsWith('#') && !have.Contains(line))
+            {
+                if (!held.Contains(line))
+                    held.Add(line);
+                continue;
+            }
+            kept.Add(lines[i]);
+        }
+        return (string.Join('\n', kept), held);
+    }
+
+    private static string LessonFormError(string line) =>
+        $"A lesson must be one line in this form: {LessonForm}, for example \"{LessonExample}\". " +
+        $"The source is a fight id from the fight log (date, act and floor, as in 2026-10-11 A1 F7) or the floor (floor 7). Got: \"{Shorten(line)}\".";
+
+    private static string HeldNote(string file, int count) =>
+        $"Saved for review, not added to {file}: {(count == 1 ? "the lesson waits" : $"the {count} lessons wait")} in " +
+        $"{PendingFileFor(file)} until someone checks {(count == 1 ? "it" : "them")} in real play, so " +
+        $"{(count == 1 ? "it won't" : "they won't")} show in notes_read or in your prompt. Don't add {(count == 1 ? "it" : "them")} again.";
+
+    private static string Shorten(string text) => text.Length <= 120 ? text : text[..117] + "...";
 
     // The wiki pages, and the fixed files with whether they exist. Caller holds the locks.
     private ToolOutcome List()
@@ -586,6 +754,11 @@ public sealed partial class NotesTools
 
     [GeneratedRegex(@"\A##[ \t]+Lessons\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex LessonsHeading();
+
+    // "- (Ironclad, 2026-10-11, 2026-10-11 A1 F7) text": a character name of letters and spaces,
+    // a date, a source without brackets, then the lesson.
+    [GeneratedRegex(@"\A- \((?:[A-Z][A-Za-z]*)(?: [A-Z][A-Za-z]*)*, \d{4}-\d{2}-\d{2}, [^()\r\n]*[^()\s][^()\r\n]*\) \S[^\r\n]*\z", RegexOptions.CultureInvariant)]
+    private static partial Regex LessonLine();
 
     [GeneratedRegex(@"\Aruns/(?:[a-z0-9-]{1,40}/)?current\.md\z", RegexOptions.CultureInvariant)]
     private static partial Regex JournalForm();

@@ -23,9 +23,11 @@ public class NotesGuardTests : IDisposable
 
     private string LockFile => Path.Combine(_root, "config", "locks", "notes.lock");
 
-    private NotesTools Notes(string journal = NotesTools.Journal, bool locked = true, bool bot = false) =>
+    // Most of these tests change learned.md and pages through the tools, so lessons go straight
+    // to the files here; the tests at the end hold them for review, as the game does.
+    private NotesTools Notes(string journal = NotesTools.Journal, bool locked = true, bool bot = false, bool hold = false) =>
         new(_root, () => new DateTime(2026, 10, 10, 12, 0, 0, DateTimeKind.Utc),
-            new NotesOptions { JournalFile = journal, LockFile = locked ? LockFile : null, ReadPagesBeforeRewrite = bot });
+            new NotesOptions { JournalFile = journal, LockFile = locked ? LockFile : null, ReadPagesBeforeRewrite = bot, HoldLessons = hold });
 
     private void WriteFile(string relative, string text)
     {

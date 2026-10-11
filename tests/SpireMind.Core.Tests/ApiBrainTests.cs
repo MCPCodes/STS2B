@@ -427,11 +427,21 @@ public class ApiBrainTests
     [InlineData("map", 62_000, true)]
     [InlineData("map", 59_000, false)]
     [InlineData("combat", 62_000, false)]
-    [InlineData("combat", 151_000, true)]
+    [InlineData("combat", 151_000, false)] // in a fight the refresh waits
+    [InlineData("combat", 299_000, false)]
+    [InlineData("combat", 301_000, true)]
+    [InlineData("hand_select", 200_000, false)]
+    [InlineData("card_select_in_combat", 200_000, false)]
+    [InlineData("card_select", 151_000, true)]
+    [InlineData("rewards", 151_000, true)]
+    [InlineData("event", 151_000, true)]
     public async Task Fresh_context_thresholds(string screen, int promptTokens, bool refreshed)
     {
         using var rig = new Rig();
-        rig.Host.Handler = (_, _, _) => Task.FromResult(Outcome(Snap(screen, true)));
+        var snap = screen == "card_select_in_combat" ? Snap("card_select", true) : Snap(screen, true);
+        if (screen == "card_select_in_combat")
+            snap["state"] = new JsonObject { ["combat"] = new JsonObject { ["turn"] = 2 } };
+        rig.Host.Handler = (_, _, _) => Task.FromResult(Outcome(snap.DeepClone()));
         rig.Api
             .Then(Reply("tool_use", Usage(input: 5000), ToolUse("toolu_1", "get_state")))
             .Then(Reply("tool_use", Usage(input: 2000, cacheRead: promptTokens - 2000), ToolUse("toolu_2", "get_state")));
@@ -442,6 +452,98 @@ public class ApiBrainTests
         var messages = rig.Api[2]["messages"]!.AsArray();
         Assert.Equal(refreshed ? 1 : 5, messages.Count);
         Assert.Equal(promptTokens, rig.Brain.LastPromptTokens);
+    }
+
+    [Fact]
+    public async Task A_refresh_put_off_in_a_fight_happens_on_the_first_screen_after_it()
+    {
+        using var rig = new Rig();
+        rig.Host.Handler = (name, _, _) => Task.FromResult(name == "act"
+            ? new ToolOutcome(new JsonObject { ["done"] = "end_turn", ["next"] = Snap("rewards", true, version: 9) })
+            : Outcome(Snap("combat", true)));
+        rig.Api
+            .Then(Reply("tool_use", Usage(input: 5000), ToolUse("toolu_1", "get_state")))
+            .Then(Reply("tool_use", Usage(input: 2000, cacheRead: 198_000), ToolUse("toolu_2", "get_state")))
+            .Then(Reply("tool_use", Usage(input: 2000, cacheRead: 208_000), ToolUse("toolu_3", "act", new JsonObject { ["action_id"] = "end_turn" })));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        // Still in the fight at 200k and 210k: the conversation goes on.
+        Assert.Equal(5, rig.Api[2]["messages"]!.AsArray().Count);
+        // The fight ended on the end_turn: the rewards screen starts the fresh conversation.
+        var opening = Text(Assert.Single(rig.Api[3]["messages"]!.AsArray())!);
+        Assert.StartsWith(ApiBrain.Refreshed, opening);
+        Assert.Contains("\"screen\":\"rewards\"", opening);
+        Assert.Single(rig.Logged, l => l.Contains("waits until the fight is over"));
+    }
+
+    [Fact]
+    public async Task Each_fight_gets_one_line_in_the_fight_log()
+    {
+        using var rig = new Rig { UseFightLog = true };
+        var board = Snap("combat", true, version: 5);
+        board["state"] = JsonNode.Parse("""
+            {"run": {"act": 1, "floor": 3, "ascension": 0, "room": "Monster"}, "turn": 1, "round": 1,
+             "me": {"name": "The Ironclad", "hp": 75, "max_hp": 80},
+             "enemies": [{"i": 0, "name": "Jaw Worm", "hp": 40, "max_hp": 40, "intents": ["attack 11"]}],
+             "potions": [null, null, null]}
+            """);
+        var rewards = Snap("rewards", true, version: 6);
+        rewards["state"] = JsonNode.Parse("""{"run": {"act": 1, "floor": 3}, "player": {"hp": 70, "max_hp": 80}, "potions": [null, null, null]}""");
+        rig.Host.Handler = (name, _, _) => Task.FromResult(name == "act"
+            ? new ToolOutcome(new JsonObject { ["done"] = "end_turn", ["next"] = rewards.DeepClone() })
+            : Outcome(board.DeepClone()));
+        var usage1 = Usage(input: 3000, output: 400);
+        var usage2 = Usage(input: 200, output: 100, cacheRead: 3000);
+        rig.Api
+            .Then(Reply("tool_use", usage1, ToolUse("toolu_1", "get_state")))
+            .Then(Reply("tool_use", usage2, ToolUse("toolu_2", "act", new JsonObject { ["action_id"] = "end_turn" })));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        var line = JsonNode.Parse(Assert.Single(File.ReadAllLines(Path.Combine(rig.Dir, FightLog.FileName))))!;
+        Assert.Equal("2026-10-10 A1 F3", line["id"]!.GetValue<string>());
+        Assert.Equal("Jaw Worm", Assert.Single(line["enemies"]!.AsArray())!.GetValue<string>());
+        Assert.Equal(75, line["hp_before"]!.GetValue<int>());
+        Assert.Equal(70, line["hp_after"]!.GetValue<int>());
+        Assert.Equal("high", Assert.Single(line["effort"]!.AsArray())!.GetValue<string>());
+        // Both responses came in the fight: the opening state was already the board.
+        Assert.Equal(2, line["requests"]!.GetValue<int>());
+        var spent = ModelPrices.Cost("claude-opus-5-5", usage1).Usd + ModelPrices.Cost("claude-opus-5-5", usage2).Usd;
+        Assert.Equal(Math.Round(spent, 4), line["spent_usd"]!.GetValue<decimal>());
+        Assert.Equal(0, line["refreshes"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task A_full_context_window_in_a_fight_still_refreshes_at_once()
+    {
+        using var rig = new Rig();
+        rig.Host.Handler = (_, _, _) => Task.FromResult(Outcome(Snap("hand_select", true)));
+        rig.Api
+            .Then(Reply("tool_use", Usage(input: 5000), ToolUse("toolu_1", "get_state")))
+            .Then(Reply("model_context_window_exceeded", Usage(input: 2000, cacheRead: 198_000)));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.StartsWith(ApiBrain.Refreshed, Text(Assert.Single(rig.Api[2]["messages"]!.AsArray())!));
+    }
+
+    [Theory]
+    [InlineData("combat", null, true)]
+    [InlineData("hand_select", null, true)]
+    [InlineData("card_select", true, true)]
+    [InlineData("card_select", false, false)]
+    [InlineData("rewards", null, false)]
+    [InlineData("modal", null, false)]
+    public void In_fight_screens(string screen, bool? combatSummary, bool inFight)
+    {
+        var snap = Snap(screen, true);
+        if (combatSummary == true)
+            snap["state"] = new JsonObject { ["combat"] = new JsonObject() };
+        Assert.Equal(inFight, ApiBrain.InFight(snap));
     }
 
     [Fact]
@@ -848,6 +950,60 @@ public class ApiBrainTests
         }
     }
 
+    [Theory]
+    [InlineData("claude-opus-5-5", true)]
+    [InlineData("opus", true)]
+    [InlineData("claude-opus-5-5-20261001", true)]
+    [InlineData("claude-sonnet-5-5", true)]
+    [InlineData("claude-haiku-5-5", true)]
+    [InlineData("claude-fable-5-1", true)]
+    [InlineData("claude-mythos-5", true)]
+    // Thinking is off by default on Opus 4.8 and 4.7, so the field would turn it on there.
+    [InlineData("claude-opus-4-8", false)]
+    [InlineData("claude-opus-4-7", false)]
+    [InlineData("claude-opus-4-8-20260801", false)]
+    [InlineData("claude-haiku-4-5", false)]
+    [InlineData("claude-opus-4-6", false)]
+    [InlineData("claude-opus-5-55", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void Only_models_with_adaptive_thinking_display_take_the_summary(string? model, bool takes) =>
+        Assert.Equal(takes, ModelPrices.TakesSummarizedThinking(model));
+
+    [Fact]
+    public async Task Other_models_get_no_thinking_field()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Model = "claude-haiku-4-5" };
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.False(rig.Api[0].ContainsKey("thinking"));
+        Assert.Equal("claude-haiku-4-5", rig.Api[0]["model"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Thinking_summaries_go_in_the_transcript_and_the_blocks_go_back_unchanged()
+    {
+        using var rig = new Rig { UseTranscript = true };
+        var thinking = Thinking("Jaw Worm hits for 11, so Defend twice before Bash.", "sig/abc+==");
+        rig.Api
+            .Then(Reply("tool_use", Usage(), Thinking("", "empty+sig=="), thinking.DeepClone().AsObject(), ToolUse("toolu_1", "get_state")))
+            .Then(Reply("tool_use", Usage(), ToolUse("toolu_2", "get_state")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        var lines = File.ReadAllLines(Path.Combine(rig.Dir, "transcripts", "2026-10-10.jsonl")).Select(l => JsonNode.Parse(l)!).ToArray();
+        Assert.Equal(["Jaw Worm hits for 11, so Defend twice before Bash."], lines[0]["thinking"]!.AsArray().Select(t => t!.GetValue<string>()));
+        Assert.False(lines[1].AsObject().ContainsKey("thinking"));
+
+        var sent = rig.Api[1]["messages"]![1]!["content"]!.AsArray();
+        Assert.Equal(Thinking("", "empty+sig==").ToJsonString(), sent[0]!.ToJsonString());
+        Assert.Equal(thinking.ToJsonString(), sent[1]!.ToJsonString());
+    }
+
     [Fact]
     public void Only_models_the_beta_lists_take_per_message_effort()
     {
@@ -1159,9 +1315,11 @@ public class ApiBrainTests
         var request = rig.Api[0];
         Assert.Equal("claude-opus-5-5", request["model"]!.GetValue<string>());
         Assert.Equal(32000, request["max_tokens"]!.GetValue<int>()); // high effort
-        foreach (var absent in new[] { "temperature", "top_p", "top_k", "thinking", "tool_choice" })
+        foreach (var absent in new[] { "temperature", "top_p", "top_k", "tool_choice" })
             Assert.False(request.ContainsKey(absent), absent);
         Assert.Equal("high", request["output_config"]!["effort"]!.GetValue<string>());
+        // Thinking is on anyway; the field asks for its summary instead of empty blocks.
+        Assert.Equal("""{"type":"adaptive","display":"summarized"}""", request["thinking"]!.ToJsonString());
 
         var system = Assert.Single(request["system"]!.AsArray())!;
         Assert.Equal("text", system["type"]!.GetValue<string>());
@@ -1362,7 +1520,7 @@ public class ApiBrainTests
             .Then(Reply("tool_use", Usage(input: 5000), ToolUse("toolu_1", "get_state")))
             .Then(Reply("end_turn", null, TextBlock("Done.")))
             .Then(Reply("end_turn", null, TextBlock("Done.")))
-            .Then(Reply("tool_use", Usage(input: 2000, cacheRead: 200_000), ToolUse("toolu_2", "get_state")));
+            .Then(Reply("tool_use", Usage(input: 2000, cacheRead: 310_000), ToolUse("toolu_2", "get_state")));
 
         rig.Brain.Start();
         await rig.Api.Exhausted.Task.WaitAsync(Guard);
@@ -1530,17 +1688,21 @@ public class ApiBrainTests
         using var rig = new Rig();
         rig.WriteFile("strategy/learned.md", "OLD-LESSON");
         var states = 0;
-        rig.Host.Handler = (name, _, _) => Task.FromResult(++states switch
+        rig.Host.Handler = (name, _, _) =>
         {
-            1 => Outcome(Snap("combat", true)),
-            2 => Outcome(Snap("game_over", true)),
-            3 => Outcome(Snap("menu", false)),
-            _ => Outcome(Snap("event", true, marker: "neow")),
-        });
+            // A lesson accepted by hand at the end of the run (the brain's own are held for review).
+            if (++states == 2)
+                rig.WriteFile("strategy/learned.md", "NEW-LESSON");
+            return Task.FromResult(states switch
+            {
+                1 => Outcome(Snap("combat", true)),
+                2 => Outcome(Snap("game_over", true)),
+                3 => Outcome(Snap("menu", false)),
+                _ => Outcome(Snap("event", true, marker: "neow")),
+            });
+        };
         rig.Api
-            .Then(Reply("tool_use", null,
-                ToolUse("toolu_1", "notes_write", new JsonObject { ["file"] = "strategy/learned.md", ["content"] = "NEW-LESSON" }),
-                ToolUse("toolu_2", "get_state")))
+            .Then(Reply("tool_use", null, ToolUse("toolu_1", "get_state")))
             .Then(Reply("end_turn", null, TextBlock("Good game.")));
 
         rig.Brain.Start();
@@ -1564,7 +1726,7 @@ public class ApiBrainTests
             ToolUse("toolu_1", "notes_list"),
             ToolUse("toolu_2", "notes_append", new JsonObject
             {
-                ["file"] = "strategy/wiki/enemies/jaw-worm.md", ["content"] = "- (Ironclad, 2026-10-10) NEW-LESSON",
+                ["file"] = "strategy/wiki/enemies/jaw-worm.md", ["content"] = "- (Ironclad, 2026-10-10, floor 3) NEW-LESSON",
             })));
 
         rig.Brain.Start();
@@ -1578,7 +1740,10 @@ public class ApiBrainTests
         var listed = JsonNode.Parse(results[0]!["content"]!.GetValue<string>())!;
         Assert.Equal("Jaw Worm", listed["wiki"]![0]!["title"]!.GetValue<string>());
         Assert.False(results[1]!["is_error"]!.GetValue<bool>());
-        Assert.EndsWith("## Lessons\n- (Ironclad, 2026-10-10) NEW-LESSON\n", File.ReadAllText(Path.Combine(rig.Dir, "strategy", "wiki", "enemies", "jaw-worm.md")));
+        // The lesson is held for review: the page is unchanged and the line waits in its pending file.
+        Assert.True(JsonNode.Parse(results[1]!["content"]!.GetValue<string>())!["held_for_review"]!.GetValue<bool>());
+        Assert.EndsWith("## Lessons\n", File.ReadAllText(Path.Combine(rig.Dir, "strategy", "wiki", "enemies", "jaw-worm.md")));
+        Assert.EndsWith("- (Ironclad, 2026-10-10, floor 3) NEW-LESSON\n", File.ReadAllText(Path.Combine(rig.Dir, "strategy", "pending", "wiki", "enemies", "jaw-worm.md")));
         Assert.DoesNotContain(rig.Host.Calls, c => c.Name.StartsWith("notes_", StringComparison.Ordinal));
     }
 
@@ -1920,7 +2085,8 @@ public class NotesToolsTests : IDisposable
     public NotesToolsTests()
     {
         Directory.CreateDirectory(_dir);
-        _notes = new NotesTools(_dir, () => new DateTime(2026, 10, 10, 9, 0, 0, DateTimeKind.Utc));
+        // These tests cover the files themselves; holding lessons for review is tested in LessonHoldTests.
+        _notes = new NotesTools(_dir, () => new DateTime(2026, 10, 10, 9, 0, 0, DateTimeKind.Utc), new NotesOptions { HoldLessons = false });
     }
 
     public void Dispose()
@@ -2467,6 +2633,7 @@ file sealed class Rig : IDisposable
     public string? Character { get; set; } = "Ironclad";
     public List<string> Chat { get; set; } = [];
     public bool UseTranscript { get; init; }
+    public bool UseFightLog { get; init; }
     public IToolHost? Tools { get; init; }
     public bool AnnounceThrows { get; init; }
     public bool LogThrows { get; init; }
@@ -2513,7 +2680,8 @@ file sealed class Rig : IDisposable
                 ct.ThrowIfCancellationRequested();
                 await Task.Yield();
             },
-            blocked: () => BlockedReason);
+            blocked: () => BlockedReason,
+            fights: UseFightLog ? new FightLog(Dir, _logged.Enqueue, () => Now) : null);
         brain.Stopped += (reason, message) =>
         {
             StoppedWhileRunning = brain.IsRunning;

@@ -182,8 +182,17 @@ Written and unit tested on Linux; the game-side wiring was only compiled against
 - The usage-limit wording of CLI 2.1.287, when it comes up, matches `SubscriptionBrain`'s pattern (the chat then says the subscription hit its limit).
 - In a fight, `/stop` while the bot is thinking over a move (the "..." cloud is up) takes the cloud down at once.
 - The API brain's first `runs/current.md` starts `# <Character>, started <today's date>, Neow: ...`, and the next run archives it as `runs/<that date>-<character>.md`.
-- Rules sheet and wiki, once `strategy/rules.md` and `strategy/wiki/` are in: the API brain's "system prompt built" log line lists `rules.md`. With the subscription playing, the log shows `claude calls Glob` and no `claude: permission denied for` line naming Glob or Edit under `dontAsk`, and a lesson Claude Code adds to a wiki page lands in the file.
+- Rules sheet and wiki, once `strategy/rules.md` and `strategy/wiki/` are in: the API brain's "system prompt built" log line lists `rules.md`. With the subscription playing, the log shows `claude calls Glob` and no `claude: permission denied for` line naming Glob or Edit under `dontAsk`, and a lesson Claude Code writes for a wiki page lands in its pending file under `strategy/pending/` (held for review, see below).
 - Speech hold: when the bot says a line and moves on outside a fight (a map node, a reward, an event option), the move comes 1.5 to 3 s after the line, and the bubble can be read before the room changes. In a fight it plays on at once.
+
+## Thinking summaries, fight log, refreshes and held lessons (2026-10-11)
+
+Written and unit tested on Linux; the only game-side change is one more argument in `Game/BrainWiring.cs`. To check on the Mac:
+
+- Thinking summaries: after a few API turns, today's transcript (`~/.config/spiremind/transcripts/<date>.jsonl`) has a `thinking` list on most lines, a few plain sentences on why the move was made. No 400 naming `thinking` or `display` in the log. The same responses' `content` still has the thinking blocks with their `signature`, and the next request isn't refused (blocks sent back as received).
+- Fight log: after a hallway fight and its rewards, `~/.config/spiremind/fights.jsonl` has one `"kind": "fight"` line with the right floor, enemies, HP before and after (the rewards screen's, after Burning Blood), turns, any potion used, the effort, and a `spent_usd` close to what `/budget` grew by over the fight. An elite fight's line says `"effort": ["high"]` and `"conversations": 1` (the fresh conversation at high). A lost run's last fight says `"result": "lost"`. At the floor 16 rest site one `"kind": "deck"` line appears. A bot copy writes its own `~/.config/spiremind/bot-<port>/fights.jsonl`.
+- Refresh in fights: a long fight that passes 150k prompt tokens logs "the fresh conversation waits until the fight is over" once, and the next "starting a fresh conversation" line names the rewards (or game over) screen, not combat. That fight's line in fights.jsonl has `"refreshes": 0`.
+- Held lessons: when the API brain appends a lesson, the wiki page and `strategy/learned.md` don't change; the line shows up in `strategy/pending/wiki/<path>` or `strategy/pending/learned.md` under `# Held for review: ...`, in the form `- (Ironclad, 2026-10-11, 2026-10-11 A1 F7) ...`. The next run's "system prompt built" line and prompt don't include it. A refused append (wrong form) shows in the transcript as an error with the form in it, and the bot's retry lands in the pending file. With the subscription playing, Claude Code writes its lessons to the same pending files (play.md says so) and no `claude: permission denied for` line names Edit on `strategy/pending/`.
 
 ## Co-op from the human window (to check in game)
 

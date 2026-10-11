@@ -67,6 +67,8 @@ internal static class BrainWiring
             var initial = LoadSettings();
             var spend = new SpendTracker(role.SharedConfigDir, line => warn($"brain: {line}"), role.InstanceId);
             var transcript = new Transcript(initial.ConfigDir, warn);
+            // One line per fight, in this copy's own folder like the transcripts.
+            var fights = new FightLog(initial.ConfigDir, warn);
             // A bot copy keeps its own run journal; the shared notes are locked across copies, and
             // a bot copy reads a wiki page before it replaces one (another copy may have written it).
             var notesOptions = new NotesOptions
@@ -103,7 +105,8 @@ internal static class BrainWiring
                         recentChat: () => RecentChat(chat),
                         announce: line => chat.Announce(line),
                         log: info,
-                        blocked: blocked);
+                        blocked: blocked,
+                        fights: fights);
                 },
                 createSubscription: settings =>
                 {

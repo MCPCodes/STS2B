@@ -9,7 +9,9 @@ namespace SpireMind.Core.Brain;
 /// The brain's conversations as JSON lines in <c>&lt;dir&gt;/transcripts/&lt;yyyy-MM-dd&gt;.jsonl</c>
 /// (UTC dates), for debugging and tuning. <see cref="ApiBrain"/> writes one line per exchange:
 /// the messages added since the previous line of that conversation (never the system text or
-/// the tools, which are the same every time), the response content, usage and cost. A failure
+/// the tools, which are the same every time), the response content, usage and cost, and a
+/// <c>thinking</c> list with the text of the response's thinking blocks (the summaries the API
+/// returns with <c>display: "summarized"</c>, see <see cref="ThinkingSummaries"/>). A failure
 /// to write is logged and never thrown, so a full disk can't stop the bot. Safe to call from
 /// any thread.
 /// </summary>
@@ -33,6 +35,17 @@ public sealed class Transcript
 
     /// <summary>The file today's lines go to.</summary>
     public string CurrentPath => Path.Combine(_dir, $"{_clock():yyyy-MM-dd}.jsonl");
+
+    /// <summary>The non-empty text of each thinking block in <paramref name="content"/>, in order:
+    /// the model's own summary of why it made its move. Empty when thinking was omitted (an
+    /// empty string with only a signature) or there was none. The blocks themselves aren't touched;
+    /// they go back into the conversation exactly as received.</summary>
+    public static IReadOnlyList<string> ThinkingSummaries(JsonArray content) =>
+        content.OfType<JsonObject>()
+            .Where(b => b["type"] is JsonValue t && t.TryGetValue<string>(out var type) && type == "thinking")
+            .Select(b => b["thinking"] is JsonValue v && v.TryGetValue<string>(out var text) ? text.Trim() : "")
+            .Where(text => text.Length > 0)
+            .ToArray();
 
     /// <summary>Append one line. An "at" timestamp (UTC, ISO 8601) goes first when the entry
     /// has none. The entry isn't changed or kept.</summary>
