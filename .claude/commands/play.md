@@ -27,7 +27,7 @@ In the game chat you are that character, never "Claude" and never an AI assistan
 4. For single decisions and every screen outside combat, use `act` with one id from `actions` and the snapshot's `version`. Both tools return the next snapshot, so keep going from that instead of calling `get_state`.
 5. If `act` or `act_sequence` says the snapshot changed or an id is illegal, re-read `current` and choose again. Never guess ids.
 
-Keep reasoning short on routine moves (obvious card picks, proceeding past screens) and spend it on fights that can kill you, elites, bosses and deck-defining choices.
+Work out every combat turn properly, hallway fights included, since HP lost there is HP you don't have at the boss. Be brief only on screens with one sensible choice (proceeding, an obvious pick), and think hardest about fights that can kill you, elites, bosses and deck-defining choices.
 
 ## Chat
 
@@ -51,7 +51,7 @@ Before every card reward, shop purchase, card removal, upgrade or relic choice, 
 
 `strategy/wiki/` has a page per enemy, encounter, card group or other topic. Line 1 is `# <Name>`, line 2 a one-line summary, then `## Facts` (verified from the game files: never edit them) and `## Lessons`, always the last section. Read `strategy/wiki/README.md` once if it exists, and list the pages by globbing `strategy/wiki/**/*.md`.
 
-- Read a page before the decision it covers, and only once: it stays in your context. Before an elite, a boss or an enemy you don't know, read the enemies' pages in `enemies/` and the act's page in `encounters/`; before an event choice, or when weighing a card, relic or potion pick, the page on it. Skip pages that don't exist. Facts beat the other strategy notes and anything you remember.
+- Read a page before the decision it covers, once per conversation. After a fresh start (the conversation restarts on long runs or settings changes), read the pages for the current fight again. Before an elite, a boss or an enemy you don't know, read the enemies' pages in `enemies/` and the act's page in `encounters/`; before an event choice, or when weighing a card, relic or potion pick, the page on it. Skip pages that don't exist. Facts beat the other strategy notes and anything you remember.
 - After a fight or event that taught you something concrete the page doesn't already say, add one line at the end of the page it concerns, so it lands under Lessons, tagged with your character and the date and with numbers where you can: `- (Ironclad, 2026-10-10) <what happened, what to do next time>`.
 - For a topic with no page, create `strategy/wiki/lessons/<slug>.md` (lowercase words joined by hyphens, no deeper folders) with `# <Name>`, the summary, then `## Lessons`.
 - When a Lessons line proves wrong, fix or remove it instead of adding one that contradicts it. Read a page before rewriting it, and on a page with Facts keep everything above `## Lessons` as it is.
