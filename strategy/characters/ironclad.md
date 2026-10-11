@@ -24,7 +24,7 @@
 - Exact card numbers and upgrades: strategy/wiki/cards/ironclad.md
 ### 1. Vulnerable / Strength (most common winning core)
 - **Vulnerable sources:**
-  - Tremble (common, 1 cost: 3 (4) Vulnerable, Exhaust). About a Strike in an average deck (pick values); it rises with Vulnerable payoffs.
+  - Tremble (common, 1 cost: 3 (4) Vulnerable, Exhaust). An elite pick early.
   - Taunt (7 (8) Block + 1 (2) Vulnerable).
   - Molten Fist (10 damage, doubles Vulnerable, Exhaust).
   - Uppercut. Bash or Break.
@@ -70,7 +70,7 @@
 
 ## Packages to count
 Count these in `player.deck` before every pick (general.md 12); upgraded copies count. Thresholds: general.md 12, unless a package sets its own.
-- strategy/wiki/cards/ironclad-pick-values.md gives each card's worth in an average deck; add the packages on top. Measured synergy tables in strategy/wiki/cards/, where there are any, beat the counts here.
+- strategy/wiki/cards/ironclad-pick-values.md measures each card in single fights with an average deck, and synergy tables there will do the same per package: a guide to weigh with the packages on top, not a rule, until whole runs test them.
 - **Strength**: Inflame, Demon Form, Dominate, Rupture, Brand, Fight Me; Brimstone, Red Skull, Ruined Helmet, Vajra, Shuriken. Setup Strike counts on its own turn only.
   - Payoffs: each Strength adds 1 to every hit. Hits: Twin Strike 2, Thrash 2, Fight Me 2, Sword Boomerang 3 (4), Conflagration 4 (5) to ALL, Whirlwind X to ALL, Spite 2 (3) after HP loss that turn, Dismantle 2 against Vulnerable, Tear Asunder 1 + 1 per HP loss, Fiend Fire 1 per card exhausted. One-Two Punch and Anger add hits.
   - At 4 Strength: Sword Boomerang 3 x 7 = 21, Twin Strike 2 x 9 = 18, Strike 10. Flat damage (Inferno, Juggernaut, Flame Barrier) ignores Strength; Perfected Strike, Ashen Strike and Body Slam add it once.
@@ -88,13 +88,13 @@ Count these in `player.deck` before every pick (general.md 12); upgraded copies 
 
 ## Draft priorities
 - **Early (Act 1):**
-  - Damage: Bludgeon, Breakthrough, Twin Strike, Sword Boomerang, Headbutt, Anger, Molten Fist.
+  - Damage: Tremble (Vulnerable only, no damage itself), Bludgeon, Breakthrough, Twin Strike, Sword Boomerang, Headbutt, Anger, Molten Fist.
   - Block: Shrug It Off, Colossus, Impervious.
   - Draw: Battle Trance (the first copy is almost always good), Pommel Strike (draw-positive only when upgraded).
   - AoE for multi-enemy fights: Thunderclap, Whirlwind, Conflagration.
-- **Premium any time:** Offering, Demon Form, Dominate, Inferno, Crimson Mantle, Primal Force.
-- **Premium once their package is there** (Packages to count): Cruelty, Dark Embrace, Fiend Fire, Pact's End, Burning Pact, Unmovable.
-- **Upgrade first:** Bash or Break, Pommel Strike, Body Slam (0 cost), Offering (draw 5), Demon Form. Then an upgrade that adds a hit, a Vulnerable stack or Strength to your package (Packages to count); then the largest Up on the pick values page, judging (?) cards yourself.
+- **Premium any time:** Offering, Demon Form, Dominate, Impervious, Inferno, Crimson Mantle, Burning Pact, Primal Force (situational).
+- **Premium once their package is there** (Packages to count): Cruelty, Dark Embrace, Fiend Fire, Pact's End, Unmovable.
+- **Upgrade first:** Bash or Break, Pommel Strike, Body Slam (0 cost), Burning Pact, Offering (draw 5), Demon Form, Shrug It Off. Then an upgrade that adds a hit, a Vulnerable stack or Strength to your package (Packages to count).
 
 ## Traps
 - Barricade or Body Slam without a block engine.
