@@ -1,5 +1,6 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json.Nodes;
+using SpireMind.Game.Coop;
 
 // Same namespace as ScreenRouter, which refers to the readers unqualified.
 namespace SpireMind.Game;
@@ -16,6 +17,11 @@ namespace SpireMind.Game;
 /// Actions: "open", "relic:&lt;n&gt;" for state.relics[n] while we haven't picked, "proceed",
 /// and the out-of-combat potion actions alongside any of them. The relics are listed only once
 /// the chest is open, as a human sees them.
+///
+/// Co-op: the pick is a vote, and nobody gets a relic or can leave until every player has
+/// opened their own chest and voted. The state shows who voted for which relic and a "vote"
+/// block with the award rules; the reader lets the human pick first for a while
+/// (<see cref="CoopManners.Relic"/>), and offers a pick again when the game never got the click.
 /// </summary>
 internal sealed class TreasureReader : IScreen
 {
@@ -134,9 +140,12 @@ internal sealed class TreasureReader : IScreen
         var relics = ReadRelics(room, chest);
         Observe(room, relics);
         CheckPickStall(ctx, me, relics, now);
+        CheckCoopPick(ctx, me, now);
 
         var chestOpen = ChestOpen(chest, relics);
         var state = BuildState(ctx, rs, me, relics, chestOpen);
+        // Co-op: who voted for what, and whether to let the human pick first. Null in a solo run.
+        var round = CoopRound(ctx, me, relics, state, now);
 
         string? waiting = null;
         var actions = new List<LegalAction>();
@@ -144,16 +153,24 @@ internal sealed class TreasureReader : IScreen
         {
             waiting = "entering the treasure room";
         }
+        else if (Teammates.RoomClosed(ctx) is { } closed)
+        {
+            waiting = closed;
+        }
         else
         {
             if (CanOpen(chest, chestOpen))
                 actions.Add(new LegalAction("open", "Open the chest"));
 
+            string? holding = null;
             if (CanPick(me, now))
             {
-                foreach (var r in relics)
-                    if (r.Enabled && !Clicks.RecentlyClicked(r.Holder))
-                        actions.Add(new LegalAction($"relic:{r.N}", ctx.IsMultiplayer ? $"Pick relic {r.Name} (co-op vote)" : $"Take relic {r.Name}"));
+                if (round is { Move: CoopManners.RelicMove.WaitForHuman })
+                    holding = round.Line;
+                else
+                    foreach (var r in relics)
+                        if (r.Enabled && !Clicks.RecentlyClicked(r.Holder))
+                            actions.Add(new LegalAction($"relic:{r.N}", ctx.IsMultiplayer ? $"Pick relic {r.Name} (co-op vote{round?.Contested(r)})" : $"Take relic {r.Name}"));
             }
 
             if (CanClick(room.ProceedButton) && ProceedSafe(ctx, me, chest, relics, now))
@@ -163,7 +180,7 @@ internal sealed class TreasureReader : IScreen
             if (actions.Count > 0)
                 actions.AddRange(PotionActions.Legal(ctx, false));
             else
-                waiting = IdleReason(ctx, me, chest, chestOpen, relics, now);
+                waiting = holding ?? IdleReason(ctx, me, chest, chestOpen, relics, now);
         }
 
         if (waiting is not null)
@@ -174,6 +191,9 @@ internal sealed class TreasureReader : IScreen
 
     public ActionResult Execute(GameContext ctx, Node? node, string actionId)
     {
+        if (Teammates.RoomClosed(ctx) is { } closed)
+            return ActionResult.Fail($"Not now: {closed}.");
+
         if (PotionActions.TryExecute(ctx, actionId, false, out var potionResult))
             return potionResult;
 
@@ -395,6 +415,106 @@ internal sealed class TreasureReader : IScreen
         _picked = null;
     }
 
+    // ---------- co-op: the relic vote ----------
+
+    /// <summary>A co-op pick with no vote of ours in the game after this long never reached it (the holder ignored the click).</summary>
+    private static readonly TimeSpan CoopPickLost = TimeSpan.FromSeconds(3);
+
+    /// <summary>How long we have let the humans pick first in this room.</summary>
+    private static readonly CoopManners.WaitClock PickWait = new();
+
+    /// <summary>What the relic vote looks like right now, and what a polite bot does about it.</summary>
+    private sealed record Round(CoopManners.RelicMove Move, string Line, Dictionary<int, List<string>> OtherVoters)
+    {
+        /// <summary>Label suffix for a relic another player has already voted for.</summary>
+        public string Contested(RelicView r) =>
+            OtherVoters.TryGetValue(r.Holder.Index, out var names) && names.Count > 0
+                ? $"; {string.Join(", ", names)} voted for it, so a random fight decides and the loser gets a relic nobody took"
+                : "";
+    }
+
+    /// <summary>
+    /// Reads every player's relic vote while the game is taking votes, writes them into the
+    /// state (relics[n].votes and the "vote" block) and decides whether the bot picks now or
+    /// lets the human go first. Null in a solo run, before the relics show, once voting has
+    /// closed, or when the read failed: the pick is then offered as before. The vote list only
+    /// exists while CurrentRelics is set (it holds the last room's votes otherwise). Read-only,
+    /// the same on host and client.
+    /// </summary>
+    private static Round? CoopRound(GameContext ctx, Player me, List<RelicView> relics, JsonObject state, DateTime now)
+    {
+        if (!Teammates.Active(ctx) || relics.Count == 0) return null;
+        return Teammates.Safe<Round?>("the relic votes", null, () =>
+        {
+            if (RunManager.Instance?.TreasureRoomRelicSynchronizer is not { CurrentRelics: not null } sync) return null;
+
+            var players = Teammates.All(ctx);
+            var voters = new Dictionary<int, List<string>>();
+            var otherVoters = new Dictionary<int, List<string>>();
+            var missing = new List<string>();
+            // "Humans" are the players we let pick first: the humans, on a bot's copy.
+            int humans = 0, humansVoted = 0;
+            foreach (var m in players)
+            {
+                var vote = sync.GetPlayerVote(m.Player);
+                if (m.Followed) humans++;
+                if (!vote.voteReceived)
+                {
+                    missing.Add(m.IsMe ? "you" : m.Label);
+                    continue;
+                }
+                if (m.Followed) humansVoted++;
+                if (vote.index is not { } index) continue; // a skip: no relic for them
+                Add(voters, index, m.IsMe ? "you" : m.Label);
+                if (!m.IsMe) Add(otherVoters, index, m.Label);
+            }
+
+            foreach (var r in relics)
+            {
+                if (!voters.TryGetValue(r.Holder.Index, out var names)) continue;
+                r.Json["votes"] = new JsonArray(names.Select(n => (JsonNode)n).ToArray());
+            }
+
+            var mine = _picked is not null || MyVoteIn(me);
+            var waiting = !mine && humansVoted < humans;
+            var move = CoopManners.Relic(mine, humans, humansVoted,
+                PickWait.Tick(((object?)_roomModel, _roomId), waiting && CanPick(me, now), now), CoopManners.Patience);
+            var who = Teammates.Names(players.Where(m => m.Followed));
+            var line = CoopManners.RelicLine(move, who, humansVoted > 0);
+
+            var json = new JsonObject
+            {
+                ["rule"] = CoopManners.RelicRule,
+                ["voted"] = CoopManners.Count(players.Count - missing.Count, players.Count, "have voted", missing),
+            };
+            if (move == CoopManners.RelicMove.PickAround) json["do"] = line;
+            state["vote"] = json;
+            return new Round(move, line, otherVoters);
+        });
+
+        static void Add(Dictionary<int, List<string>> into, int index, string name)
+        {
+            if (!into.TryGetValue(index, out var list)) into[index] = list = new List<string>();
+            list.Add(name);
+        }
+    }
+
+    /// <summary>
+    /// Co-op: a pick the game holds no vote for was never cast. The click goes through the
+    /// holder's own handler, which returns the vote at once even before the host's echo, so no
+    /// vote of ours while voting is open means the holder ignored the click (it does while its
+    /// fly-in plays). Forgetting the pick offers the relics again; without it the bot would
+    /// wait for teammates who are waiting for it.
+    /// </summary>
+    private static void CheckCoopPick(GameContext ctx, Player me, DateTime now)
+    {
+        if (_picked is not { } picked || !Teammates.Active(ctx) || now - _pickedAt < CoopPickLost) return;
+        if (!VotingOpen() || MyVoteIn(me)) return;
+
+        ModEntry.Log($"coop: the vote for {picked} never reached the game; offering the relics again");
+        _picked = null;
+    }
+
     // ---------- reading ----------
 
     private static string IdleReason(GameContext ctx, Player me, NClickableControl? chest, bool chestOpen, List<RelicView> relics, DateTime now)
@@ -529,7 +649,12 @@ internal sealed class TreasureReader : IScreen
             if (_pickingDone is { } task) state["relic_awarded"] = task.IsCompleted;
         }
 
-        if (ctx.IsMultiplayer && relics.Count > 0)
+        if (Teammates.Team(ctx) is { } team)
+        {
+            state["team"] = team;
+            state["co_op"] = Teammates.RoomNote(ctx, CoopManners.TreasureNote);
+        }
+        else if (ctx.IsMultiplayer && relics.Count > 0)
             state["co_op"] = "each player picks one relic; teammates' picks aren't read by the bot";
 
         state["player"] = player;

@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json.Nodes;
+using SpireMind.Game.Coop;
 
 // Same namespace as ScreenRouter, which refers to the readers unqualified.
 namespace SpireMind.Game;
@@ -23,6 +24,12 @@ namespace SpireMind.Game;
 /// buttons; the bot can only leave it through its own proceed button. A fight the event starts
 /// belongs to the combat reader; when it pops back to the event, the room node is fetched again
 /// rather than trusting the one the router saw before the fight.
+///
+/// Co-op: a shared event is a vote on every page, read by <see cref="ReadRound"/>: who voted for
+/// what, whom to follow (<see cref="CoopManners.Vote"/>), and which options would kill a teammate
+/// (never offered: the winning option is applied to everyone). A standing vote can be changed
+/// until the page is decided; no potion is offered or used once it is in. A per-player event
+/// only gets the team and a "co_op" line.
 /// </summary>
 internal sealed class EventReader : IScreen
 {
@@ -71,7 +78,7 @@ internal sealed class EventReader : IScreen
         public bool Offered => Refusal is null;
     }
 
-    private sealed record EventView(NEventRoom Room, EventModel Event, Page Page, string Title, string Body, bool Ancient, bool DialogueDone, List<OptionView> Options);
+    private sealed record EventView(NEventRoom Room, EventModel Event, Page Page, string Title, string Body, bool Ancient, bool DialogueDone, List<OptionView> Options, SharedRound? Round = null);
 
     /// <summary>What an option shows beyond its own text (an Ancient's relic, cards in its hover tips); read once per page.</summary>
     private sealed record Extras(RelicModel? Relic, JsonObject? RelicJson, JsonArray? Cards);
@@ -145,10 +152,11 @@ internal sealed class EventReader : IScreen
                 if (o.Offered) actions.Add(new LegalAction($"option:{o.N}", o.Label));
 
             // Potion actions alone are not an event decision; they ride along with the options.
-            if (actions.Count > 0)
-                actions.AddRange(PotionActions.Legal(ctx, false));
-            else
+            // Co-op: not once our vote on a shared page is in (CoopManners.VoteBeforePotion).
+            if (actions.Count == 0)
                 waiting = NothingOffered(view);
+            else if (!OwnVoteIn(ctx))
+                actions.AddRange(PotionActions.Legal(ctx, false));
         }
 
         var state = BuildState(ctx, rs, me, view);
@@ -160,6 +168,14 @@ internal sealed class EventReader : IScreen
 
     public ActionResult Execute(GameContext ctx, Node? node, string actionId)
     {
+        if (Teammates.RoomClosed(ctx) is { } closed)
+            return ActionResult.Fail($"Not now: {closed}.");
+        // Co-op: a potion goes out before our vote on a shared page, never after it. The page is
+        // decided the instant the last vote lands, and an option that starts a fight would then
+        // meet the potion (a non-fight action) while the fight is being set up (votes.md 0.2 item 12).
+        if (!actionId.StartsWith("option:", StringComparison.Ordinal) && OwnVoteIn(ctx))
+            return ActionResult.Fail($"Not now: {CoopManners.VoteBeforePotion}.");
+
         if (PotionActions.TryExecute(ctx, actionId, false, out var potionResult))
             return potionResult;
 
@@ -221,6 +237,27 @@ internal sealed class EventReader : IScreen
         if (!click.Ok)
             return click;
 
+        if (vote && view.Round is { } round)
+        {
+            // The click records our vote in the game at once; on a client it stays until the
+            // host decides the page. On the host a vote that completes the page is cleared again
+            // inside the click, so finding none says nothing there.
+            var cast = OwnVoteIn(ctx) || ctx.NetType != NetGameType.Client;
+            if (cast)
+            {
+                // If the host votes after us it may decide the page; see ReadRound on its phantom vote.
+                if (round.HumanMissing) _votedBeforeHuman = true;
+                // From here on, our vote gone again with the page still up means the page was
+                // decided. Set here and not left to the next poll: when our vote is the last one
+                // (the usual case when following) the decision is back before that poll runs.
+                _hadMyVote = true;
+                _decidedAt = null;
+            }
+            ModEntry.Log(cast
+                ? $"coop: voted for {o.Title} in the shared event ({round.Voted} before this vote)"
+                : $"coop: the click on {o.Title} left no vote in the game (the button refused it); the options are offered again");
+        }
+
         // A vote changes nothing here until teammates vote; Capture reports that wait from the game's own vote record.
         var waitsOnTeam = vote;
         ActionTracker.Begin(
@@ -248,6 +285,8 @@ internal sealed class EventReader : IScreen
     {
         if (ActionTracker.Pending is { } pending)
             return $"resolving {pending}";
+        if (Teammates.RoomClosed(ctx) is { } closed)
+            return closed;
 
         if (ReferenceEquals(_runEndVoteFor, view.Event))
             return ctx.IsMultiplayer ? "ready to end the run; waiting for teammates" : "ending the run";
@@ -261,9 +300,19 @@ internal sealed class EventReader : IScreen
             _leftAt = null;
         }
 
+        // Co-op manners decide a shared page: wait for the human's vote, keep ours, or act.
+        if (view.Round is { } round)
+        {
+            if (round.Decided)
+                return "the vote is decided; waiting for the next page";
+            if (!round.Advice.Decision)
+                return round.Advice.Move == CoopManners.VoteMove.WaitForHuman && CoopManners.Patience != TimeSpan.MaxValue
+                    ? $"{round.Line} (the bot votes on its own after {CoopManners.Patience.TotalSeconds:0} s)"
+                    : round.Line;
+        }
         // The game keeps our vote until the host picks for everyone, however long teammates take;
         // clicking again would only send it again.
-        if (VotedFor(ctx, view) is { } voted)
+        else if (VotedFor(ctx, view) is { } voted)
             return $"voted for {voted}; waiting for teammates' votes";
 
         if (now - _firstSeen < Settle)
@@ -325,9 +374,11 @@ internal sealed class EventReader : IScreen
         var models = page.Finished && page.Options.Count == 0 ? buttons.Select(b => b.Option).ToList() : page.Options;
         var matched = MatchButtons(models, buttons);
         var vote = IsVote(ctx, ev);
+        // A finished event's page holds only the room's own Leave, which is local: nothing to vote on.
+        var round = vote && !page.Finished && models.Any(o => !o.IsProceed) ? ReadRound(ctx, ev, page, models.Count) : null;
         var options = new List<OptionView>();
         for (var i = 0; i < models.Count; i++)
-            options.Add(View(i, models[i], matched[i], ev, ancient, !dialogueDone, vote));
+            options.Add(View(i, models[i], matched[i], ev, ancient, !dialogueDone, vote, round));
 
         // A custom-layout event (FakeMerchant) draws its own scene without option buttons.
         if (layout is null && room.CustomEventNode is Node custom)
@@ -335,10 +386,10 @@ internal sealed class EventReader : IScreen
 
         var body = page.Body.Length > 0 ? page.Body : LayoutText(room);
         var title = Describe.SafeText(() => ev.Title);
-        return new EventView(room, ev, page, title, body, ancient, dialogueDone, options);
+        return new EventView(room, ev, page, title, body, ancient, dialogueDone, options, round);
     }
 
-    private static OptionView View(int n, EventOption option, NEventOptionButton? button, EventModel ev, bool ancient, bool talking, bool vote)
+    private static OptionView View(int n, EventOption option, NEventOptionButton? button, EventModel ev, bool ancient, bool talking, bool vote, SharedRound? round = null)
     {
         var title = Describe.SafeText(() => option.Title);
         var text = Describe.SafeText(() => option.Description);
@@ -352,6 +403,11 @@ internal sealed class EventReader : IScreen
         var endsRun = ev is TheArchitect && !option.IsProceed && key == ProceedKey;
         var extras = ExtrasOf(n, option, title, text, ancient);
         var name = title.Length > 0 ? title : text.Length > 0 ? Shorten(text) : $"option {n}";
+
+        // Co-op shared page: who this option would kill or do nothing for, and whether our vote is on it.
+        var killsTeam = !leave && !special && round is not null && round.Kills.TryGetValue(n, out var dead) ? string.Join(", ", dead) : null;
+        var lockedFor = !leave && !special && round is not null && round.LockedFor.TryGetValue(n, out var shut) ? string.Join(", ", shut) : null;
+        var mine = !leave && !special && round?.Mine == n;
 
         // note: a lasting reason shown in the state; refusal: why it can't be chosen right now.
         string? note = null;
@@ -372,6 +428,22 @@ internal sealed class EventReader : IScreen
             // In co-op the button refuses it anyway (a thought bubble); alone it would end the run.
             note = "would kill you; not offered";
             refusal = $"{name} would kill you.";
+        }
+        else if (killsTeam is not null)
+        {
+            // The winning option is applied to every player, and only the clicker is refused.
+            note = $"would kill {killsTeam}; not offered";
+            refusal = $"{name} would kill {killsTeam}.";
+        }
+        else if (lockedFor is not null)
+        {
+            // It would do nothing for them while the page moves on for everyone.
+            note = $"locked for {lockedFor}; not offered";
+            refusal = $"{name} is locked for {lockedFor}.";
+        }
+        else if (mine)
+        {
+            refusal = $"Your vote is already on {name}.";
         }
         else if (button is null)
         {
@@ -399,6 +471,12 @@ internal sealed class EventReader : IScreen
                 ? $"{(vote ? "Vote for" : "Take")} {(relic.Length > 0 ? relic : name)}"
                 : $"{(vote ? "Vote for" : "Choose")} {name}";
             if (endsRun) label += " (ends the run)";
+            if (round is not null)
+            {
+                if (round.Mine is not null) label = $"Change your vote to {name}";
+                if (round.Theirs == n) label += $" (follows {round.Who}: unanimous, so certain)";
+                else if (round.Theirs is not null) label += $" (against the vote of {round.Who}: the host draws between the votes)";
+            }
         }
 
         var json = new JsonObject { ["n"] = n, ["title"] = name };
@@ -406,12 +484,213 @@ internal sealed class EventReader : IScreen
         if (leave) json["leave"] = true;
         if (locked) json["locked"] = true;
         if (kills) json["will_kill_player"] = true;
+        if (killsTeam is not null) json["will_kill"] = killsTeam;
+        if (round is not null && round.Voters.TryGetValue(n, out var voters))
+            json["votes"] = new JsonArray(voters.Select(v => (JsonNode)v).ToArray());
+        if (round is not null && round.Unconfirmed.TryGetValue(n, out var maybe))
+            json["unconfirmed_votes"] = new JsonArray(maybe.Select(v => (JsonNode)v).ToArray());
         if (extras.RelicJson is { } relicJson) json["relic"] = relicJson.DeepClone();
         if (extras.Cards is { } cards) json["cards"] = cards.DeepClone();
         if (endsRun) note ??= "ends the run; in co-op once every player has chosen it";
         if (note is not null) json["note"] = note;
 
-        return new OptionView(n, option, button, name, locked, leave, special, kills, endsRun, label, refusal, json);
+        return new OptionView(n, option, button, name, locked || lockedFor is not null, leave, special, kills || killsTeam is not null, endsRun, label, refusal, json);
+    }
+
+    // ---------- co-op: a shared event's vote ----------
+
+    /// <summary>How long we have waited for a human to vote first on the current page.</summary>
+    private static readonly CoopManners.WaitClock PageWait = new();
+
+    /// <summary>The event and page the fields below belong to.</summary>
+    private static EventModel? _roundEvent;
+    private static string _roundPage = "";
+
+    /// <summary>On the current page we voted while a human had not, so that human may be the last to vote.</summary>
+    private static bool _votedBeforeHuman;
+
+    /// <summary>Human votes not to trust on the current page, by NetId: see <see cref="ReadRound"/>.</summary>
+    private static readonly Dictionary<ulong, uint> Suspect = new();
+
+    /// <summary>Our vote was in on the current page. Gone again with the page still up, the page has been decided.</summary>
+    private static bool _hadMyVote;
+
+    /// <summary>When the current page was first seen decided.</summary>
+    private static DateTime? _decidedAt;
+
+    /// <summary>
+    /// The next page follows a decision within a second or two. Past this the same page is
+    /// still up (the chosen option failed, and the table has to vote again), and holding the
+    /// vote back any longer would block the group.
+    /// </summary>
+    private static readonly TimeSpan DecidedHold = TimeSpan.FromSeconds(6);
+
+    /// <summary>One shared page's vote as read just now. Option numbers are indexes on the page.</summary>
+    /// <param name="Decided">The host has drawn, but this screen still shows the old page.</param>
+    /// <param name="Unconfirmed">Human votes held back as possible leftovers from the page before, by the option they are on.</param>
+    private sealed record SharedRound(
+        CoopManners.VoteAdvice Advice, string Line, int? Mine, int? Theirs, string Who, bool HumanMissing, string Voted, bool Decided,
+        Dictionary<int, List<string>> Voters, Dictionary<int, List<string>> Kills, Dictionary<int, List<string>> LockedFor,
+        Dictionary<int, List<string>> Unconfirmed);
+
+    /// <summary>
+    /// Reads a shared page's votes and what a polite bot does about them; null when the read
+    /// failed (the plain "vote, then wait" flow answers then). Read-only, the same on host and
+    /// client, and only called while the event room is up: the lists behind these getters hold
+    /// the previous event afterwards and throw before the run's first one.
+    ///
+    /// Two things only a client sees are handled here. A vote whose index has no button on
+    /// this page is never followed. And the host's phantom: when the host's own click decides
+    /// a page, its vote message reaches a client after the decision and is filed under the new
+    /// page, so the host seems to have voted there already (votes.md 4.2). That can only
+    /// happen when the host voted after us, so a human vote that is already there when a new
+    /// page first shows, after a page on which we voted before them, is not followed until it
+    /// changes; if it never does, the wait for the human runs out and the bot votes for itself.
+    /// Such a vote can also be a real one (the human voted on the new page before this reader
+    /// first saw it), which nothing here can tell apart, so it is shown as unconfirmed
+    /// (options[n].unconfirmed_votes, vote.unconfirmed) for the model to weigh or ask about.
+    ///
+    /// A page with a single option is voted on at once: there is nothing to follow there.
+    /// </summary>
+    private static SharedRound? ReadRound(GameContext ctx, EventModel ev, Page page, int optionCount) =>
+        !Teammates.Active(ctx) ? null : Teammates.Safe<SharedRound?>("the shared event votes", null, () =>
+        {
+            if (RunManager.Instance?.EventSynchronizer is not { } sync) return null;
+
+            var players = Teammates.All(ctx);
+            var newPage = false;
+            if (!ReferenceEquals(ev, _roundEvent))
+            {
+                _roundEvent = ev;
+                _roundPage = page.Key;
+                _votedBeforeHuman = false;
+                _hadMyVote = false;
+                _decidedAt = null;
+                Suspect.Clear();
+            }
+            else if (page.Key != _roundPage)
+            {
+                _roundPage = page.Key;
+                Suspect.Clear();
+                newPage = _votedBeforeHuman;
+                _votedBeforeHuman = false;
+                _hadMyVote = false;
+                _decidedAt = null;
+            }
+
+            var voters = new Dictionary<int, List<string>>();
+            var unconfirmed = new Dictionary<int, List<string>>();
+            var missing = new List<string>();
+            var humanVotes = new List<int?>();
+            int? mine = null;
+            var othersMissing = 0;
+            foreach (var m in players)
+            {
+                var raw = sync.GetPlayerVote(m.Player);
+                if (m.Followed && raw is { } seen)
+                {
+                    if (newPage)
+                    {
+                        Suspect[m.NetId] = seen;
+                        ModEntry.Log($"coop: {m.Label} already has a vote on the new event page; it may be the host's vote from the page before, so it is not followed");
+                    }
+                    else if (Suspect.TryGetValue(m.NetId, out var old) && old != seen)
+                    {
+                        Suspect.Remove(m.NetId);
+                    }
+                }
+                else if (m.Followed)
+                {
+                    Suspect.Remove(m.NetId);
+                }
+
+                var suspect = Suspect.ContainsKey(m.NetId);
+                int? index = raw is { } r && r < optionCount && !suspect ? (int)r : null;
+                var label = m.IsMe ? "you" : m.Label;
+                if (index is { } i) Add(voters, i, label);
+                else missing.Add(label);
+                // Held back, but shown: it may be real, and then a different vote of ours is a coin flip.
+                if (suspect && raw is { } held && held < optionCount) Add(unconfirmed, (int)held, label);
+
+                if (m.IsMe) mine = index;
+                else if (index is null) othersMissing++;
+                if (m.Followed) humanVotes.Add(index);
+            }
+
+            // Each player has their own copy of the event, and what kills or is locked can
+            // differ per player, so ask the teammate's own option.
+            var kills = new Dictionary<int, List<string>>();
+            var locked = new Dictionary<int, List<string>>();
+            foreach (var m in players)
+            {
+                if (m.IsMe) continue;
+                IReadOnlyList<EventOption> theirOptions;
+                try { theirOptions = sync.GetEventForPlayer(m.Player).CurrentOptions; }
+                catch { continue; }
+                for (var i = 0; i < optionCount && i < theirOptions.Count; i++)
+                {
+                    if (theirOptions[i] is not { } option) continue;
+                    try
+                    {
+                        if (option.WillKillPlayer?.Invoke(m.Player) == true) Add(kills, i, m.Label);
+                        if (option.IsLocked) Add(locked, i, m.Label);
+                    }
+                    catch
+                    {
+                        // An option that can't answer is treated as harmless, as for our own.
+                    }
+                }
+            }
+
+            // The votes are cleared the instant the host draws, about a second before this
+            // screen shows the next page. A click in that gap would vote on the new page with
+            // an index from the old one (votes.md 4.3), so the page counts as decided until it changes.
+            var now = DateTime.UtcNow;
+            if (mine is not null)
+            {
+                _hadMyVote = true;
+                _decidedAt = null;
+            }
+            var decided = mine is null && _hadMyVote;
+            if (decided && now - (_decidedAt ??= now) > DecidedHold)
+            {
+                ModEntry.Log($"coop: the event page did not change {DecidedHold.TotalSeconds:0} s after its vote was decided; offering the vote again");
+                _hadMyVote = false;
+                _decidedAt = null;
+                decided = false;
+            }
+
+            var humans = players.Where(m => m.Followed).ToList();
+            var noHumanVote = humanVotes.All(v => v is null);
+            var waited = PageWait.Tick((ev, page.Key), mine is null && noHumanVote, now);
+            // A page with one option has nothing to agree on, and nothing happens until every
+            // player has voted for it (the lone "Fight" after a shared choice): no waiting there.
+            var lone = optionCount == 1;
+            var advice = lone
+                ? new CoopManners.VoteAdvice(mine is null ? CoopManners.VoteMove.Free : CoopManners.VoteMove.Keep)
+                : CoopManners.Vote(new CoopManners.VoteFacts(
+                    Mine: mine,
+                    Humans: humanVotes,
+                    OthersMissing: othersMissing,
+                    WaitedForVote: waited,
+                    Patience: CoopManners.Patience));
+
+            var options = OptionsOf(ev);
+            string? Title(int? n) => n is { } k && k >= 0 && k < options.Count ? Describe.SafeText(() => options[k].Title) : null;
+            var who = Teammates.Names(humans);
+            return new SharedRound(
+                advice,
+                lone && mine is null ? CoopManners.LoneOptionLine : CoopManners.VoteLine(advice.Move, who, Title(advice.Option), Title(mine)),
+                mine, advice.Option, who,
+                humans.Count > 0 && humanVotes.Any(v => v is null),
+                CoopManners.Count(players.Count - missing.Count, players.Count, "have voted", missing),
+                decided, voters, kills, locked, unconfirmed);
+        });
+
+    private static void Add(Dictionary<int, List<string>> into, int index, string name)
+    {
+        if (!into.TryGetValue(index, out var list)) into[index] = list = new List<string>();
+        list.Add(name);
     }
 
     /// <summary>
@@ -509,6 +788,25 @@ internal sealed class EventReader : IScreen
         foreach (var o in view.Options) options.Add(o.Json);
         state["options"] = options;
         if (VotedFor(ctx, view) is { } voted) state["voted"] = voted;
+        if (view.Round is { } round)
+        {
+            var vote = new JsonObject { ["rule"] = CoopManners.EventRule, ["voted"] = round.Voted };
+            var following = round.Advice.Move is CoopManners.VoteMove.Follow or CoopManners.VoteMove.Switch;
+            var theirs = round.Theirs is { } k && k < view.Options.Count ? view.Options[k] : null;
+            if (theirs is { Offered: true }) vote["follow"] = $"option:{theirs.N}";
+            if (following && theirs is { Offered: false } && (theirs.Locked || theirs.Kills || theirs.Special))
+                // The game would refuse the click (it kills us, or is locked), so no vote would be cast.
+                vote["do"] = $"{round.Who} voted for {theirs.Title}, which the bot cannot take. Vote for another option and say so in chat.";
+            else if (round.Advice.Decision && !round.Decided)
+                vote["do"] = round.Line;
+            if (round.Unconfirmed.Count > 0)
+            {
+                var (at, names) = round.Unconfirmed.OrderBy(u => u.Key).Select(u => (u.Key, u.Value)).First();
+                vote["unconfirmed"] = CoopManners.UnconfirmedVote(
+                    string.Join(", ", names), at < view.Options.Count ? view.Options[at].Title : $"option {at}");
+            }
+            state["vote"] = vote;
+        }
 
         var player = Describe.PlayerRun(me, includeDeck: true);
         player.Remove("potions"); // replaced by the detailed slots below
@@ -516,7 +814,12 @@ internal sealed class EventReader : IScreen
         state["potions"] = PotionActions.Describe(ctx, false);
 
         // Everyone lives with a shared event's result, so teammates' HP matters to the vote.
-        if (ctx.IsMultiplayer && view.Event.IsShared && Describe.TeamHp(ctx.Teammates) is { Count: > 0 } team)
+        if (Teammates.Team(ctx) is { } coopTeam)
+        {
+            state["team"] = coopTeam;
+            if (!view.Event.IsShared) state["co_op"] = Teammates.RoomNote(ctx, CoopManners.EventNote);
+        }
+        else if (ctx.IsMultiplayer && view.Event.IsShared && Describe.TeamHp(ctx.Teammates) is { Count: > 0 } team)
             state["team"] = team;
         return state;
     }
@@ -632,6 +935,26 @@ internal sealed class EventReader : IScreen
     }
 
     private static bool IsVote(GameContext ctx, EventModel ev) => ctx.IsMultiplayer && ev.IsShared;
+
+    /// <summary>
+    /// Co-op only: our vote on the current shared page is in the game's record, where it stays
+    /// until the page is decided. False in a solo run, in a per-player event and when it can't
+    /// be read. Only asked while the event room is up (the record holds the last event's otherwise).
+    /// </summary>
+    private static bool OwnVoteIn(GameContext ctx)
+    {
+        if (!Teammates.Active(ctx) || ctx.Me is not { } me) return false;
+        try
+        {
+            return RunManager.Instance?.EventSynchronizer is { } sync
+                && sync.GetLocalEvent() is { IsShared: true }
+                && sync.GetPlayerVote(me) is not null;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     /// <summary>A fight the event started is up, or its room hasn't popped back yet; the combat and rewards readers have it.</summary>
     private static string? EventFight(GameContext ctx, RunState rs)

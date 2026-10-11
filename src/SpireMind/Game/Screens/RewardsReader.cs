@@ -1,5 +1,6 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json.Nodes;
+using SpireMind.Game.Coop;
 
 // Same namespace as ScreenRouter, which refers to the readers unqualified.
 namespace SpireMind.Game;
@@ -15,6 +16,11 @@ namespace SpireMind.Game;
 /// Actions: "reward:&lt;n&gt;" for state.rewards[n], "proceed", and the out-of-combat potion
 /// actions so a full potion belt can make room. A card reward's cards are listed only after
 /// we have opened it on this screen; before that a human sees just the button.
+///
+/// Co-op: rewards are per player and nobody waits here, so the state only adds the "team"
+/// list, a "co_op" line (what proceed does, who already waits on the map) and, on an act's
+/// last boss, "act_vote" with how many players have pressed proceed. Once our map vote is
+/// out the screen offers nothing: a claim made then can get this client kicked.
 /// </summary>
 internal sealed class RewardsReader : IScreen
 {
@@ -91,8 +97,10 @@ internal sealed class RewardsReader : IScreen
         var rewards = ReadRewards(screen, me);
         var leavesAct = LeavesAct(rs, screen);
         var state = BuildState(ctx, rs, me, rewards, leavesAct);
+        var coop = Teammates.Active(ctx);
+        if (coop) AddCoop(ctx, state, screen, leavesAct);
 
-        var waiting = WaitingReason(ctx, rs, rewards, leavesAct);
+        var waiting = Teammates.RoomClosed(ctx) ?? WaitingReason(ctx, rs, rewards, leavesAct);
         var actions = new List<LegalAction>();
         if (waiting is null)
         {
@@ -101,7 +109,13 @@ internal sealed class RewardsReader : IScreen
 
             var proceed = ProceedButton(screen);
             if (CanClick(proceed))
-                actions.Add(new LegalAction("proceed", ProceedLabel(ctx, proceed, leavesAct)));
+            {
+                var label = ProceedLabel(ctx, proceed, leavesAct);
+                // Leaving is the bot's own call; in co-op say what it leaves behind for good.
+                if (coop && CoopManners.UnclaimedWarning(rewards.Count(r => r.Enabled)) is { } warning)
+                    label += $" ({warning})";
+                actions.Add(new LegalAction("proceed", label));
+            }
 
             var potions = PotionActions.Legal(ctx, false).ToList();
             // Potion actions alone are only a decision when they can unblock a potion reward.
@@ -119,6 +133,9 @@ internal sealed class RewardsReader : IScreen
 
     public ActionResult Execute(GameContext ctx, Node? node, string actionId)
     {
+        if (Teammates.RoomClosed(ctx) is { } closed)
+            return ActionResult.Fail($"Not now: {closed}.");
+
         if (PotionActions.TryExecute(ctx, actionId, false, out var potionResult))
             return potionResult;
 
@@ -423,6 +440,42 @@ internal sealed class RewardsReader : IScreen
         if (leavesAct) state["proceed_ends_act"] = true;
         return state;
     }
+
+    /// <summary>
+    /// The co-op fields: the team, what proceed means here, and on an act's last boss how the
+    /// act-change vote stands. A rewards screen opened in the middle of a room (a shop relic,
+    /// a chest's extras) only closes itself, so it gets the team alone.
+    /// </summary>
+    private static void AddCoop(GameContext ctx, JsonObject state, NRewardsScreen screen, bool leavesAct)
+    {
+        if (Teammates.Team(ctx) is { } team) state["team"] = team;
+        if (Nodes.TryGetPrivate(screen, "_isTerminal") is false) return;
+
+        state["co_op"] = Teammates.RoomNote(ctx, leavesAct ? CoopManners.BossRewardsNote : CoopManners.RewardsNote);
+        if (leavesAct && ActVote(ctx) is { } vote) state["act_vote"] = vote;
+    }
+
+    /// <summary>
+    /// "1 of 2 players have voted to leave the act (still to come: you)". The per-player flags
+    /// are a private list of the synchronizer, indexed by player slot; only "is anyone else
+    /// still out" is public, which is the fallback. Read-only on host and client.
+    /// </summary>
+    private static string? ActVote(GameContext ctx) =>
+        Teammates.Safe<string?>("the act vote", null, () =>
+        {
+            if (RunManager.Instance?.ActChangeSynchronizer is not { } sync) return null;
+
+            var players = Teammates.All(ctx);
+            if (Nodes.TryGetPrivate(sync, "_readyPlayers") is IReadOnlyList<bool> ready && ready.Count == players.Count)
+            {
+                var missing = players.Where(m => !ready[m.Slot]).Select(m => m.IsMe ? "you" : m.Label).ToList();
+                return CoopManners.Count(players.Count - missing.Count, players.Count, "have voted to leave the act", missing);
+            }
+
+            return sync.IsWaitingForOtherPlayers()
+                ? "other players have not voted to leave the act yet"
+                : "every other player has voted to leave the act: your proceed changes the act at once";
+        });
 
     private static string ProceedLabel(GameContext ctx, NProceedButton proceed, bool leavesAct)
     {

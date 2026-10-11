@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using SpireMind.Game.Coop;
 using SpireMind.Patches;
 
 // Same namespace as ScreenRouter, which refers to the readers unqualified.
@@ -13,6 +14,14 @@ namespace SpireMind.Game;
 /// When a card or potion asks for cards from the hand (exhaust, discard, retain, upgrade...)
 /// the hand switches to select mode and the snapshot becomes "hand_select" with
 /// "select:&lt;i&gt;" and "confirm".
+///
+/// An enemy at 0 HP that the game keeps in the fight because it comes back is listed with
+/// "reviving" and its intent, and is never a target (<see cref="Reviving"/>).
+///
+/// In co-op the state carries the "team" list (each teammate's HP, Block, powers, whether they
+/// ended the turn and the damage headed for them) and a "co_op" line with the shared-turn
+/// rules, and a card play is followed by the host's echo of it rather than by a timer, because
+/// it can sit behind a teammate's plays for seconds.
 /// </summary>
 internal sealed class CombatReader : IScreen
 {
@@ -35,8 +44,8 @@ internal sealed class CombatReader : IScreen
     private static readonly List<Creature> Roster = new();
     private static ICombatState? _rosterCombat;
 
-    /// <summary>Everything one capture or execute reads, fetched once.</summary>
-    private sealed record Board(RunState Run, Player Me, ICombatState Cs, PlayerCombatState Pcs, List<Creature> Enemies, List<Player> Players);
+    /// <summary>Everything one capture or execute reads, fetched once. <see cref="Coop"/> is false in a solo run.</summary>
+    private sealed record Board(RunState Run, Player Me, ICombatState Cs, PlayerCombatState Pcs, List<Creature> Enemies, List<Player> Players, bool Coop);
 
     private sealed record PlayOption(string Id, string Label, CardModel Card, Creature? Target);
 
@@ -60,7 +69,7 @@ internal sealed class CombatReader : IScreen
             return CaptureHandSelect(ctx, b, selectHand);
 
         if (!MayAct(ctx, out why))
-            return new GameSnapshot { Screen = Name, AwaitingDecision = false, Waiting = why, State = WaitingState(b) };
+            return new GameSnapshot { Screen = Name, AwaitingDecision = false, Waiting = why, State = WaitingState(ctx, b) };
 
         var plays = new List<PlayOption>();
         var hand = new JsonArray();
@@ -178,7 +187,7 @@ internal sealed class CombatReader : IScreen
             return null;
         }
 
-        return new Board(run, me, cs, pcs, EnemyRoster(cs), cs.Players.ToList());
+        return new Board(run, me, cs, pcs, EnemyRoster(cs), cs.Players.ToList(), Teammates.Active(ctx));
     }
 
     // ---------- playing cards ----------
@@ -259,8 +268,17 @@ internal sealed class CombatReader : IScreen
         var energyBefore = pcs.Energy;
         var starsBefore = pcs.Stars;
 
+        // Co-op: watch for the host's echo of this play (see TrackCoopPlay).
+        var echoBefore = b.Coop ? WatchOwnPlays(b.Me) : null;
+
         if (!card.TryManualPlay(option.Target))
             return ActionResult.Fail($"The game refused to play {name}.");
+
+        if (b.Coop && _ownPlaysWatched)
+        {
+            TrackCoopPlay(name, echoBefore, overlayBefore, turn);
+            return ActionResult.Success;
+        }
 
         // CanPlay keeps counting a queued card as in hand with its energy unspent, so stay busy
         // until the play has run (the card left the hand, or its cost was paid, which also
@@ -276,6 +294,99 @@ internal sealed class CombatReader : IScreen
             return played && ActionTracker.GameLooksIdle();
         }, PlayTimeout);
         return ActionResult.Success;
+    }
+
+    // ---------- co-op: following a play by its echo ----------
+
+    /// <summary>A play the host has not ordered after this long is taken to be lost, and the card is offered again.</summary>
+    private static readonly TimeSpan EchoLost = TimeSpan.FromSeconds(10);
+
+    /// <summary>How long a play may wait behind teammates' actions before the bot stops holding its snapshots for it.</summary>
+    private static readonly TimeSpan QueuedPlayTimeout = TimeSpan.FromSeconds(90);
+
+    private static ActionQueueSet? _watchedQueues;
+    private static ulong _watchedNetId;
+    private static bool _ownPlaysWatched;
+    private static bool _ownPlaysFailed;
+
+    /// <summary>The newest card play of ours that the host has ordered, as the action object that really runs.</summary>
+    private static PlayCardAction? _ownPlay;
+
+    /// <summary>
+    /// Subscribes (once per run's queue set) to the game's "an action was ordered" event and
+    /// returns the last own play seen so far. One action runs at a time for the whole table,
+    /// so in co-op our card can stay in hand, with its energy unspent, for as long as a
+    /// teammate's earlier plays take; a timer would offer it again and queue it twice. The
+    /// echo says where it really is (votes.md 2.1). Read-only and the same on host and client;
+    /// on the host the echo arrives inside TryManualPlay.
+    /// </summary>
+    private static PlayCardAction? WatchOwnPlays(Player me)
+    {
+        if (_ownPlaysFailed) return null;
+        try
+        {
+            var queues = RunManager.Instance?.ActionQueueSet;
+            if (!ReferenceEquals(queues, _watchedQueues))
+            {
+                if (_watchedQueues is { } old) old.ActionEnqueued -= OnActionEnqueued;
+                _watchedQueues = queues;
+                _ownPlay = null;
+                _ownPlaysWatched = queues is not null;
+                if (queues is not null) queues.ActionEnqueued += OnActionEnqueued;
+            }
+            _watchedNetId = me.NetId;
+        }
+        catch (Exception ex)
+        {
+            // Without the echo the solo tracking below still works; it is only less patient.
+            _ownPlaysFailed = true;
+            _ownPlaysWatched = false;
+            ModEntry.LogError($"coop: can't watch the action queue, so card plays are tracked by timer: {ex.Message}");
+        }
+        return _ownPlay;
+    }
+
+    // Raised by the game in the middle of ordering an action: it must never throw.
+    private static void OnActionEnqueued(GameAction action)
+    {
+        try
+        {
+            if (action is PlayCardAction play && play.OwnerId == _watchedNetId) _ownPlay = play;
+        }
+        catch
+        {
+            // Nothing to do; the tracker falls back to its timeout.
+        }
+    }
+
+    /// <summary>
+    /// Holds snapshots until our play has run or been cancelled, as the echoed action itself
+    /// reports. Finished or cancelled, the board is ours to read again even while a teammate's
+    /// action is still animating.
+    /// </summary>
+    private static void TrackCoopPlay(string name, PlayCardAction? echoBefore, object? overlayBefore, int turn)
+    {
+        var since = DateTime.UtcNow;
+        var lostLogged = false;
+        ActionTracker.Begin(name, c =>
+        {
+            if (FightOver() || HandSelectOpen() || !ReferenceEquals(Nodes.TopOverlay(), overlayBefore)) return true;
+            if (c.MyCombat?.TurnNumber != turn || c.Combat?.CurrentSide != CombatSide.Player) return true;
+
+            var echo = _ownPlay;
+            if (echo is null || ReferenceEquals(echo, echoBefore))
+            {
+                // Not ordered by the host yet.
+                if (DateTime.UtcNow - since < EchoLost) return false;
+                if (!lostLogged)
+                {
+                    lostLogged = true;
+                    ModEntry.Log($"coop: the host did not order the play of {name} within {EchoLost.TotalSeconds:0} s; offering the hand again");
+                }
+                return true;
+            }
+            return echo.State is GameActionState.Finished or GameActionState.Canceled;
+        }, QueuedPlayTimeout);
     }
 
     /// <summary>
@@ -523,6 +634,7 @@ internal sealed class CombatReader : IScreen
 
         var me = Describe.Creature(b.Me.Creature);
         AddOrbs(me, pcs);
+        var team = b.Coop ? CoopTeam(ctx, b) : null;
 
         var run = Describe.RunInfo(b.Run);
         if (b.Run.CurrentRoom is { } room) run["room"] = room.RoomType.ToString();
@@ -538,7 +650,14 @@ internal sealed class CombatReader : IScreen
         if (UsesStars(b)) state["stars"] = pcs.Stars;
         state["me"] = me;
         if (Pets(pcs) is { } pets) state["pets"] = pets;
-        if (b.Players.Count > 1) state["teammates"] = Teammates(b);
+        if (team is not null)
+        {
+            // Our own player target id, next to the teammates' in "team".
+            state["you"] = $"p{b.Players.IndexOf(b.Me)}";
+            state["team"] = team;
+            state["co_op"] = CoopManners.CombatNote;
+        }
+        else if (b.Players.Count > 1) state["teammates"] = TeammateList(b);
         state["enemies"] = Enemies(b);
         if (IncomingDamage(b) is { } incoming) state["incoming_damage"] = incoming;
         state["hand"] = hand;
@@ -555,7 +674,7 @@ internal sealed class CombatReader : IScreen
     }
 
     /// <summary>Small state for snapshots where we are only waiting (enemy turn, teammates).</summary>
-    private static JsonObject WaitingState(Board b)
+    private static JsonObject WaitingState(GameContext ctx, Board b)
     {
         var json = new JsonObject
         {
@@ -564,7 +683,11 @@ internal sealed class CombatReader : IScreen
             ["hp"] = b.Me.Creature.CurrentHp,
             ["block"] = b.Me.Creature.Block,
         };
-        if (b.Players.Count > 1)
+        if (b.Coop && Teammates.Team(ctx) is { } team)
+        {
+            json["team"] = team;
+        }
+        else if (b.Players.Count > 1)
         {
             var mates = new JsonArray();
             for (var j = 0; j < b.Players.Count; j++)
@@ -588,8 +711,11 @@ internal sealed class CombatReader : IScreen
         for (var j = 0; j < b.Enemies.Count; j++)
         {
             var enemy = b.Enemies[j];
-            if (!InFight(b.Cs, enemy)) continue;
+            var reviving = Reviving(b.Cs, enemy);
+            if (!reviving && !InFight(b.Cs, enemy)) continue;
             var json = Describe.Lead("i", j, Describe.Creature(enemy));
+            // Down at 0 HP but kept in the fight: it comes back, and its intent says when and how.
+            if (reviving) json["reviving"] = true;
             json["intents"] = Intents(enemy, b.Cs);
             if (mixed && enemy.IsPrimaryEnemy) json["primary"] = true;
             if (!enemy.IsHittable) json["untargetable"] = true;
@@ -621,7 +747,7 @@ internal sealed class CombatReader : IScreen
             var total = 0;
             foreach (var enemy in b.Enemies)
             {
-                if (!InFight(b.Cs, enemy) || enemy.Monster?.NextMove is not { } move || move.Id == "STUNNED") continue;
+                if (!Acting(b.Cs, enemy) || enemy.Monster?.NextMove is not { } move || move.Id == "STUNNED") continue;
                 foreach (var intent in move.Intents)
                 {
                     // "is AttackIntent", not IntentType.Attack: death blows report their own type.
@@ -636,7 +762,65 @@ internal sealed class CombatReader : IScreen
         }
     }
 
-    private static JsonArray Teammates(Board b)
+    /// <summary>
+    /// The co-op "team" list for a fight: the shared entry per teammate plus what only the
+    /// fight knows, their powers and the damage the enemies' intents deal to them. Null when
+    /// the read failed (the plain teammates list is shown then).
+    /// </summary>
+    private static JsonArray? CoopTeam(GameContext ctx, Board b) =>
+        Teammates.Safe<JsonArray?>("the team in a fight", null, () =>
+        {
+            var team = new JsonArray();
+            foreach (var mate in Teammates.Others(ctx))
+            {
+                var json = Teammates.Json(mate, ctx);
+                // The id that card and potion targets use: the player's place in this fight
+                // (the same as the run's slot, since the fight seats players in run order).
+                if (b.Players.IndexOf(mate.Player) is >= 0 and var seat) json["id"] = $"p{seat}";
+                var powers = Describe.Powers(mate.Player.Creature);
+                if (powers.Count > 0) json["powers"] = powers;
+                if (mate.Player.Creature.IsAlive && IncomingDamageFor(b, mate.Player) is { } incoming)
+                    json["incoming"] = incoming;
+                team.Add(json);
+            }
+            return team;
+        });
+
+    /// <summary>
+    /// Sum of the enemies' attack intents against one player, before Block. Every monster
+    /// attack hits every living player, but the number on an intent is worked out for the local
+    /// player only (AttackIntent.GetSingleDamage ignores its targets), so a teammate's is the
+    /// same formula with them as the target: their Vulnerable, relics and cover count, ours
+    /// don't (votes.md 2.5). A pure calculation, the same on host and client.
+    /// </summary>
+    private static int? IncomingDamageFor(Board b, Player p)
+    {
+        try
+        {
+            var total = 0;
+            foreach (var enemy in b.Enemies)
+            {
+                if (!Acting(b.Cs, enemy) || enemy.Monster?.NextMove is not { } move || move.Id == "STUNNED") continue;
+                foreach (var intent in move.Intents)
+                {
+                    if (intent is not AttackIntent { DamageCalc: { } damage } attack) continue;
+                    var perHit = Hook.ModifyDamage(p.RunState, p.Creature.CombatState, p.Creature, enemy, damage(),
+                        ValueProp.Move, null, ModifyDamageHookType.All, CardPreviewMode.None, out _);
+                    // As the game totals it: one hit for a single attack (a death blow is one), the
+                    // hit count for a multi-attack, which can be 0 when it is worked out from the board.
+                    var hits = attack is MultiAttackIntent ? Math.Max(0, attack.Repeats) : Math.Max(1, attack.Repeats);
+                    total += Math.Max(0, (int)perHit) * hits;
+                }
+            }
+            return total;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static JsonArray TeammateList(Board b)
     {
         var arr = new JsonArray();
         for (var j = 0; j < b.Players.Count; j++)
@@ -735,6 +919,30 @@ internal sealed class CombatReader : IScreen
 
     /// <summary>A living enemy still in the fight (fled ones are alive but gone).</summary>
     internal static bool InFight(ICombatState cs, Creature enemy) => enemy.IsAlive && cs.Enemies.Contains(enemy);
+
+    /// <summary>
+    /// An enemy at 0 HP that the game keeps in the fight because it comes back: a power of
+    /// its own refuses its removal (a Decimillipede segment that reattaches, Test Subject
+    /// between its forms, the illusions Eye With Teeth and Parafright). It keeps its place in
+    /// the enemy list and takes its turn, which is the move that heals it, so the snapshot
+    /// shows it with that intent. The game refuses to target it (a card and a potion both need
+    /// a living target), and <see cref="IsTargetableEnemy"/> keeps requiring a living one.
+    /// The hook is the question CreatureCmd asks at the death itself; it only reads.
+    /// </summary>
+    internal static bool Reviving(ICombatState cs, Creature enemy)
+    {
+        try
+        {
+            return enemy.IsDead && cs.Enemies.Contains(enemy) && !Hook.ShouldCreatureBeRemovedFromCombatAfterDeath(cs, enemy);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>An enemy whose next move will be performed: a living one, or one that is down but coming back.</summary>
+    private static bool Acting(ICombatState cs, Creature enemy) => InFight(cs, enemy) || Reviving(cs, enemy);
 
     /// <summary>Docs section c: a living, hittable enemy the targeting hooks allow.</summary>
     internal static bool IsTargetableEnemy(ICombatState cs, Creature enemy) =>

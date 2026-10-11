@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json.Nodes;
+using SpireMind.Game.Coop;
 
 // Same namespace as ScreenRouter, which refers to the readers unqualified.
 namespace SpireMind.Game;
@@ -10,6 +11,11 @@ namespace SpireMind.Game;
 /// click on the map point, which the game turns into a synced map vote (docs/game-api.md
 /// section d), so co-op stays in step. Actions: "map:&lt;n&gt;" for state.next[n], plus
 /// out-of-combat potion actions.
+///
+/// In co-op the click is a vote, and the reader follows <see cref="CoopManners.Vote"/>: it shows
+/// who voted for what, waits for the human's vote before offering ours, lets a standing vote be
+/// changed until the round is decided, and offers nothing else once our vote is out. One more
+/// action exists there: "stop_drawing", when map drawing mode was left on.
 /// </summary>
 internal sealed class MapReader : IScreen
 {
@@ -61,6 +67,11 @@ internal sealed class MapReader : IScreen
             return GameSnapshot.Busy(Name, "map not generated yet");
 
         var state = BuildState(ctx, rs, me, view);
+
+        // Co-op has its own flow (who voted, whom to follow, what may still be sent); when that
+        // read fails it answers null and the plain flow below takes over.
+        if (Teammates.Active(ctx) && CoopCapture(ctx, rs, me, screen, view, state) is { } coopSnapshot)
+            return coopSnapshot;
 
         // Our vote first: travel stays enabled after voting (another click would change the vote).
         string? waiting = null;
@@ -141,6 +152,14 @@ internal sealed class MapReader : IScreen
 
     public ActionResult Execute(GameContext ctx, Node? node, string actionId)
     {
+        // Co-op only: the action that ends a drawing mode left on, and the rule that nothing,
+        // not even a potion, is sent once our map vote is out.
+        var coop = Teammates.Active(ctx);
+        if (coop && actionId == StopDrawingId)
+            return StopDrawing(node as NMapScreen ?? NMapScreen.Instance);
+        if (coop && !actionId.StartsWith("map:", StringComparison.Ordinal) && VoteStanding(ctx))
+            return ActionResult.Fail($"Not now: {CoopManners.RoomClosed}.");
+
         if (PotionActions.TryExecute(ctx, actionId, false, out var potionResult))
             return potionResult;
 
@@ -160,9 +179,18 @@ internal sealed class MapReader : IScreen
         // VoteForMapCoordAction is NonCombat: enqueued mid-combat it would hold up our queue.
         if (CombatManager.Instance?.IsInProgress == true)
             return ActionResult.Fail("A combat is in progress.");
+        // The same while a fight is being set up, when it can keep the fight from starting on
+        // a copy that is still loading the room (votes.md 0.2 item 12). Travel is off then
+        // anyway; this keeps the co-op vote from depending on that.
+        if (coop && Teammates.FightStarting(ctx))
+            return ActionResult.Fail("A combat is starting.");
+        // Nothing of ours may still be in flight when the vote goes out (votes.md list E item 14).
+        if (coop && ctx.Me is { } owner && PotionInFlight(owner, DateTime.UtcNow))
+            return ActionResult.Fail("A potion is still being used; vote once it is gone from the belt.");
         if (screen.Drawings.GetLocalDrawingMode() != DrawingMode.None)
             return ActionResult.Fail("Map drawing mode is on; the game ignores map point clicks.");
-        if (CurrentVote(rs) is { } vote)
+        // A co-op vote can be changed until the last one lands; the same node again is refused below.
+        if (!coop && CurrentVote(rs) is { } vote)
             return ActionResult.Fail($"Already voted for {Show(vote.Target)}; waiting for teammates.");
         if (RoomUnfinished(ctx, rs) is { } unfinished)
             return ActionResult.Fail($"The current room isn't finished ({unfinished}).");
@@ -181,6 +209,10 @@ internal sealed class MapReader : IScreen
             return ActionResult.Fail($"There is no map option {n}.");
 
         var target = view.Next[n];
+        // Clicking the node our vote is on casts nothing: the game sends a map ping instead.
+        if (coop && ctx.Me is { } voter && StandingVote(rs, voter) == target)
+            return ActionResult.Fail($"Your vote is already on {Show(target)}.");
+
         var point = FindPointNode(screen, rs.Map, target, fresh: true);
         if (point is null)
             return ActionResult.Fail($"No map point node at {Show(target)}.");
@@ -205,7 +237,9 @@ internal sealed class MapReader : IScreen
 
         var roomBefore = rs.CurrentRoom;
         if (multiplayer)
-            _vote = new Vote(rs.Map, roomBefore, view.Visited.Count, target);
+            _vote = new Vote(rs.Map, roomBefore, view.Visited.Count, target, DateTime.UtcNow);
+        if (coop)
+            ModEntry.Log($"coop: voted for {Label(view.TypeAt(target))} at {Show(target)} on the map");
 
         ActionTracker.Begin(
             what,
@@ -231,7 +265,9 @@ internal sealed class MapReader : IScreen
         };
 
         // Co-op routes should suit the weakest deck, so teammates' HP matters here.
-        if (ctx.IsMultiplayer && Describe.TeamHp(ctx.Teammates) is { Count: > 0 } team)
+        if (Teammates.Team(ctx) is { } coopTeam)
+            state["team"] = coopTeam;
+        else if (ctx.IsMultiplayer && Describe.TeamHp(ctx.Teammates) is { Count: > 0 } team)
             state["team"] = team;
 
         var act = rs.Act;
@@ -277,7 +313,7 @@ internal sealed class MapReader : IScreen
     // ---------- co-op vote ----------
 
     /// <summary>Our co-op map vote, valid until the room, the visited path or the map changes.</summary>
-    private sealed record Vote(object Map, object? Room, int VisitedCount, (int Col, int Row) Target);
+    private sealed record Vote(object Map, object? Room, int VisitedCount, (int Col, int Row) Target, DateTime At);
 
     private static Vote? _vote;
 
@@ -291,6 +327,301 @@ internal sealed class MapReader : IScreen
             _vote = null;
         }
         return _vote;
+    }
+
+    // ---------- co-op: the vote round ----------
+
+    private const string StopDrawingId = "stop_drawing";
+
+    /// <summary>
+    /// A vote the host has not echoed after this long was dropped (it logs a warning and tells
+    /// nobody): our screen then shows a vote the host never recorded, and clicking the same
+    /// node again only pings (votes.md 1.2).
+    /// </summary>
+    private static readonly TimeSpan VoteLost = TimeSpan.FromSeconds(8);
+
+    /// <summary>How long we have waited for a human to vote first, and held a deciding vote for a busy one.</summary>
+    private static readonly CoopManners.WaitClock VoteWait = new();
+    private static readonly CoopManners.WaitClock BusyWait = new();
+
+    /// <summary>What a vote round is keyed on: the votes are cleared at every move, and cancelled when the map regenerates.</summary>
+    private sealed record RoundKey(object? Room, int Visited, object Map);
+
+    /// <summary>
+    /// Where our own vote stands: the click we made (the host's echo follows a moment later on
+    /// a client), else what the game has recorded for us. Null when we have not voted.
+    /// </summary>
+    private static (int Col, int Row)? StandingVote(RunState rs, Player me)
+    {
+        if (CurrentVote(rs) is { } pending) return pending.Target;
+        return Teammates.MapVote(me) is { } echoed ? Key(echoed) : null;
+    }
+
+    /// <summary>
+    /// True once our map vote is out in a co-op run. From then on the room is closed for us:
+    /// the other readers offer nothing until the party has moved (see <see cref="Teammates.RoomClosed"/>).
+    /// </summary>
+    internal static bool VoteStanding(GameContext ctx) =>
+        Teammates.Active(ctx) && ctx.Run is { } rs && ctx.Me is { } me && StandingVote(rs, me) is not null;
+
+    /// <summary>
+    /// The map in a co-op run, or null when the co-op read failed (the plain flow then answers).
+    /// Adds who voted for each option and the "vote" block to <paramref name="state"/>.
+    /// Safe on a client and on the host: it only reads, except for un-sticking a vote the host
+    /// dropped, which touches nothing but this screen's own vote icons.
+    /// </summary>
+    private static GameSnapshot? CoopCapture(GameContext ctx, RunState rs, Player me, NMapScreen screen, MapView view, JsonObject state) =>
+        Teammates.Safe<GameSnapshot?>("the map vote", null, () =>
+        {
+            var now = DateTime.UtcNow;
+            ForgetDroppedVote(rs, me, screen, now);
+
+            var players = Teammates.All(ctx);
+            // The players whose vote we follow: the humans, on a bot's copy; nobody anywhere else.
+            var humans = players.Where(m => m.Followed).ToList();
+            var mine = StandingVote(rs, me);
+
+            // Each player's vote as the game has it; ours as it stands on this screen.
+            var votes = new Dictionary<int, (int Col, int Row)>();
+            foreach (var m in players)
+            {
+                (int Col, int Row)? at = m.IsMe ? mine : Teammates.MapVote(m.Player) is { } c ? Key(c) : null;
+                if (at is { } voted) votes[m.Slot] = voted;
+            }
+            var missing = players.Where(m => !m.IsMe && !votes.ContainsKey(m.Slot)).ToList();
+
+            // state.next[n].votes: who is on each option.
+            if (state["next"] is JsonArray next)
+            {
+                for (var i = 0; i < view.Next.Count && i < next.Count; i++)
+                {
+                    var voters = players.Where(m => votes.TryGetValue(m.Slot, out var at) && at == view.Next[i])
+                        .Select(m => (JsonNode)(m.IsMe ? "you" : m.Label)).ToArray();
+                    if (voters.Length > 0 && next[i] is JsonObject option) option["votes"] = new JsonArray(voters);
+                }
+            }
+
+            int? Option((int Col, int Row)? at) => at is { } a ? view.Next.IndexOf(a) : null;
+            var humanVotes = humans.Select(h => Option(votes.TryGetValue(h.Slot, out var at) ? at : null)).ToList();
+            var noHumanVoted = humanVotes.All(v => v is null);
+
+            // The wait for a human's vote only counts while one of them is looking at the map;
+            // the hold on a deciding vote lasts while one who voted is busy on another screen.
+            var key = new RoundKey(rs.CurrentRoom, view.Visited.Count, rs.Map);
+            var unvoted = humans.Where(h => !votes.ContainsKey(h.Slot)).ToList();
+            var looking = unvoted.Any(h => Teammates.Where(h) is Teammates.Presence.AtMap or Teammates.Presence.Unknown);
+            var votedHumans = humans.Where(h => votes.ContainsKey(h.Slot)).ToList();
+            var busy = votedHumans.Any(h => Teammates.Where(h) == Teammates.Presence.Busy);
+            var unsure = votedHumans.Any(h => Teammates.Where(h) is Teammates.Presence.InRoom or Teammates.Presence.Unknown);
+
+            var advice = CoopManners.Vote(new CoopManners.VoteFacts(
+                Mine: Option(mine),
+                Humans: humanVotes,
+                OthersMissing: missing.Count,
+                WaitedForVote: VoteWait.Tick(key, mine is null && noHumanVoted && looking, now),
+                Patience: CoopManners.Patience,
+                WaitedForBusy: BusyWait.Tick(key, mine is null && !noHumanVoted && missing.Count == 0, now),
+                HoldFor: CoopManners.HoldFor(busy, unsure, CoopManners.Patience)));
+
+            var who = Teammates.Names(humans);
+            var theirs = advice.Option is { } k && k >= 0 && k < view.Next.Count ? view.Next[k] : ((int Col, int Row)?)null;
+            var line = CoopManners.VoteLine(
+                advice.Move, who,
+                theirs is { } t ? $"{Label(view.TypeAt(t))} at {Show(t)}" : null,
+                mine is { } m0 ? $"{Label(view.TypeAt(m0))} at {Show(m0)}" : null);
+
+            var vote = new JsonObject
+            {
+                ["rule"] = CoopManners.MapRule,
+                ["voted"] = CoopManners.Count(votes.Count, players.Count, "have voted",
+                    missing.Select(m => m.Label).Concat(mine is null ? ["you"] : []).ToList()),
+            };
+            if (mine is { } standing) vote["yours"] = Show(standing);
+            state["vote"] = vote;
+
+            // The same gates as a solo vote, in the same words. A standing vote skips the room
+            // check: the room was finished when it was cast.
+            string? waiting = null;
+            var actions = new List<LegalAction>();
+            if (mine is null && RoomUnfinished(ctx, rs) is { } unfinished)
+                waiting = $"the map was opened by hand while {unfinished}; close the map so the room can be finished";
+            else if (!screen.IsTravelEnabled)
+                waiting = "map open but travel not enabled (viewing only, or still animating)";
+            else if (Teammates.FightStarting(ctx))
+                waiting = CoopManners.FightStarting;
+            else if (mine is null && PotionInFlight(me, now))
+                // The potion and the vote run in the order sent; the vote still waits for the
+                // potion to leave the belt, so nothing of ours is in flight when the party moves.
+                waiting = "a potion is still being used; the map vote comes after it";
+            else if (screen.Drawings.GetLocalDrawingMode() != DrawingMode.None)
+                // Nobody touches a bot copy's window, but a mode left on would hold the group for good.
+                actions.Add(new LegalAction(StopDrawingId, "Turn map drawing mode off (the game ignores map clicks while it is on)"));
+            else if (view.Next.Count == 0)
+                waiting = "nowhere left to travel on this map; close the map to continue";
+            else if (!advice.Decision)
+                waiting = advice.Move == CoopManners.VoteMove.Keep
+                    ? $"waiting for teammates to vote on the map (you voted {Show(mine ?? default)})"
+                    : advice.Move == CoopManners.VoteMove.WaitForHuman && CoopManners.Patience != TimeSpan.MaxValue
+                        ? $"{line} (the bot votes on its own after {CoopManners.Patience.TotalSeconds:0} s of them looking at the map)"
+                        : line;
+            else
+            {
+                string? blocked = null;
+                for (var i = 0; i < view.Next.Count; i++)
+                {
+                    var at = view.Next[i];
+                    if (mine == at) continue; // clicking it again only pings
+                    if (FindPointNode(screen, rs.Map, at, fresh: false) is not { } p) continue;
+                    if (Blocked(screen, p) is { } why)
+                    {
+                        blocked ??= $"{Show(at)} {why}";
+                        continue;
+                    }
+
+                    var label = mine is null
+                        ? $"Go to {Label(view.TypeAt(at))} at {Show(at)}"
+                        : $"Change your vote to {Label(view.TypeAt(at))} at {Show(at)}";
+                    if (theirs == at) label += $" (follows {who}: unanimous, so certain)";
+                    else if (theirs is not null) label += $" (against the vote of {who}: the host draws between the votes)";
+
+                    var action = new LegalAction($"map:{i}", label);
+                    if (theirs == at)
+                    {
+                        actions.Insert(0, action);
+                        vote["follow"] = action.Id;
+                    }
+                    else actions.Add(action);
+                }
+
+                if (actions.Count == 0)
+                    waiting = mine is { } kept
+                        ? $"waiting for teammates to vote on the map (you voted {Show(kept)})"
+                        : blocked is null ? "no map point is selectable yet" : $"no map point is selectable yet: {blocked}";
+                else if (theirs is { } wanted && vote["follow"] is null && CannotFollowYet(key, wanted, mine is not null, now))
+                    // Following is the whole point; don't offer only the votes against it.
+                    waiting = $"{who} voted for {Show(wanted)}, which is not clickable on this screen yet{(blocked is null ? "" : $": {blocked}")}";
+                else if (theirs is { } refused && vote["follow"] is null)
+                {
+                    // Held out long enough: without a vote of ours nobody travels at all.
+                    vote["do"] = CoopManners.CannotFollowLine(who, $"{Label(view.TypeAt(refused))} at {Show(refused)}");
+                    actions.AddRange(PotionActions.Legal(ctx, false));
+                }
+                else
+                {
+                    vote["do"] = line;
+                    // A potion before the vote is fine; none may follow it (votes.md list E item 14).
+                    if (mine is null) actions.AddRange(PotionActions.Legal(ctx, false));
+                }
+            }
+
+            return waiting is not null
+                ? new GameSnapshot { Screen = Instance.Name, AwaitingDecision = false, Waiting = waiting, State = state }
+                : new GameSnapshot { Screen = Instance.Name, AwaitingDecision = true, State = state, Actions = actions };
+        });
+
+    /// <summary>How long the human's voted node has been refusing our click in this round.</summary>
+    private static readonly CoopManners.WaitClock FollowWait = new();
+    private static object? _cannotFollowLogged;
+
+    /// <summary>
+    /// True while the bot should keep waiting for the node the human voted for to become
+    /// clickable here. With a vote of ours standing there is nothing to give up: the group is
+    /// not waiting for us. Without one, the wait ends after <see cref="CoopManners.FollowBlockedCap"/>,
+    /// counted only while this is the reason nothing is offered, and the other nodes are offered.
+    /// </summary>
+    private static bool CannotFollowYet(RoundKey round, (int Col, int Row) wanted, bool voted, DateTime now)
+    {
+        if (voted) return true;
+        var key = (round, wanted);
+        if (FollowWait.Tick(key, true, now) < CoopManners.FollowBlockedCap) return true;
+        if (!Equals(_cannotFollowLogged, key))
+        {
+            _cannotFollowLogged = key;
+            ModEntry.Log($"coop: the map point {Show(wanted)} the human voted for has refused clicks here for {CoopManners.FollowBlockedCap.TotalSeconds:0} s; offering the other points so the group is not held");
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// The longest the vote waits for a used potion to leave the belt. The game marks a potion
+    /// as queued when its use is requested and only takes the mark off when the use is
+    /// cancelled, so a request the host never ordered would leave it on for good.
+    /// </summary>
+    private static readonly TimeSpan PotionHold = TimeSpan.FromSeconds(10);
+
+    private static DateTime? _potionQueuedSince;
+    private static bool _potionHoldLogged;
+
+    /// <summary>One of our potions has been used and has not left the belt yet (for at most <see cref="PotionHold"/>).</summary>
+    private static bool PotionInFlight(Player me, DateTime now)
+    {
+        var queued = false;
+        try
+        {
+            for (var slot = 0; slot < me.MaxPotionCount && !queued; slot++)
+                queued = me.GetPotionAtSlotIndex(slot) is { IsQueued: true };
+        }
+        catch
+        {
+            // A belt that can't be read holds nothing back.
+        }
+
+        if (!queued)
+        {
+            _potionQueuedSince = null;
+            _potionHoldLogged = false;
+            return false;
+        }
+
+        if (now - (_potionQueuedSince ??= now) < PotionHold) return true;
+        if (!_potionHoldLogged)
+        {
+            _potionHoldLogged = true;
+            ModEntry.Log($"coop: a potion has shown as in use for {PotionHold.TotalSeconds:0} s; not holding the map vote for it any longer");
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Un-sticks a vote the host never recorded: our click put it on this screen, but no echo
+    /// came. The screen's entry is put back to what the host has (nothing, or our earlier vote)
+    /// so the node can be clicked again. A retry of a vote that was only late is harmless: the
+    /// second overwrites the first, and one arriving after the move is dropped.
+    /// </summary>
+    private static void ForgetDroppedVote(RunState rs, Player me, NMapScreen screen, DateTime now)
+    {
+        if (CurrentVote(rs) is not { } pending || screen.IsTraveling || now - pending.At < VoteLost) return;
+
+        var echoed = Teammates.MapVote(me);
+        if (echoed is { } e && Key(e) == pending.Target) return;
+
+        if (echoed is { } earlier) screen.PlayerVoteDictionary[me] = earlier;
+        else screen.PlayerVoteDictionary.Remove(me);
+        screen.RefreshAllMapPointVotes();
+        _vote = null;
+        ModEntry.Log($"coop: the host never recorded the map vote for {Show(pending.Target)}; cleared it here so the bot can vote again");
+    }
+
+    /// <summary>
+    /// Turns local map drawing mode off through the game's own call (what the map's draw button
+    /// does; it also tells the other copies, which only changes a cursor there).
+    /// </summary>
+    private static ActionResult StopDrawing(NMapScreen? screen)
+    {
+        if (screen is null || !GodotObject.IsInstanceValid(screen) || !screen.IsOpen)
+            return ActionResult.Fail("The map is not open.");
+
+        var drawings = screen.Drawings;
+        if (drawings.GetLocalDrawingMode() == DrawingMode.None)
+            return ActionResult.Fail("Map drawing mode is already off.");
+
+        // An open line reads as drawing whatever the mode says, so close it first.
+        if (drawings.IsLocalDrawing()) drawings.StopLineLocal();
+        drawings.SetDrawingModeLocal(DrawingMode.None);
+        ModEntry.Log("coop: turned map drawing mode off so map clicks count again");
+        return drawings.GetLocalDrawingMode() == DrawingMode.None
+            ? ActionResult.Success
+            : ActionResult.Fail("Map drawing mode is still on.");
     }
 
     // ---------- travel ----------

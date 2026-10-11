@@ -7,6 +7,8 @@ using SpireMind.Patches;
 // An alias rather than the namespace, so a game type of the same name in the global usings can
 // never make it ambiguous.
 using InstanceInfo = SpireMind.Core.Coop.InstanceInfo;
+// The game side of co-op (src/SpireMind/Game/Coop/), by alias for the same reason.
+using CoopGame = SpireMind.Game.Coop.CoopGame;
 
 namespace SpireMind;
 
@@ -62,6 +64,12 @@ public static class ModEntry
             var port = ResolvePort();
             var role = DetectRole(port);
             _instance = NewInstanceInfo(role);
+
+            // The game side of co-op is told which copy this is before the bridge starts. Mark's
+            // copy only remembers it. A bot copy puts its window away, takes over its own
+            // quitting, starts looking for the host's lobby, and says in its chat when it is
+            // stuck (the relay shows that line in Mark's window). It never throws.
+            CoopGame.Start(role, ResolveHumanName(), chat);
 
             _server = new BridgeServer(port, tools, chat, Version, Log)
             {
@@ -180,8 +188,8 @@ public static class ModEntry
     /// <summary>
     /// Per-frame work on the main thread: keep the bot's name and persona current, run the
     /// overlay, advance speech bubbles, and for co-op keep this copy's NetId and the list of bot
-    /// copies the game started current (each at most once a second). Each part fails on its own
-    /// and is reported once.
+    /// copies the game started current (each at most once a second), and in a bot copy drive
+    /// its way into the lobby and the run. Each part fails on its own and is reported once.
     /// </summary>
     private static void OnFrame()
     {
@@ -204,6 +212,10 @@ public static class ModEntry
 
         try { CoopWiring.Tick(); }
         catch (Exception ex) { LogOnce(ref _coopTickFailed, $"coop: {ex}"); }
+
+        // A bot copy joins the lobby, picks, readies and leaves a finished run by itself. In
+        // any other copy this returns at once; it guards itself and never throws.
+        CoopGame.Tick();
     }
 
     /// <summary>

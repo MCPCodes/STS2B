@@ -1,11 +1,7 @@
 // The adapter to the game side's own bot launcher and bubbles (the static class
 // SpireMind.Game.Coop.CoopBots, written on the Mac with the decompiled game). Every reference to
-// that class lives in this one file. Until those Coop files land, the build leaves
-// SPIREMIND_COOP_BOTS undefined and the #else branch below compiles instead: the relay then
-// finds bot copies by probing ports, /bot add answers that this build can't start bot copies,
-// and no bubbles are drawn. The Mac removes the #if (keeping the first branch) once its Coop
-// files land.
-#if SPIREMIND_COOP_BOTS
+// that class lives in this one file. Those Coop files have landed, so the stand-in that
+// compiled without them (and its SPIREMIND_COOP_BOTS switch) is gone.
 using System.Runtime.CompilerServices;
 // The game side's own launcher and bubbles (src/SpireMind/Game/Coop/, written on the Mac). An
 // alias, so every use below is plainly that static class.
@@ -113,36 +109,3 @@ internal sealed class CoopBotsAdapter : ICoopBots
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void ShowLineNow(ulong netId, string text) => GameCoopBots.ShowLine(netId, text);
 }
-
-#else
-using ICoopBots = SpireMind.Core.Coop.ICoopBots;
-
-namespace SpireMind.Game;
-
-/// <summary>
-/// Stand-in until the game side's bot launcher lands (see the header): there is no adapter, so
-/// the relay probes ports for bot copies, answers /bot add with a line saying this build can't
-/// start them, and draws no bubbles.
-/// </summary>
-internal sealed class CoopBotsAdapter : ICoopBots
-{
-    private CoopBotsAdapter() { }
-
-    /// <summary>Always null in this build, logged once so the missing piece is plain.</summary>
-    public static CoopBotsAdapter? TryCreate(MainThreadQueue main, Action<string> logError)
-    {
-        _ = main;
-        logError("coop: this build has no bot launcher (src/SpireMind/Game/Coop/ hasn't landed), so /bot add can't start copies and bot lines show no bubbles; bot copies started by hand are still found on their ports.");
-        return null;
-    }
-
-    public IReadOnlyList<(int Port, ulong NetId, string Character)> Known => [];
-
-    public void Refresh() { }
-
-    public Task<string> StartCopyAsync(string? character, CancellationToken ct) =>
-        Task.FromResult("This build can't start bot copies yet; start one with scripts/coop-bot.sh.");
-
-    public void ShowLine(ulong netId, string text) { }
-}
-#endif

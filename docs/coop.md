@@ -1,169 +1,184 @@
-# Playing co-op with the bot (first test)
+# Playing co-op with bots (first live test)
 
-You host a co-op run in your own game. A second copy of the game runs on the same Mac, without Steam, and joins as the bot's player. `scripts/coop-bot.sh` checks the setup, makes the bot's profile, starts that copy and says whether it got into your lobby.
+You host a local co-op lobby in your own game and type `/bot add silent` in your chat box. A second copy of the game starts on the same Mac without Steam, hidden and muted, joins your lobby, picks its character and readies up. You start the run, the bot plays its own hand, and you talk to it from your own window.
 
-The mod has never run in co-op. This page is the plan for the first hands-on test. "Expected" below means read from the game's code (v0.107.1), not seen in a run.
+None of this has run in the game yet. It is built against v0.107.1 (0 warnings) and the Core tests pass. "Expected" below means read from the game's code, not seen in a run.
 
 ## What works today, and what does not
 
-Checked without the game: the launcher's checks, the profile it writes, the command it starts, how it tells a join that worked from one that failed, and that a second run changes nothing. All of it was tried against a stand-in for the game. The game itself was never started for this.
-
-Built for co-op but never tried in it:
-- The join itself, and the bot playing its own hand through the game's synced actions.
-- Map votes, shared event votes, its own rewards, shop, rest site and treasure pick.
-- The API brain reading `strategy/coop.md` in a co-op run.
+Built, never run live:
+- `/bot add [Ironclad|Silent|Defect|Regent|Necrobinder|Random]` from your window: up to three copies (players 1000 to 1002, ports 17773 to 17775). `/bots` lists them.
+- The copy's own profile (`~/Library/Application Support/SlayTheSpire2/default/<id>/`): a small muted window, mods agreed to, tutorials off, and your revealed epochs, so it can pick the characters you have unlocked. Your own files are only read, from the running game.
+- The copy's window is minimised, muted and never takes the keyboard. Its settings, journal and transcripts are its own (`~/.config/spiremind/bot-<port>/`, `runs/bot-<port>/`); the API key, the monthly cap and `strategy/` are shared.
+- It joins by itself and keeps trying, picks the asked character, readies, and readies again if anything takes that back. After a run it returns to its menu and joins your next lobby.
+- Its brain starts by itself once the run is in progress. Your own copy's brain stays off while bots exist or the run is co-op.
+- It follows your map, shared event and chest votes, can Mend you, and sees the team on every screen (last section).
+- Your lines and `/start`, `/stop`, `/pause`, `/resume`, `/budget`, `/model`, `/effort` reach the bots. Their lines come into your chat log and show as speech bubbles over their figures. Nameplates read your name and the bot's character.
+- A bot that is stuck in a way only you can fix says so in your chat: "Silent: Can't join your lobby, and trying again won't fix it: ...".
+- `/botstop` asks every copy your game started to leave the lobby or run and quit. Quitting your game does the same, and a copy also quits by itself when your game is gone.
 
 Does not work yet:
-- The bot can't pick a character or start the run. You do both in its window.
-- No chat from your own window. Your chat box talks to the mod in your own copy, where no brain runs. `/start` typed there makes the bot play your hand. To talk to the bot, use its window or the `curl` lines below.
-- The bot's speech bubbles and thought cloud show only in its own window.
-- Both copies share one settings file, one spend file and one journal: `~/.config/spiremind/config.json`, `spend.json` and `runs/current.md`. `/start` is kept in that settings file until `/stop`. The co-op run takes over `runs/current.md`; the journal that was there is archived under `runs/` (expected).
-- Mods keep their own files in the game's data folder, and both copies use the same ones (for example `betterspire2_*.json`).
-- Mend at a rest site is never offered to the bot. A human has to choose it.
-- A friend can't join over Steam. This lobby is local to the Mac, not a Steam lobby.
-- The bot's profile is new: only the Ironclad is unlocked.
-- A bot copy that crashes, is killed or is quit while connected can't rejoin the run.
+- `/botstop` stops all copies, not one, and is not yet `/bot stop`. For one copy: `kill -TERM <pid>` (it leaves cleanly) or Quit on its Dock icon. A bot that left a run can't come back into it.
+- No thought cloud over a bot on your screen.
+- After a run a bot finds your next lobby by trying, which can take a minute or two.
+- A Custom or Daily lobby: the bot joins but does not pick or ready. A friend can't join over Steam; the lobby is local to the Mac.
+- A bot copy that crashes or is killed (`kill -9`) stays in your lobby or run as a ghost. Back out and host again.
+- A bot can't play a character you have not unlocked; it picks another and says so.
+- Both copies share the game's data folder for mods' own files (`betterspire2_*.json`).
 
-Your own side of the run is a normal co-op run in your modded profile: it goes into your run history, stats and unlocks (expected).
+Your own side is a normal co-op run in your modded profile: history, stats and unlocks (expected).
 
 ## Before the test (game closed)
 
-1. Run `scripts/coop-bot.sh --dry-run`. It only reads. Fix every `STOP` it prints.
-   - Mods: both copies must load the same gameplay mods, and the same mods that add network message types. The bot's copy never sees Workshop mods. For each mod in the way the script names two ways out: one local copy in the game's mods folder, or switching the mod off in your game for the session. The choice is yours.
-     - A local copy: you keep the mod while you play. Not known: whether BaseLib and BetterSpire2 work in a copy without Steam. BaseLib's code refers to Steam.
-     - Switched off: the bot's copy loads only SpireMind, so less can go wrong in a first test. You play that session without the mod.
-   - Autostart must be off. If it is on, the brain also starts in your own window.
-2. Run `scripts/coop-bot.sh --prepare-only`. It writes the bot's profile, `~/Library/Application Support/SlayTheSpire2/default/1000/settings.save`, from your own settings: a small window, muted, mods agreed to, no first-run popups. Your own files are only read.
+1. `scripts/install.sh`. The mod in the game's folder is older than this code, and the bot copy loads the same DLL.
+2. Steam, Library, right-click the game, Properties, General, Launch Options: `--fastmp host_standard` (after `%command%` if the box already has one). Your game then opens a local lobby at every main menu. Without it your lobby is a Steam lobby, and `/bot add` tells you to add it.
+3. Mods: both copies must load the same gameplay mods. The copy only sees the game's own `mods/` folder, which today holds BaseLib, BetterSpire2 and SpireMind. `/bot add` checks this and says what is in the way.
 
-State of this Mac on 2026-10-10: the game's mods folder already holds local copies of BaseLib and BetterSpire2, the same files as your Workshop copies. They appeared there at 14:28 that day. The launcher did not put them there; it never copies mods. With them the mods check passes. They also change your normal game: it loads these copies in place of the Workshop ones, and they do not update by themselves. If you did not choose that, delete the two folders (`SlayTheSpire2.app/Contents/MacOS/mods/BaseLib` and `.../BetterSpire2`, never `SpireMind`). The dry run then stops and shows both ways out again.
+Optional, in the same box before `%command%`: `SPIREMIND_BOT_WINDOW=tile` keeps the bot's window as a small visible tile (`minimized` is the default, `hide` hides the app). The copy inherits your game's environment.
 
-## Set your game to host locally
+## Start a bot
 
-In Steam: Library, right-click Slay the Spire 2, Properties, General, Launch Options. Type exactly:
+1. Start your game from Steam. Expected: no logo, then character select with you alone, named Mark.
+2. Press T, type `/bot add silent`, Enter. "Starting a bot copy as Silent...", then within a minute "Started a bot copy as the Silent on port 17773 (player 1000). It joins your lobby by itself." and "Silent joined the chat (port 17773)."
+3. The bot appears in your lobby, moves to the Silent and shows ready. Pick your character and press Embark. If you were already waiting, the bot's ready starts the run.
+4. Play. Type to the bot in your chat box. `/pause`, `/resume`, `/stop` and `/budget` typed there go to the bot.
+5. To end: `/botstop` sends the bots away ("Asking the bot copies to leave and quit...", then "The Silent's copy has quit."). Or just quit your game: every copy leaves and quits with it.
 
-```
---fastmp host_standard
-```
+A copy is the game's own binary with `--force-steam=off --clientId=<id> --fastmp=join --sts2bot=1 --sts2bot-hostpid=<your pid> [--sts2bot-character=<ID>]`, `SPIREMIND_PORT=<port>` and no Steam variables. Its logs are `~/sts2bot/godot-<id>.log` (`.out` for what it printed before that, `.prev` for the try before).
 
-If the box already holds something ending in `%command%`, put it after that: `... %command% --fastmp host_standard`. Close the window. Do this while the game is closed. While it is set, the game opens a local co-op lobby every time its main menu loads.
+Fallback: `scripts/coop-bot.sh` still starts a copy from Terminal (`--dry-run` only checks). Such a copy also joins, readies and plays by itself, but picks its own character, has no unlocks beyond the Ironclad and does not quit with your game. The script still refuses to start while `autostart` is on in `~/.config/spiremind/config.json`, though the mod no longer needs that.
 
-To remove it afterwards: the same box, delete that text.
+Don't run `/play` in Claude Code during a co-op run: it talks to port 17772, your own window.
 
-## The test, step by step
+## First live test: what to look for
 
-1. Start your game from Steam.
-   - Expected: no logo, then character select with you as the only player, named "Test Host".
-   - macOS may ask whether the game may accept network connections. Either answer should do for a bot on the same Mac.
-2. In Terminal, in the repo: `scripts/coop-bot.sh`
-   - It checks that your lobby is open (something listens on UDP port 33771). If not, it stops and starts nothing.
-   - Then: "Started the bot's copy", dots, "The bridge answers", dots, "It is in your lobby", and what to do next.
-   - A second game window opens, with no sound, titled "Slay The Spire 2 (Client)". It joins by itself as soon as it reaches its main menu, about 5 seconds after it opens. Your lobby shows a second player, "Test Client 1".
-   - The window is 1280x720 pixels. On this Retina screen that is small, under half the screen's width (expected). Drag a corner to make it bigger.
-   - Your game is fullscreen, so reach the other window with Cmd+Tab (two entries with the same name) or Mission Control.
-3. In the bot's window: pick the Ironclad, then press the button that starts a solo run. The first time it asks about tutorials: answer No (the cancel button).
-4. In your window: pick your character and press the same button. The run starts in both windows when both have pressed it.
-5. Start the bot, once the run has started. Either way works:
-   - In the bot's window: press T, type `/start`, press Enter.
-   - From Terminal: `curl -s http://127.0.0.1:17773/chat -d '{"from":"Mark","text":"/start"}'`
-   - A chat line says who plays and on which credit. The bot starts to act. `/budget` shows the spend.
-   - Never type `/start` in your own window.
-6. Play. A fight's round ends when both of you have ended the turn. The map is a vote.
-   - To tell the bot something: the same `curl` line with your words as the text, or T in its window. Its answers: `curl -s 'http://127.0.0.1:17773/chat?since=0'`.
-   - To take its seat for a moment: `/pause` the same way, play in its window, then `/resume`.
-7. To end:
-   - `/stop` for the bot (its window, or the `curl` line with `/stop`).
-   - In your window: Esc, then Save and Quit to keep the run, or Give Up to end it. Give Up leaves nothing behind but a loss in your history (expected).
-   - Expected after either: your game goes back to its main menu and at once opens a new lobby (the launch option does that). The bot's copy is thrown out and tries to join the new lobby by itself.
-   - To stop for the day: quit your own game first. Then Cmd+Q in the bot's window.
-   - For another run: stay in the new lobby. If the bot's window shows an error and not character select, Cmd+Q there and run the script again. `/start` again once the run has started.
+Your log: `~/Library/Application Support/SlayTheSpire2/logs/godot.log`. The bot's: `~/sts2bot/godot-1000.log`. The mod's lines (`role:`, `coop:`, `brain:`) start with `[SpireMind]`; the others below are the game's own. Useful: `grep -n "SpireMind\] coop:\|SpireMind\] role:\|Command Line Args" <log>`.
 
-Don't run `/play` in Claude Code during the test. It talks to port 17772, which is your own window.
+**1. Your game loads**
+- `role: human copy main on port 17772`, `coop: manners off in this copy (not a bot copy)`, `coop: names: this copy is the human's`, `coop: looking for bot copies on ports 17773, 17774, 17775`.
+- `Command Line Args:` shows `--fastmp host_standard`. `Failed to create host!` must not appear (UDP 33771 taken).
+- In the lobby: `coop: names (lobby, this copy is the human's, local 1, host 1, name patch on): 1 is Mark`. Your row reads Mark, not Test Host.
 
-## What to watch in the logs
+**2. `/bot add silent`, your log, in this order**
+- `coop: asked for a bot copy (Silent)`, `coop: mods: this game loaded: ...`, `coop: mods: a copy would load: ...`, `coop: mods: both copies would load the same gameplay mods and network message types`.
+- `coop: profile: wrote .../default/1000/settings.save ...` and `... progress.save: ... so it can pick: Ironclad, Silent, ...`.
+- `coop: hooked the game's Quit`, `coop: this game's environment variables (names only): ...`, `coop: started a copy (pid P) as player 1000 on port 17773 for SILENT: ...`.
+- `coop: copy 1000: its bridge answers on port 17773 after N ms`, `coop: linked the bot copy on port 17773`, then `coop: copy 1000 is in the lobby`.
+- Focus: no `coop: focus:` line means your window kept the keyboard. `coop: focus: this window lost the keyboard N ms after a copy started` followed by `... has the keyboard again` is the watch working. Note whether a fullscreen game is thrown to the desktop.
+- A refusal comes back as one chat line starting "Can't start a bot copy:" that says what to do.
 
-The bot's copy: `~/sts2bot/godot-1000.log`. The log of the try before it is kept as `godot-1000.log.prev`. If the `.log` file stays empty, the game ignored `--log-file`: read `godot-1000.log.out`, which holds the same lines.
+**3. The bot copy starts (its log)**
+- `Command Line Args:` lists the flags above and none of `--log-file`, `--resolution`, `--position`. `Steam initialization skipped` is there. No `Skipping loading mod SpireMind`.
+- `role: bot copy bot-17773 on port 17773`, `coop: this is a bot copy: player 1000, bridge port 17773, character SILENT, started by pid N`.
+- `coop: window: settings forced in memory: windowed 640x360 ...`, `coop: window: set the no-focus flag (never takes the keyboard); focused now: False`.
+- `coop: SIGTERM now means: leave the lobby or run, then quit`, `coop: watching the game that started this copy (pid N)`, `coop: hooked the game's Quit`.
+- `coop: manners on: ...`, `coop: names: this copy is a bot's`, `coop: lobby: asked to play 'SILENT'`, `coop: join: this is bot copy bot-17773 (client id 1000, fastmp join)`, `coop: harmony: 4 of 4 bot copy patches applied`.
+- `coop: profile: already fit for joining`. It must not be followed by `coop: profile: prepared after the main menu opened`.
+- `coop: window: put away at Menu:<id>: mode Windowed -> Minimized ...`, and ten seconds later `coop: window: 60 frames a second 10 s after being put away`. A number far under 60, or `only N frames a second for 6 s (throttled while hidden?)`, means macOS slows a minimised copy; the next lines say what the fallback did. No sound, no popup.
 
-```
-grep -n "Command Line Args\|Steam initialization skipped\|RUNNING MODDED\|SpireMind\]\|Beginning join\|initial game info\|JoinResponse\|ismatch\|timed out\|handshake\|onnection failed" ~/sts2bot/godot-1000.log
-```
+**4. Join, pick, ready (bot's log)**
+- `coop: join: attempt 1 (the game's own, from --fastmp join)`, `coop: join: in a lobby after 0 s (attempt 1)`.
+- `coop: lobby: joined as player 1000`, `coop: lobby: players: 1 (host) Ironclad, 1000 (me) Ironclad; ascension N`, `coop: lobby: picked Silent (was Ironclad)`, `coop: lobby: ready as Silent (pressed Embark)`, `coop: joined; picked Silent; ready; waiting for the host to start`, `coop: this copy's player has NetId 1000`.
+- Your screen: the bot's row reads Silent with a ready mark, and your ascension level is unchanged. Your log: `coop: names (lobby, ...): 1 is Mark, 1000 is Silent`.
+- The most likely failure: `coop: join: STOPPED, retrying cannot fix this: ...` with `VersionMismatch ... (model hash)` or `ModMismatch`. Your chat shows the same as "Silent: Can't join your lobby, and trying again won't fix it: ...". A model hash mismatch with equal mods points at SaveMerger (Workshop, your side only): copy it into `mods/` or switch it off.
+- Started before you host: `coop: join: nobody is hosting on this Mac yet (Timeout); next try in 3 s`, growing to 30 s. Open the lobby and it joins on the next try.
 
-- `Command Line Args:` shows the flags the game received.
-- `Steam initialization skipped` and ` --- RUNNING MODDED! --- Loaded N mods`: no Steam, mods on.
-- `[SpireMind] bridge listening on http://127.0.0.1:17773/`: the bot's bridge.
-- `Beginning join with initializer`, then `Got initial game info message. Version: ...`: it reached your lobby.
-- `Received ClientLobbyJoinResponseMessage`: it is in.
-- After `/start`: `[SpireMind] brain: /start by ...`, and with the API brain a "system prompt built" line that should list `coop.md`.
+**5. The run starts**
+- Bot: `coop: the run is starting`, `coop: run: started; this copy is player 1000, Silent`, `coop: in the run as Silent`, then `brain:` lines and a "system prompt built" line that lists `coop.md`. No `brain: /start` line may appear in your own log.
+- `coop: recovering: a run was set up but never started` would mean the 120 s start limit is too short for a hidden window.
+- Nameplates under the figures and the player rows on the left read Mark and Silent.
 
-Your own game: `~/Library/Application Support/SlayTheSpire2/logs/godot.log`
+**6. In the run**
+- Map: the bot waits for your vote and follows it: `coop: voted for <Type> at (c,r) on the map`. With your map open and no vote for 30 s it votes itself and says which node.
+- A bot line: in your chat log as "Silent: ...", and in your log `coop: bubble for player 1000 (Silent): a line of N characters queued`, then `coop: bubble for player 1000 HH:mm:ss.fff: shown for 3.6s, creature spot, ...`. Other spots: `rest site`, `shop`, `player row` (map, events, treasure; the text starts with "Silent: "), `lobby row`. The offsets beside rows are guesses: take a screenshot.
+- `team[].incoming` in `curl -s http://127.0.0.1:17773/state` matches the intent numbers you see. A reviving enemy (Decimillipede segment, Test Subject) is listed with `reviving: true` and never targeted.
+- Shared event, chest, rest site: see "To check" in the last section.
+- Must not appear: `coop: reading <what> failed, so it is off for the rest of this run`, `coop: remote bubbles switched off`, `coop: names switched off`, `coop: lobby: switched off after repeated errors`, a desync message.
 
-- `Command Line Args:` must show `--fastmp host_standard`. If it does not, the launch option did not reach the game.
-- `Failed to create host!` must not appear. It means UDP port 33771 was taken, and nobody can join that lobby.
-- `[SpireMind] bridge listening on http://127.0.0.1:17772/` is your copy's bridge. No `brain: /start` line should ever appear here.
+**7. The run ends**
+- Bot: `coop: the run is over; reading the result, then returning to the main menu`, then `coop: run: over; returning to the main menu ...` or `coop: run: the game over screen asked for the Timeline; a bot copy goes straight to the main menu instead`, `coop: run: over for this copy (the run was cleaned up)`, `coop: join: a new main menu; its own join attempt is held back, the next try is in 30 s`.
+- While you sit on your game over screen: `coop: join: the host is in a run, and a running run cannot be joined (RunInProgress); next try in 60 s`. Watch your window for the bot's row flipping to connected and back, and your log for an exception then.
+- Back in your lobby the bot should join within a minute or two and ready up as before.
 
-What the bot sees right now: `curl -s http://127.0.0.1:17773/state`
+**8. Quitting**
+- Quit your game with a bot in the lobby or run. Your log: `coop: this game is closing; asking 1 bot copy(ies) to quit`. Bot: `coop: quitting this copy: SIGTERM`, `coop: before quitting: left the lobby (goodbye sent)` (in a run: `left the run (goodbye sent)`).
+- Afterwards `ps -axww | grep force-steam` shows no copy and Steam shows the game as stopped.
+- `/botstop` with a bot in the lobby: your log has `coop: sent SIGTERM to the Silent's copy (pid P)` and `coop: the Silent's copy has quit`, the bot's the same lines as above, and its row leaves your lobby at once.
+- Later tests: Quit a bot from the Dock while it is in your lobby (bot: `coop: quitting: goodbye sent to the host`; your log: `Client 1000 disconnected, reason: Quit`; no ghost). `kill -9` your game with a bot running (bot within 10 s: `coop: quitting this copy: the game that started this copy (pid N) is gone`). A second `/bot add` takes player 1001 on port 17774.
 
-## When the join fails
+**9. Your own game afterwards**
+- With the launch option removed, a solo run logs no `coop:` line beyond the three from load, and its snapshots have no `team`, `vote` or `co_op` field. `/start` plays as before once no bot copy is running.
+- Nothing under `SlayTheSpire2/steam/` was written by the launcher, and your `logs/godot.log` was not rotated by a copy.
 
-Only the bot's copy checks. It shows an error popup, and the reason is in its log. The script reads that log and prints the lines. Your own window only shows a player coming and going. One popup shows at a time, so trust the log over the popup.
+## When the bot does not show up
 
-To try again: Cmd+Q in the bot's window, fix the cause, run the script again. A copy that never got in leaves no ghost (expected).
-
-What the log line means:
-
-- `Connection timed out!` Nobody listens on UDP 33771. You were not in the co-op character select, or the launch option is missing.
-- `Received non-success code during handshake (IdCollision)!` A ghost of an earlier bot copy holds that client id. In your game, back out of the lobby and host again.
-- `Version mismatch. Host: ... Ours: ...` The game updated between the two starts. Quit both and start again.
-- `Mismatch in gameplay-relevant mods with the host!`, with both lists. Close both copies, run `scripts/coop-bot.sh --dry-run` and follow it. Mods change only when a game starts.
-- `ModelDb hash mismatch` A mod on one side adds cards, relics or the like. Make that mod the same on both sides.
-- `Received initial join message with failure: RunInProgress` The run had started. A bot can only join in character select.
-- `Received initial join message with failure: NotInSaveGame` You loaded a saved run that does not know this client id. Use the id the run began with.
-- The log ends at `awaiting initial game info message` and the bot's window hangs: a mod that adds network message types (BaseLib) is loaded on one side only.
-
-## Most likely to go wrong, in this order
-
-1. Your game shows its normal main menu, not a lobby. The launch option did not arrive: a typo, or the game was running when you set it. Quit, check the box, start again. The script will not start the bot until the lobby is open. If the option still does not arrive, stop there and note it. If you sit in the co-op character select and the script still sees no lobby, the script is wrong: `--no-host-check` starts the bot anyway. Note that too.
-2. You can't find the bot's window. It opens small on the desktop, not in your game's fullscreen space. Use Mission Control.
-3. The script says "No answer from the bridge". The bot's copy runs, but SpireMind did not load in it. Look at its window. A popup about loading mods means the seeded settings were not taken. Pick its cancel button. The other one saves and quits, which leaves a ghost if the copy is in your lobby. Leave the lobby with Back, quit that copy, run the script with `--reset-profile`. If the popup comes back, stop and note what the bot's log says about `settings.save`. With no popup: search its log for `Skipping loading mod` and for errors after `Loading assembly DLL`.
-4. BaseLib or BetterSpire2 misbehave in a copy without Steam: errors in the bot's log while mods load, or a refused join. The way out is the other option: switch that mod off in your game for the session, delete its local copy, restart both.
-5. T does not open the chat in the bot's window. Click inside the window first. Or use the `curl` line.
-6. `/start` answers that it could not start, or the bot plays on the subscription. The chat line says why; the bot's log has `[SpireMind] brain:` lines.
-7. The bot stops at a screen it has never seen in co-op: a vote, a shared event, the treasure room, a rest site. `/pause`, do its choice by hand in its window, `/resume`, and note the screen.
-8. The two windows disagree, or a desync message shows. Note it and end the run.
+- Chat says "Can't start a bot copy: ...": do what it says (no lobby, a Steam lobby, mods that differ, a full lobby, a ghost, all three places taken).
+- "The bridge of the bot copy ... did not answer within 60 s, so it was closed again": the mod did not load in the copy. In `~/sts2bot/godot-1000.log` look for `Skipping loading mod` and for errors after `Loading assembly DLL`. A popup about loading mods in its window means its seeded `settings.save` was not taken.
+- "The bot copy ... quit before its bridge answered": the end of its log is in your log (`coop: copy 1000: ...`).
+- Started but never in the lobby: within 90 s your log has `coop: copy 1000: a join attempt failed: <advice>`, with the copy's own lines before it:
+  - `Connection timed out!`: nobody listens on UDP 33771. You were not in the co-op character select.
+  - `Received non-success code during handshake`: a ghost holds that player id. Back out of the lobby and host again.
+  - `Mod mismatch`, `Mods that host has`: both lists are in the log. Make them equal and restart both copies.
+  - `ModelDb hash mismatch`: a mod on one side adds cards, relics or the like.
+  - `Version mismatch`: the game updated between the two starts.
+  - The copy's log ends at `awaiting initial game info message`: a mod that adds network message types is loaded on one side only. The watcher cancels after 45 s (`coop: join: attempt N got no answer for 45 s`) and tries again.
+- In the lobby but not ready: its log says where it stands (`coop: joined; ...`). "Silent: A popup is open in this copy's window ..." in your chat means its window (in the Dock) needs a click.
 
 ## Rules that save the run
 
-- Never quit, kill or close the bot's copy while it is in your lobby or run. Cmd+Q counts. It stays as a ghost. Then you must back out of the lobby and host again. To take it out cleanly: Back in its character select, or Esc, Disconnect in a run. Or quit your own game first.
-- While the bot is started, do not restart your own game. It would read the saved `/start` and play your hand as well. `/stop` first.
-- Never press Load in the Multiplayer menu without `--fastmp host` in the launch options, and never use `--fastmp load`. The co-op save is renamed to `.corrupt`.
-- `--fastmp host_standard` always opens a new lobby. To go on with a saved co-op run, change the option to `--fastmp host`, press Load, and start the bot with the same `--client-id`.
-- `scripts/coop-bot.sh` is safe to run twice. It refuses a second copy with the same client id or port.
+- Never `kill -9` a bot copy or let it crash-loop in your lobby: it stays as a ghost and the run can't start. Back out of the lobby and host again. `/botstop`, quitting it from the Dock, `kill -TERM`, or quitting your own game are all clean.
+- Never press Load in the Multiplayer menu without `--fastmp host` in the launch options, and never use `--fastmp load`: the co-op save is renamed to `.corrupt`. To go on with a saved co-op run, set `--fastmp host`, press Load, then `/bot add`: the copy takes the save's player id and character.
+- If a bot leaves a lobby where everyone else is ready, the run starts without it (the game's rule).
 
 ## Back to normal play
 
-1. `/stop` for the bot. Check: `scripts/coop-bot.sh --dry-run` says "Brain autostart is off".
-2. Quit both copies.
-3. Remove the Steam launch option. While it is set, your game opens a lobby at every main menu, and your Host and Join buttons only do local lobbies.
-4. A co-op run you saved in the test: without the launch option, the Multiplayer menu shows Load and Abandon in place of Host. Abandon clears it. So does Load, with an error. Either way the save is renamed to `.corrupt` and nothing else is touched (expected). To play it on instead, see the rules above.
-5. Mods: tick again what you switched off. If local copies of mods are in the game's mods folder, delete those folders to get Workshop updates again. Keep `SpireMind`.
-6. These can stay: the bot's profile (`default/1000`, apart from your own `steam/` folder) and its logs in `~/sts2bot`.
+1. Quit your game; the copies go with it.
+2. Remove the launch option. While it is set, your game opens a lobby at every main menu.
+3. These can stay: the bots' profiles (`default/1000` and up, apart from your own `steam/` folder), `~/sts2bot` and `~/.config/spiremind/bot-*`. Delete `default/<id>/modded/profile1/saves/progress.save` to give a bot your newer unlocks at its next start.
 
-## What to note down for the next round
+## What the bot sees in co-op
 
-- Did `--fastmp host_standard` reach the game (your log), and did the script see the lobby ("A local lobby is open")?
-- Did macOS ask about network connections?
-- Did the bot's window open as a small window, with no popup before the join? How big?
-- Did `~/sts2bot/godot-1000.log` fill up, or only the `.out` file?
-- Seconds from starting the script to "The bridge answers", and to "It is in your lobby". Did the script see the join?
-- The names shown in the lobby.
-- Did the join pass the first time? If not: the popup text and the log line.
-- Did the tutorial question show, and did No start the run?
-- Did `/start` work from the window, and from `curl`?
-- After `/start`: which credit it played on, and whether "system prompt built" lists `coop.md`.
-- Did anything play your hand? It must not.
-- Where the bot got stuck or waited: end of turn, map vote, shared events, treasure, rest site (Mend), rewards.
-- Did the two games drift apart (a desync message, different HP or cards in the two windows)?
-- Does the bot's window keep up while it is hidden behind your game?
-- What closing did: Save and Quit or Give Up on your side, and what the bot's window did then. Did a ghost stay anywhere?
-- Did the run show up in your own history and stats as you expected?
-- Did BetterSpire2's layout or settings change after the bot's copy ran?
-- `/budget` at the end.
+Code: `src/SpireMind/Game/Coop/Teammates.cs` (the players), `CoopManners.cs` (the rules, pure functions) and the co-op parts of the screen readers. Game facts: `sts2-notes/coop-api-v0.107.1/votes.md`, `players.md`. All of it shows only in a multiplayer run with more than one player; a solo snapshot is unchanged except for reviving enemies (below).
+
+**Who is followed.** A bot copy follows the human's votes; your own copy follows nobody. In a local session the human is the host. `SPIREMIND_COOP_WAIT` sets how many seconds the bot waits for your vote (default 30; 0 never waits, `never` always waits).
+
+**`team` on every screen**: the other players in slot order.
+
+| Field | Meaning |
+|---|---|
+| `id` | `p0`, `p1`...: the slot, the same on every copy; in a fight the target id |
+| `name`, `character`, `net_id` | "Mark", "Ironclad", 1 for the host, 1000 and up for bots |
+| `hp`, `max_hp`, `block`, `dead`, `host`, `human` | `block` only above 0; the flags only when true |
+| `ended_turn` / `map_vote` | in a fight / outside one, once cast: `(col,row)` |
+| `powers`, `incoming` | in a fight: their powers, and what the shown intents deal to them before Block |
+
+Rest site, rewards, shop, treasure and per-player events also carry `co_op`: one line on what the room means for the group and who already waits on the map.
+
+**Map.** `next[n].votes` (who voted there), `vote.rule`, `vote.voted` ("1 of 2 players have voted (still to come: you)"), `vote.yours`, `vote.follow` (the action id that follows the human, also the first action), `vote.do` (what a polite bot does now). `map:<n>` votes, or changes a standing vote. `stop_drawing` shows when map drawing mode was left on. Potions only before the vote. The bot waits when:
+- you have not voted (30 s of you looking at the map, then it picks and says which);
+- you voted but are on another screen and its vote would move the party (up to 30 s, 45 s at most, 4 s when you are just in the room);
+- a potion of its own is still in use, or a fight is starting;
+- you voted for a node its copy can't click (20 s, then the other nodes with a "cannot follow" line).
+
+A vote the host never echoed is cleared after 8 s and offered again.
+
+**Fight.** `you` is the bot's own target id. `play:<i>>p<j>` and `potion:<slot>>p<j>` target a teammate. `incoming_damage` is the bot's own; `team[].incoming` can differ. No undo for `end_turn`. A card play waits for the host's echo ("resolving <card>"), not a timer. Solo too: an enemy at 0 HP that comes back is listed with `reviving: true`, `untargetable: true` and its intent, and is never a target.
+
+**Rest site.** Mend is an ordinary option: `option:<n>` with one teammate, `option:<n>>p<j>` with several, labelled "Mend Mark (p0): heals them 21 HP (34/70 now), ...". It runs through the game's own targeting arrow in one step; a failure cancels the arrow and the option is not used up.
+
+**Rewards.** Per player, nobody waits. The `proceed` label counts the rewards still unclaimed. After an act's last boss `act_vote` shows the count; proceed there is the vote and can't be taken back.
+
+**Treasure.** `relics[n].votes`, `vote.rule`, `vote.voted`, `vote.do`. The bot lets you pick first, then takes a relic nobody voted for. `proceed` shows once the relics are handed out.
+
+**Events.** A shared event (`shared_vote: true`) is a vote on every page: `options[n].votes`, `options[n].will_kill` (not offered), `vote.*` as on the map. `option:<n>` votes or changes a vote until the page is decided. A single-option page is voted at once. Potions only before the bot's vote. A host vote already on a new page after a page the bot voted first on may be left over: it is listed as `options[n].unconfirmed_votes` and not followed until it changes.
+
+**Never offered.** Anything in a room once the bot's map vote is out or while a fight is starting ("your map vote is in: nothing in this room may be touched until the party has moved"); a second click on the chest or boss proceed; an option that kills the bot or a teammate.
+
+**In the bot's log**: `coop: voted for Elite at (2,5) on the map`, `coop: voted for <option> in the shared event (...)`, `coop: Mend aimed at Mark (p0) (34/70 hp, heals 21)` and how the arrow was finished, `coop: the host never recorded the map vote ...`, `coop: the vote for <relic> never reached the game ...`, `coop: the map point (c,r) the human voted for has refused clicks here for 20 s ...`, `coop: <name> already has a vote on the new event page ...`.
+
+**To check in the first run**
+- With your vote in and your rewards screen open, the bot holds its vote until you are back on the map.
+- Mend: the arrow's log line, the heal on your character, and the bot's proceed afterwards.
+- Shared event: the bot votes after you on a page with a choice and at once on a one-option page; with its vote in, it is offered no potion.
+- Chest: the bot picks after you and takes the other relic.
+- A standing vote of the bot's with yours missing: about one model request a minute on the API brain. A `/play` or subscription client must not loop.

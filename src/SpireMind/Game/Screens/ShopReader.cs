@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using SpireMind.Game.Coop;
 
 // Same namespace as ScreenRouter, which refers to the readers unqualified.
 namespace SpireMind.Game;
@@ -19,6 +20,10 @@ namespace SpireMind.Game;
 /// purchase is still pending; the router hands those to their readers and this one reports
 /// "buying ..." until the purchase settles. The merchant's tutorial (NMerchantFtue) is a modal
 /// the first proceed on a profile shows instead of leaving, unless the inventory was opened first.
+///
+/// Co-op: every player has their own stock and nobody waits in the shop, so the state only
+/// adds the "team" list and a "co_op" line (buy first, then leave; who already waits on the
+/// map). Once our map vote is out the shop offers nothing more.
 /// </summary>
 internal sealed class ShopReader : IScreen
 {
@@ -158,8 +163,14 @@ internal sealed class ShopReader : IScreen
         if (shop.Open) _openPending = false;
 
         var state = BuildState(ctx, rs, me, shop);
+        if (Teammates.Team(ctx) is { } team)
+        {
+            state["team"] = team;
+            state["co_op"] = Teammates.RoomNote(ctx, CoopManners.ShopNote);
+        }
+
         var actions = new List<LegalAction>();
-        var waiting = PurchaseOrArrival();
+        var waiting = PurchaseOrArrival() ?? Teammates.RoomClosed(ctx);
         if (waiting is null && ParasolBusy(me))
             waiting = "Lord's Parasol is buying out the shop";
         if (waiting is null && TipButton(room) is { } tip)
@@ -190,6 +201,9 @@ internal sealed class ShopReader : IScreen
 
     public ActionResult Execute(GameContext ctx, Node? node, string actionId)
     {
+        if (Teammates.RoomClosed(ctx) is { } closed)
+            return ActionResult.Fail($"Not now: {closed}.");
+
         if (PotionActions.TryExecute(ctx, actionId, false, out var potionResult))
             return potionResult;
 
