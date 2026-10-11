@@ -198,7 +198,7 @@ public class CoopSettingsTests : IDisposable
     }
 
     [Fact]
-    public void Saving_an_instance_writes_only_model_effort_and_autostart_to_its_own_file()
+    public void Saving_an_instance_writes_only_what_the_commands_change_to_its_own_file()
     {
         var sharedText = """{ "model": "sonnet", "monthly_budget_usd": 50, "repo": "/tmp/sts2b" }""";
         Write(Shared, "config.json", sharedText);
@@ -262,4 +262,49 @@ public class CoopSettingsTests : IDisposable
         var single = BrainSettings.Load(Bot, Env());
         Assert.Equal(Bot, BrainPaths.Resolve(single, modDir: null).NotesRoot);
     }
+
+    [Fact]
+    public void An_instance_keeps_a_fight_effort_set_in_the_chat_across_a_reload()
+    {
+        Write(Shared, "config.json", """{ "model": "sonnet" }""");
+        var chat = new ChatHub { BotName = "Silent" };
+        var controller = NewController(chat);
+
+        var reply = chat.PostFromHuman("Mark", "/effort elite max").Reply!;
+        Assert.DoesNotContain("Couldn't save", reply);
+        chat.PostFromHuman("Mark", "/effort boss same");
+
+        // /model reads config.json again before it changes anything.
+        chat.PostFromHuman("Mark", "/model haiku");
+        Assert.Equal("max", controller.Settings.EliteEffort);
+        Assert.Equal(BrainSettings.SameEffort, controller.Settings.BossEffort);
+        var again = LoadBot();
+        Assert.Equal("max", again.EliteEffort);
+        Assert.Equal(BrainSettings.SameEffort, again.BossEffort);
+        Assert.Equal("""{ "model": "sonnet" }""", File.ReadAllText(Path.Combine(Shared, "config.json")));
+    }
+
+    [Fact]
+    public void An_instance_fight_effort_back_at_its_default_overrides_the_shared_one()
+    {
+        Write(Shared, "config.json", """{ "elite_effort": "low" }""");
+        var chat = new ChatHub { BotName = "Silent" };
+        var controller = NewController(chat);
+        Assert.Equal("low", controller.Settings.EliteEffort);
+
+        chat.PostFromHuman("Mark", "/effort elite default");
+
+        Assert.Equal(BrainSettings.DefaultWord, ReadJson(Bot)["elite_effort"]!.GetValue<string>());
+        Assert.Null(LoadBot().EliteEffort);
+        Assert.False(ReadJson(Bot).ContainsKey("boss_effort"));
+    }
+
+    private BrainController NewController(ChatHub chat) => new(
+        loadSettings: () => LoadBot(),
+        saveSettings: s => s.Save(),
+        createApi: _ => throw new InvalidOperationException("no brain in this test"),
+        createSubscription: _ => throw new InvalidOperationException("no brain in this test"),
+        currentScreen: _ => Task.FromResult<string?>("menu"),
+        spend: new SpendTracker(Shared),
+        chat: chat);
 }

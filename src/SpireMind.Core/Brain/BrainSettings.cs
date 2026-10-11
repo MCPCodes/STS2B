@@ -255,8 +255,11 @@ public sealed record BrainSettings
     /// config.json.bak so a hand edit with a typo isn't lost. Throws <see cref="IOException"/>
     /// or <see cref="UnauthorizedAccessException"/> when the file can't be written.
     ///
-    /// An instance writes only model, effort and autostart (all the chat commands change) into
-    /// its own config.json, keeping every other key there, and never writes the shared file.
+    /// An instance writes only what the chat commands change (model, effort, elite_effort,
+    /// boss_effort and autostart) into its own config.json, keeping every other key there, and
+    /// never writes the shared file. A fight effort back at its default is left out of this
+    /// copy's file, or written as "default" when the shared file sets one, so the shared value
+    /// can't come back on the next load.
     /// </summary>
     public void Save()
     {
@@ -267,6 +270,8 @@ public sealed record BrainSettings
         {
             json["model"] = Model;
             json["effort"] = Effort;
+            SetFightEffort(json, "elite_effort", EliteEffort);
+            SetFightEffort(json, "boss_effort", BossEffort);
             json["autostart"] = Autostart;
             ConfigFiles.WriteJson(path, json);
             return;
@@ -557,6 +562,18 @@ public sealed record BrainSettings
     /// ASCII without spaces or quotes. Says nothing about whether the API accepts it.</summary>
     internal static bool LooksLikeKey(string key) =>
         key.Length > 0 && key.All(c => c > ' ' && c < 127 && c is not '"' and not '\'');
+
+    // An instance's elite_effort or boss_effort. Null (the default) is a left-out key, unless the
+    // shared config.json sets that key, which would then win on the next load.
+    private void SetFightEffort(JsonObject json, string name, string? value)
+    {
+        if (value is not null)
+            json[name] = value;
+        else if (ReadConfig(SharedConfigPath, SharedConfigPath, []) is { } shared && shared.ContainsKey(name))
+            json[name] = DefaultWord;
+        else
+            json.Remove(name);
+    }
 
     private static void SetOrRemove(JsonObject json, string name, string? value)
     {

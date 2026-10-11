@@ -12,7 +12,9 @@ namespace SpireMind.Game;
 /// brings their lines into his chat log and onto their players as speech bubbles. A bot copy
 /// never relays. The relay works on its own pool tasks; the only game work here is
 /// <see cref="Tick"/>, which refreshes the list of bot copies the game started, on the main
-/// thread. A failure only loses co-op, never the bridge, the chat or the brain.
+/// thread. A failure only loses co-op, never the bridge, the chat or the brain. When the game
+/// quits, the relay is stopped and its log goes quiet, since the engine it prints through may
+/// already be gone.
 /// </summary>
 internal static class CoopWiring
 {
@@ -20,18 +22,29 @@ internal static class CoopWiring
 
     private static CoopBotsAdapter? _adapter;
     private static DateTime _nextTick;
+    private static int _shutDown;
+    private static volatile bool _quiet;
 
     /// <summary>
     /// Builds and starts the relay for the human's copy, probing the ports in
     /// SPIREMIND_BOT_PORTS or else 17773 to 17775. Call once on the main thread, after the
-    /// bridge has started.
+    /// bridge and the chat box have started.
     /// </summary>
+    /// <param name="inCoop">True in a co-op run or lobby; outside co-op only what names a linked
+    /// bot goes to it. Called from the chat's threads, so it must return at once and not touch
+    /// the game.</param>
     /// <returns>The running relay; null for a bot copy, or when it couldn't start (logged).</returns>
     internal static CoopRelay? StartRelay(InstanceRole role, ChatHub chat, int port, MainThreadQueue main,
-        Action<string> log, Action<string> logError)
+        Func<bool> inCoop, Action<string> log, Action<string> logError)
     {
         if (role.IsBot)
             return null;
+
+        // The relay logs from its pool tasks; once the game is quitting, nothing is printed.
+        Action<string> info = line => { if (!_quiet) log(line); };
+        Action<string> warn = line => { if (!_quiet) logError(line); };
+        log = info;
+        logError = warn;
 
         try
         {
@@ -44,16 +57,50 @@ internal static class CoopWiring
             // still links bot copies started by hand (scripts/coop-bot.sh).
             var adapter = CoopBotsAdapter.TryCreate(main, logError);
             var relay = new CoopRelay(chat, new CoopRelayOptions { OwnPort = port, ProbePorts = ports }, adapter,
-                line => log($"coop: {line}"));
+                line => log($"coop: {line}"), inCoop: inCoop);
             relay.Start();
 
             _adapter = adapter;
+            HookExit(relay, warn);
             return relay;
         }
         catch (Exception ex)
         {
             logError($"coop: the chat relay to bot copies couldn't start, so bots can't be talked to from this window: {ex}");
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Stops the relay when the game quits: when the scene tree's root leaves the tree and, in
+    /// case that never comes, when the process exits. Only the first does anything; the log is
+    /// muted first, so a poll failing during teardown prints nothing.
+    /// </summary>
+    private static void HookExit(CoopRelay relay, Action<string> warn)
+    {
+        void ShutDown()
+        {
+            _quiet = true;
+            if (Interlocked.Exchange(ref _shutDown, 1) != 0)
+                return;
+            _adapter = null;
+            try { relay.Dispose(); }
+            catch (Exception) { /* quitting anyway */ }
+        }
+
+        try { AppDomain.CurrentDomain.ProcessExit += (_, _) => ShutDown(); }
+        catch (Exception ex) { warn($"coop: couldn't hook process exit: {ex.Message}"); }
+
+        try
+        {
+            if (Engine.GetMainLoop() is SceneTree { Root: { } root })
+                root.Connect(Node.SignalName.TreeExiting, Callable.From(() => ShutDown()));
+            else
+                warn("coop: no scene tree to hook game exit on; relying on process exit");
+        }
+        catch (Exception ex)
+        {
+            warn($"coop: couldn't hook game exit: {ex.Message}");
         }
     }
 

@@ -172,7 +172,7 @@ public class InstanceRoleTests
     [Theory]
     [InlineData(false, false, false, null)]
     [InlineData(false, true, false, InstanceRole.HumanCoopNoBotsLine)]
-    [InlineData(false, false, true, InstanceRole.HumanCoopLine)]
+    [InlineData(false, false, true, null)] // solo play with a bot copy still running stays solo play
     [InlineData(false, true, true, InstanceRole.HumanCoopLine)]
     [InlineData(true, false, false, null)]
     [InlineData(true, true, false, null)]

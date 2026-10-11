@@ -140,6 +140,7 @@ public sealed class ApiBrain : IPlayBrain
     private readonly Action<string> _log;
     private readonly Func<DateTime> _clock;
     private readonly Func<TimeSpan, CancellationToken, Task> _delay;
+    private readonly Func<string?>? _blocked;
 
     private readonly object _gate = new();
     private CancellationTokenSource? _cts;
@@ -175,6 +176,7 @@ public sealed class ApiBrain : IPlayBrain
     private int _conversation;
     private int _turn;
     private int _transcribed;
+    private bool _heldBack; // the last step found the brain blocked and sent nothing
 
     /// <param name="api">The Messages API (<see cref="ClaudeClient"/>).</param>
     /// <param name="tools">The game tools: <see cref="BotToolsHost"/> around the <see cref="BotTools"/> instance the MCP endpoint uses.</param>
@@ -197,6 +199,11 @@ public sealed class ApiBrain : IPlayBrain
     /// throws are swallowed.</param>
     /// <param name="clock">Time source for tests; defaults to <see cref="DateTime.UtcNow"/>.</param>
     /// <param name="delay">Waits for tests; defaults to <see cref="Task.Delay(TimeSpan, CancellationToken)"/>.</param>
+    /// <param name="blocked">Why no brain may play in this copy right now (the controller's
+    /// <see cref="BrainController.Blocked"/>), or null when one may. Checked before every request
+    /// and before every act or act_sequence, so a brain the controller hasn't stopped yet (its
+    /// poll runs every few seconds) never sends or acts once a co-op run starts. Must return at
+    /// once and not touch the game; one that throws counts as null.</param>
     public ApiBrain(
         IClaudeApi api,
         IToolHost tools,
@@ -211,7 +218,8 @@ public sealed class ApiBrain : IPlayBrain
         Action<string>? announce = null,
         Action<string>? log = null,
         Func<DateTime>? clock = null,
-        Func<TimeSpan, CancellationToken, Task>? delay = null)
+        Func<TimeSpan, CancellationToken, Task>? delay = null,
+        Func<string?>? blocked = null)
     {
         _api = api;
         _host = tools;
@@ -227,6 +235,7 @@ public sealed class ApiBrain : IPlayBrain
         _log = log ?? (_ => { });
         _clock = clock ?? (() => DateTime.UtcNow);
         _delay = delay ?? Task.Delay;
+        _blocked = blocked;
     }
 
     /// <summary>
@@ -477,6 +486,7 @@ public sealed class ApiBrain : IPlayBrain
             _waitShown = null;
             _fightRoom = null;
             _perMessageEffortRefused = false;
+            _heldBack = false;
 
             // Nothing is sent until a run is in progress or the human writes.
             await IdleUntilPlayAsync(ct);
@@ -520,14 +530,29 @@ public sealed class ApiBrain : IPlayBrain
     // One request, its accounting, and whatever its response asks for.
     private async Task StepAsync(CancellationToken ct)
     {
+        // No brain may play here (a co-op run in the human's copy): send nothing and wait for
+        // the controller, which stops this brain at its next poll.
+        if (BlockedReason() is { } blocked)
+        {
+            if (!_heldBack)
+                Log($"brain: holding back: {blocked}");
+            _heldBack = true;
+            await _delay(IdlePollInterval, ct);
+            return;
+        }
+        _heldBack = false;
+
         var settings = _settings();
         var now = _clock();
         var cap = settings.MonthlyBudgetUsd;
         // Records this request as in flight, so other copies count it against the same cap.
         // Every way out below that doesn't reach _spend.Add cancels it.
-        if (!_spend.TryBegin(cap, now, out var month))
-            throw new StopBrainException(BrainStopReason.MonthlyCap,
-                Invariant($"Monthly API budget reached: ${month:0.00} of ${cap:0.00} spent this month, so the API brain stopped."));
+        // A conversation's first request writes the whole prompt to the cache, so it is
+        // estimated high for the other copies.
+        if (!_spend.TryBegin(cap, now, out var month, freshConversation: _messages.Count <= 1))
+            throw new StopBrainException(BrainStopReason.MonthlyCap, month >= cap
+                ? Invariant($"Monthly API budget reached: ${month:0.00} of ${cap:0.00} spent this month, so the API brain stopped.")
+                : Invariant($"Monthly API budget nearly reached: ${month:0.00} of ${cap:0.00} spent this month, and the other copies' requests in flight would go over it, so the API brain stopped."));
 
         string model;
         JsonObject request;
@@ -689,7 +714,7 @@ public sealed class ApiBrain : IPlayBrain
         if (!InRun)
         {
             var idle = await IdleUntilPlayAsync(ct);
-            AddUser(new JsonArray(TextBlock($"{KeepPlayingWithState}\n{idle.Payload.ToJsonString(ModelJson)}")));
+            AddUser(WithDroppedChat(new JsonArray(TextBlock($"{KeepPlayingWithState}\n{idle.Payload.ToJsonString(ModelJson)}")), idle.Payload));
             return;
         }
 
@@ -712,7 +737,21 @@ public sealed class ApiBrain : IPlayBrain
         var waited = await WaitLocallyAsync(ct);
         if (HasChatMessages(waited.Payload))
             _endTurnsInRow = 0;
-        AddUser(new JsonArray(TextBlock($"{KeepPlayingWithState}\n{waited.Payload.ToJsonString(ModelJson)}")));
+        AddUser(WithDroppedChat(new JsonArray(TextBlock($"{KeepPlayingWithState}\n{waited.Payload.ToJsonString(ModelJson)}")), waited.Payload));
+    }
+
+    // Adds the chat lines that polls dropped on the way to payload (in co-op, the other bots'
+    // lines, which never end a wait or an idle stretch) as a text block, so they reach the model
+    // with the payload instead of being cleared unseen after the next response. The payload's
+    // own chat.messages were the last ones observed, so they are left out here.
+    private JsonArray WithDroppedChat(JsonArray blocks, JsonNode payload)
+    {
+        var carried = payload["chat"]?["messages"] is JsonArray messages ? messages.Count(m => m is not null) : 0;
+        var dropped = _unseenChat.Count - carried;
+        if (dropped > 0)
+            blocks.Add(TextBlock("Earlier lines in the game chat while you waited (teammate: true marks another bot's line, the rest are the human's):\n" +
+                                 new JsonArray(_unseenChat.Take(dropped).Select(m => m.DeepClone()).ToArray()).ToJsonString(ModelJson)));
+        return blocks;
     }
 
     // Adds a user message, then starts afresh when a new run started, the run changed or the
@@ -1006,7 +1045,9 @@ public sealed class ApiBrain : IPlayBrain
             ToolOutcome outcome;
             if (use.Name is "act" or "act_sequence")
                 _waitShown = null;
-            if (use.Name == "wait_for_decision")
+            if (use.Name is "act" or "act_sequence" && BlockedReason() is { } blocked)
+                outcome = new ToolOutcome(new JsonObject { ["error"] = $"Not run: {blocked}" }, IsError: true);
+            else if (use.Name == "wait_for_decision")
                 outcome = await WaitLocallyAsync(ct);
             else if (_notes.Handles(use.Name))
                 outcome = await _notes.CallAsync(use.Name, use.Input, ct);
@@ -1123,6 +1164,21 @@ public sealed class ApiBrain : IPlayBrain
                 _newRunPending = true;
             _inRun = inRun;
             lock (_gate) _lastSeenInRun = inRun;
+        }
+    }
+
+    // The blocked callback's reason, or null. A throwing callback counts as null.
+    private string? BlockedReason()
+    {
+        if (_blocked is not { } blocked)
+            return null;
+        try
+        {
+            return blocked() is { } reason && !string.IsNullOrWhiteSpace(reason) ? reason : null;
+        }
+        catch (Exception)
+        {
+            return null;
         }
     }
 

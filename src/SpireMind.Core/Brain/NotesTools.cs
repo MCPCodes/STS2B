@@ -18,6 +18,15 @@ public sealed record NotesOptions
     /// <summary>The absolute path of a lock file every copy of the game takes around each notes
     /// operation (<see cref="FileLock"/>), or null for this instance's own lock only.</summary>
     public string? LockFile { get; init; }
+
+    /// <summary>
+    /// True for a bot copy in co-op: an existing wiki page can be replaced only after this
+    /// conversation read it (or wrote it), since the prompt carries only the wiki index and
+    /// another copy may have written the page. False (the human copy, and solo play) takes
+    /// the pages as they were when the prompt was built as seen, as before co-op.
+    /// strategy/learned.md, whose whole text is in the prompt, is taken as seen either way.
+    /// </summary>
+    public bool ReadPagesBeforeRewrite { get; init; }
 }
 
 /// <summary>
@@ -39,7 +48,10 @@ public sealed record NotesOptions
 /// <item>strategy/learned.md and the wiki's pages are guarded: notes_write refuses to replace a
 /// file someone else changed since this instance last saw it (a read, its own write, or what was
 /// there when the brain last built its prompt, see <see cref="ResetSeen"/>), so a copy can't
-/// wipe another's lesson. notes_append is never refused, since it loses nothing.</item>
+/// wipe another's lesson. A bot copy (<see cref="NotesOptions.ReadPagesBeforeRewrite"/>) must
+/// also have read an existing wiki page in this conversation before replacing it, since its
+/// prompt lists the pages without their text. notes_append is never refused, since it loses
+/// nothing.</item>
 /// </list>
 /// </summary>
 public sealed partial class NotesTools
@@ -78,6 +90,7 @@ public sealed partial class NotesTools
     private readonly Func<DateTime> _clock;
     private readonly string _journalFile;
     private readonly string? _lockFile;
+    private readonly bool _readPages;
 
     // The shared files' content as this instance last saw it, by file: the SHA-256 of its bytes,
     // or "" when it was missing. No entry means it hasn't seen the file at all. Under _gate.
@@ -100,6 +113,7 @@ public sealed partial class NotesTools
         _journalFile = journal;
         JournalPath = Path.Combine(Root, journal.Replace('/', Path.DirectorySeparatorChar));
         _lockFile = string.IsNullOrWhiteSpace(options.LockFile) ? null : options.LockFile;
+        _readPages = options.ReadPagesBeforeRewrite;
         SeedSeen();
     }
 
@@ -248,7 +262,7 @@ public sealed partial class NotesTools
             // A file that exists and isn't what this instance last saw was changed by someone
             // else; replacing it would wipe that change. A missing file has nothing to lose.
             if (IsGuarded(file) && old is not null && (!_seen.TryGetValue(file, out var seen) || seen != Hash(old)))
-                return ChangedSinceRead(file);
+                return seen is null && _readPages && IsWikiPage(file) ? NotReadYet(file) : ChangedSinceRead(file);
             if (IsWikiPage(file) && old is not null && !KeepsFacts(Decode(old), content))
                 return Error($"{file} has a Facts section, verified from the game files, so a rewrite must keep everything above " +
                              "its ## Lessons heading exactly as it is and change only the Lessons. Read the page with notes_read and " +
@@ -350,10 +364,11 @@ public sealed partial class NotesTools
     private static bool IsGuarded(string file) => file == Learned || IsWikiPage(file);
 
     /// <summary>
-    /// Takes strategy/learned.md and the wiki's pages as they are now as what the model has
-    /// seen, forgetting older reads. The brain calls it right before it builds a system prompt,
-    /// which holds learned.md and the wiki index. Called before, not after, so a change made in
-    /// between makes a later write refused rather than let through.
+    /// Takes strategy/learned.md (and, unless <see cref="NotesOptions.ReadPagesBeforeRewrite"/>,
+    /// the wiki's pages) as they are now as what the model has seen, forgetting older reads. The
+    /// brain calls it right before it builds a system prompt, which holds learned.md and the wiki
+    /// index; a fresh conversation remembers no page it read before. Called before, not after, so
+    /// a change made in between makes a later write refused rather than let through.
     /// </summary>
     public void ResetSeen()
     {
@@ -361,13 +376,15 @@ public sealed partial class NotesTools
     }
 
     // What this instance sees when it is made: about what the brain's prompt is built from.
-    // Unreadable files are left unseen, so a write waits for a read. Caller holds _gate (or is
-    // the constructor).
+    // With ReadPagesBeforeRewrite that is learned.md alone, since the prompt lists the pages
+    // without their text. Unreadable files are left unseen, so a write waits for a read. Caller
+    // holds _gate (or is the constructor).
     private void SeedSeen()
     {
         _seen.Clear();
         var files = new List<string> { Learned };
-        files.AddRange(ListWiki(Root).Select(p => p.File));
+        if (!_readPages)
+            files.AddRange(ListWiki(Root).Select(p => p.File));
         foreach (var file in files)
         {
             try
@@ -391,6 +408,14 @@ public sealed partial class NotesTools
         using var reader = new StreamReader(new MemoryStream(bytes), Utf8, detectEncodingFromByteOrderMarks: true);
         return reader.ReadToEnd();
     }
+
+    private static ToolOutcome NotReadYet(string file) => new(new JsonObject
+    {
+        ["error"] = $"{file} already exists and you haven't read it in this conversation, and another bot copy may have written " +
+                    "it, so replacing it blind could wipe that. Read it with notes_read, merge your change into what is there, " +
+                    "and write it again, or add a line with notes_append.",
+        ["not_read"] = true,
+    }, IsError: true);
 
     private static ToolOutcome ChangedSinceRead(string file) => new(new JsonObject
     {

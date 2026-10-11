@@ -22,13 +22,17 @@ namespace SpireMind.Core.Coop;
 /// Every bot has one worker task that makes that bot's HTTP calls strictly in order (the lines
 /// and commands to send, and a poll of its log when there is nothing to send), so a poll never
 /// runs during a POST and a command's reply, recorded from the POST, is never shown again by
-/// the poll. Only http://127.0.0.1 is ever contacted, by port number. ChatHub calls are made
-/// with no lock of the relay's held. See docs/chat.md.
+/// the poll. Only http://127.0.0.1 is ever contacted, by port number, and redirects are never
+/// followed. ChatHub calls are made with no lock of the relay's held. See docs/chat.md.
+///
+/// Outside co-op (no co-op run or lobby, see the inCoop callback) Mark's window works as in
+/// solo play even while bot copies are linked: only a command or line that starts with a
+/// linked bot's character goes to that bot, everything else stays with this copy.
 /// </summary>
 public sealed partial class CoopRelay : IDisposable
 {
-    /// <summary>The commands typed in the human's window that go to the bot copies while any
-    /// exist (and /help with a bot's name).</summary>
+    /// <summary>The commands typed in the human's window that go to the bot copies in co-op
+    /// while any exist (and, in co-op or not, any of them or /help with a linked bot's name).</summary>
     public static IReadOnlyList<string> ForwardedCommands { get; } =
         ["start", "stop", "pause", "resume", "budget", "model", "effort"];
 
@@ -52,6 +56,7 @@ public sealed partial class CoopRelay : IDisposable
     private readonly ICoopBots? _coopBots;
     private readonly Action<string> _log;
     private readonly Func<DateTime> _clock;
+    private readonly Func<bool>? _inCoop;
     private readonly HttpClient _http;
     private readonly CancellationTokenSource _stop = new();
     private readonly CancellationToken _stopToken;
@@ -77,8 +82,12 @@ public sealed partial class CoopRelay : IDisposable
     /// <param name="coopBots">Starting bot copies and drawing bubbles, when the game offers it.</param>
     /// <param name="log">Log lines (no secrets ever go in them).</param>
     /// <param name="clock">Time source for the party chat limit; defaults to <see cref="DateTime.UtcNow"/>.</param>
+    /// <param name="inCoop">True while the human's game is in a co-op run or lobby. Called from
+    /// the chat's threads, so it must return at once and not touch the game. Outside co-op the
+    /// commands and lines go to a bot only when they name it first. Null counts as always in
+    /// co-op; a callback that throws counts as not in co-op.</param>
     public CoopRelay(ChatHub chat, CoopRelayOptions options, ICoopBots? coopBots = null,
-        Action<string>? log = null, Func<DateTime>? clock = null)
+        Action<string>? log = null, Func<DateTime>? clock = null, Func<bool>? inCoop = null)
     {
         ArgumentNullException.ThrowIfNull(chat);
         ArgumentNullException.ThrowIfNull(options);
@@ -87,20 +96,41 @@ public sealed partial class CoopRelay : IDisposable
         _coopBots = coopBots;
         _log = log ?? (_ => { });
         _clock = clock ?? (() => DateTime.UtcNow);
+        _inCoop = inCoop;
         _partyChat = options.PartyChat;
         _stopToken = _stop.Token;
         _http = options.Handler is { } handler
             ? new HttpClient(handler, disposeHandler: false)
-            : new HttpClient(new SocketsHttpHandler
-            {
-                // Loopback only: a proxy from the environment must never see these calls.
-                UseProxy = false,
-                ConnectTimeout = options.ProbeTimeout > TimeSpan.Zero ? options.ProbeTimeout : TimeSpan.FromSeconds(1),
-                PooledConnectionIdleTimeout = TimeSpan.FromSeconds(30),
-            });
+            : new HttpClient(NewLoopbackHandler(options), disposeHandler: true);
         // Each call has its own deadline.
         _http.Timeout = System.Threading.Timeout.InfiniteTimeSpan;
         _http.MaxResponseContentBufferSize = MaxResponseBytes;
+    }
+
+    /// <summary>
+    /// The handler the relay uses when the options give none: no proxy from the environment, and
+    /// redirects never followed, so whatever answers on a probed port can't send the relay (and
+    /// Mark's lines in a POST) to another host. A 3xx then counts as "not a bot".
+    /// </summary>
+    public static SocketsHttpHandler NewLoopbackHandler(CoopRelayOptions options) => new()
+    {
+        UseProxy = false,
+        AllowAutoRedirect = false,
+        ConnectTimeout = options.ProbeTimeout > TimeSpan.Zero ? options.ProbeTimeout : TimeSpan.FromSeconds(1),
+        PooledConnectionIdleTimeout = TimeSpan.FromSeconds(30),
+    };
+
+    /// <summary>True while the human's game is in a co-op run or lobby (always, without an
+    /// inCoop callback). Lock-free.</summary>
+    public bool InCoop
+    {
+        get
+        {
+            if (_inCoop is not { } inCoop)
+                return true;
+            try { return inCoop(); }
+            catch (Exception) { return false; }
+        }
     }
 
     /// <summary>True while a bot copy is linked (it answered within the last few polls) or the
@@ -371,6 +401,23 @@ public sealed partial class CoopRelay : IDisposable
             _log($"the worker for port {link.Port} failed: {ex}");
             Drop(link, $"{Label(link)}'s copy stopped answering.");
         }
+        finally
+        {
+            // The worker only ends once the link is dropped or the relay stops, so the link is
+            // done with: nothing may queue on it now, and its token source (registered on the
+            // relay's) and semaphore are released, so a copy that keeps dropping and relinking
+            // leaves nothing behind.
+            lock (_gate)
+            {
+                if (link.Live)
+                {
+                    link.Live = false;
+                    Volatile.Write(ref _liveCount, _peers.Values.Count(l => l.Live));
+                }
+            }
+            link.Cancel.Dispose();
+            link.Signal.Dispose();
+        }
     }
 
     private async Task<Polled> PollAsync(Link link, CancellationToken ct)
@@ -537,25 +584,34 @@ public sealed partial class CoopRelay : IDisposable
 
     // ---- The human's lines and commands ----
 
-    // Mark's own lines (typed in his window or posted to his /chat) go to every bot; each bot
-    // decides by name whether it is for it.
+    // Mark's own lines (typed in his window or posted to his /chat). In co-op they go to every
+    // bot, and each bot decides by name whether it is for it. Outside co-op a line goes only to
+    // the linked bot whose character it starts with ("Silent, ready?"), as this copy's own bot
+    // is the one he talks to there.
     private void OnLine(ChatLine line)
     {
         if (line.Kind != ChatLineKind.Human || line.Remote)
             return;
+        var inCoop = InCoop;
         var body = new JsonObject { ["from"] = line.From, ["text"] = line.Text }.ToJsonString();
+        var named = inCoop ? null : TargetWord().Match(line.Text) is { Success: true } m ? m.Groups["word"].Value : null;
         lock (_gate)
         {
             foreach (var link in _peers.Values.Where(l => l.Live))
-                EnqueueLocked(link, new Job(JobKind.Line, body));
+            {
+                if (inCoop || (named is not null && string.Equals(link.Character, named, StringComparison.OrdinalIgnoreCase)))
+                    EnqueueLocked(link, new Job(JobKind.Line, body));
+            }
         }
-        // This copy's brain doesn't play while bots exist, so nothing should pile up for it.
-        if (BotsExist)
+        // This copy's brain doesn't play in co-op, where the bots answer, so nothing should
+        // pile up for it.
+        if (inCoop && BotsExist)
             _chat.TakeUnread();
     }
 
-    // ChatHub.CommandFilter: the bots' commands go to the bots while any exist. Never waits:
-    // it only queues the POSTs, and each bot's answer is shown when it comes.
+    // ChatHub.CommandFilter: in co-op the bots' commands go to the bots while any exist; in co-op
+    // or not, one that names a linked bot first goes to that bot. Never waits: it only queues
+    // the POSTs, and each bot's answer is shown when it comes.
     private string? Filter(string from, string name, string args)
     {
         RefreshHelpNote();
@@ -566,6 +622,7 @@ public sealed partial class CoopRelay : IDisposable
         if (!BotsExist)
             return null;
 
+        var inCoop = InCoop;
         var (word, rest) = SplitTarget(args);
         lock (_gate)
         {
@@ -579,7 +636,11 @@ public sealed partial class CoopRelay : IDisposable
             }
 
             List<Link> targets;
-            if (target is not null)
+            if (target is null && !inCoop)
+            {
+                return null; // solo play: this copy's own command
+            }
+            else if (target is not null)
             {
                 targets = [target];
                 args = rest;
@@ -699,17 +760,27 @@ public sealed partial class CoopRelay : IDisposable
         return choice is null ? "Starting a bot copy..." : $"Starting a bot copy as {choice}...";
     }
 
+    // The game side's start, given StartTimeout: one that never ends (a copy that can't join)
+    // must not keep /bot add refusing for the rest of the session.
     private async Task StartCopyAsync(ICoopBots coopBots, string? choice)
     {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(_stopToken);
+        var timeout = _options.StartTimeout > TimeSpan.Zero ? _options.StartTimeout : CoopRelayOptions.DefaultStartTimeout;
         try
         {
-            var line = await coopBots.StartCopyAsync(choice, _stopToken);
+            deadline.CancelAfter(timeout);
+            var line = await coopBots.StartCopyAsync(choice, deadline.Token).WaitAsync(timeout, _stopToken);
             if (!string.IsNullOrWhiteSpace(line))
                 Announce(line);
         }
         catch (OperationCanceledException) when (_stopToken.IsCancellationRequested)
         {
             // The relay is stopping.
+        }
+        catch (Exception ex) when (ex is TimeoutException || (ex is OperationCanceledException && deadline.IsCancellationRequested))
+        {
+            _log($"/bot add: the game side's start didn't finish within {timeout.TotalSeconds.ToString("0", CultureInfo.InvariantCulture)} s");
+            Announce($"The bot copy didn't come up within {Duration(timeout)}. /bots shows what is running; /bot add tries again.");
         }
         catch (Exception ex)
         {
@@ -838,6 +909,15 @@ public sealed partial class CoopRelay : IDisposable
         if (ULong(json["net_id"]) is { } netId) link.NetId = netId;
         link.Playing = Text(json["playing"]);
         link.Paused = Bool(json["paused"]);
+    }
+
+    // "3 minutes", "90 seconds", "1 second".
+    private static string Duration(TimeSpan span)
+    {
+        var seconds = Math.Max(1, (long)Math.Round(span.TotalSeconds));
+        if (seconds >= 120 && seconds % 60 == 0)
+            return $"{(seconds / 60).ToString(CultureInfo.InvariantCulture)} minutes";
+        return seconds == 1 ? "1 second" : $"{seconds.ToString(CultureInfo.InvariantCulture)} seconds";
     }
 
     private static string NumberWord(int n) => n switch

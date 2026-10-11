@@ -6,6 +6,7 @@ using SpireMind.Game;
 using SpireMind.Patches;
 // An alias rather than the namespace, so a game type of the same name in the global usings can
 // never make it ambiguous.
+using CoopRelay = SpireMind.Core.Coop.CoopRelay;
 using InstanceInfo = SpireMind.Core.Coop.InstanceInfo;
 
 namespace SpireMind;
@@ -70,9 +71,12 @@ public static class ModEntry
             };
             _server.Start();
 
-            // The human copy finds the bot copies on localhost and relays the chat to them, so
-            // Mark talks to every bot from his own window. Null for a bot copy, or if it failed.
-            var relay = CoopWiring.StartRelay(role, chat, port, MainThread, Log, LogError);
+            // The co-op relay, started below once the chat box listens; null until then, for a
+            // bot copy, or if it failed.
+            CoopRelay? relay = null;
+            // In a co-op run or lobby. Lock-free flags: the last snapshot's, and the frame
+            // tick's look at the lobby and the run.
+            bool InCoop() => game.IsMultiplayer || InstancePoll.InCoop;
 
             // The in-game brain and its chat commands (docs/brain.md). Failing here only loses the brain.
             try
@@ -83,12 +87,17 @@ public static class ModEntry
                 var controller = BrainWiring.Start(chat, tools, waiter, () => game.IsMultiplayer, port,
                     () => server.ExternalClientActive(TimeSpan.FromSeconds(30)),
                     location.Length > 0 ? System.IO.Path.GetDirectoryName(location) : null,
-                    role, () => relay?.BotsExist == true, Log, LogError);
+                    role, InCoop, () => relay?.BotsExist == true, Log, LogError);
                 ReportPlaying(_instance, controller);
             }
             catch (Exception ex) { LogError($"brain skipped: {ex}"); }
 
             Overlay = StartOverlay(chat, ChatKeysPatched());
+
+            // The human copy finds the bot copies on localhost and relays the chat to them, so
+            // Mark talks to every bot from his own window. After the chat box, which shows only
+            // lines added once it listens, so "Silent joined the chat" is never missed.
+            relay = CoopWiring.StartRelay(role, chat, port, MainThread, InCoop, Log, LogError);
             tree.Connect(SceneTree.SignalName.ProcessFrame, Callable.From(OnFrame));
         }
         catch (Exception ex)

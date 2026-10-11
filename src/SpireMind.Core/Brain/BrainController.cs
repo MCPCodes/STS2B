@@ -24,7 +24,7 @@ public enum BrainKind { None, Api, Subscription }
 /// the run ended is started again when a run is in progress.</item>
 /// <item>Brains announce their own stops; the controller only adds the lines about switching.</item>
 /// <item>In co-op only the bot copies play. While <see cref="Blocked"/> gives a reason (the
-/// human copy with bots around, or in a co-op run), nothing starts here and a brain that plays
+/// human copy in a co-op run or lobby), nothing starts here and a brain that plays
 /// is stopped, with the reason said once. A bot copy has <see cref="ForceAutostart"/>, so its
 /// brain starts by itself without /start.</item>
 /// </list>

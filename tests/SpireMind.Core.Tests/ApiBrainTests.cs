@@ -204,6 +204,120 @@ public class ApiBrainTests
     }
 
     [Fact]
+    public async Task A_blocked_brain_sends_nothing_until_unblocked()
+    {
+        using var rig = new Rig();
+        rig.BlockedReason = InstanceRole.HumanCoopLine;
+        rig.Api.Then(Reply("end_turn", null, TextBlock("Done.")));
+
+        rig.Brain.Start();
+        await WaitFor(() => rig.Delays.Count(d => d == rig.Brain.IdlePollInterval) >= 3);
+        Assert.Equal(0, rig.Api.Count);
+        Assert.True(rig.Brain.IsRunning);
+        Assert.Single(rig.Logged, l => l == $"brain: holding back: {InstanceRole.HumanCoopLine}");
+
+        rig.BlockedReason = null;
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+        Assert.Equal(2, rig.Api.Count);
+    }
+
+    [Fact]
+    public async Task An_act_is_refused_once_blocked()
+    {
+        using var rig = new Rig();
+        rig.Api
+            .Then(() =>
+            {
+                // A co-op run started while the request was out.
+                rig.BlockedReason = InstanceRole.HumanCoopNoBotsLine;
+                return Reply("tool_use", null, ToolUse("toolu_a", "act", new JsonObject { ["action_id"] = "play:0", ["version"] = 1 }));
+            });
+
+        rig.Brain.Start();
+        await WaitFor(() => rig.Delays.Count(d => d == rig.Brain.IdlePollInterval) >= 3);
+        Assert.DoesNotContain(rig.Host.Calls, c => c.Name == "act");
+        Assert.Equal(1, rig.Api.Count);
+
+        rig.BlockedReason = null;
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+        var result = rig.Api[1]["messages"]!.AsArray()[^1]!["content"]![0]!;
+        Assert.True(result["is_error"]!.GetValue<bool>());
+        Assert.Contains($"Not run: {InstanceRole.HumanCoopNoBotsLine}", result["content"]!.GetValue<string>());
+        Assert.DoesNotContain(rig.Host.Calls, c => c.Name == "act");
+    }
+
+    [Fact]
+    public async Task Teammate_lines_from_a_local_wait_reach_the_model_after_an_ended_turn()
+    {
+        using var rig = new Rig();
+        var waits = 0;
+        rig.Host.Handler = (name, _, _) => Task.FromResult(name switch
+        {
+            "wait_for_decision" => ++waits == 1
+                ? Outcome(WithTeammate(Snap("combat", false, version: 4), "Defect", "Silent, I'll take the poison card"))
+                : Outcome(Snap("combat", true, version: 5)),
+            _ => Outcome(Snap("combat", false, version: 3)),
+        });
+        rig.Api.Then(Reply("end_turn", null, TextBlock("Waiting for my teammates.")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(2, rig.Host.Calls.Count(c => c.Name == "wait_for_decision"));
+        var blocks = rig.Api[1]["messages"]!.AsArray()[^1]!["content"]!.AsArray();
+        Assert.Equal(2, blocks.Count);
+        Assert.StartsWith(ApiBrain.KeepPlayingWithState, blocks[0]!["text"]!.GetValue<string>());
+        Assert.Contains("\"version\":5", blocks[0]!["text"]!.GetValue<string>());
+        var dropped = blocks[1]!["text"]!.GetValue<string>();
+        Assert.StartsWith("Earlier lines in the game chat while you waited", dropped);
+        Assert.Contains("Silent, I'll take the poison card", dropped);
+        Assert.Contains("\"teammate\":true", dropped);
+    }
+
+    [Fact]
+    public async Task Teammate_lines_from_idling_outside_a_run_reach_the_model()
+    {
+        using var rig = new Rig();
+        var states = 0;
+        rig.Host.Handler = (name, _, _) => Task.FromResult(name switch
+        {
+            "get_state" => ++states switch
+            {
+                1 => Outcome(Snap("combat", true)),
+                2 => Outcome(Snap("game_over", true)),
+                3 => Outcome(WithTeammate(Snap("menu", false), "Defect", "Good game, everyone")),
+                4 => Outcome(Snap("menu", false)),
+                _ => Outcome(WithChat(Snap("menu", false), "One more?")),
+            },
+            _ => Outcome(Snap("menu", false)),
+        });
+        rig.Api
+            .Then(Reply("tool_use", null, ToolUse("toolu_1", "get_state")))
+            .Then(Reply("end_turn", null, TextBlock("Run over.")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        var blocks = rig.Api[2]["messages"]!.AsArray()[^1]!["content"]!.AsArray();
+        Assert.Equal(2, blocks.Count);
+        Assert.Contains("One more?", blocks[0]!["text"]!.GetValue<string>());
+        var dropped = blocks[1]!["text"]!.GetValue<string>();
+        Assert.Contains("Good game, everyone", dropped);
+        Assert.DoesNotContain("One more?", dropped);
+    }
+
+    /// <summary>A tool result with another bot's line, as party chat relays it.</summary>
+    private static JsonObject WithTeammate(JsonObject payload, string from, string text)
+    {
+        payload["chat"] = new JsonObject
+        {
+            ["you_are"] = "Silent",
+            ["messages"] = new JsonArray(new JsonObject { ["from"] = from, ["text"] = text, ["teammate"] = true, ["seconds_ago"] = 0 }),
+        };
+        return payload;
+    }
+
+    [Fact]
     public async Task Wait_for_decision_returns_early_for_chat()
     {
         using var rig = new Rig();
@@ -2356,6 +2470,9 @@ file sealed class Rig : IDisposable
     public IToolHost? Tools { get; init; }
     public bool AnnounceThrows { get; init; }
     public bool LogThrows { get; init; }
+
+    /// <summary>What the brain's blocked callback returns (the controller's co-op gate).</summary>
+    public volatile string? BlockedReason;
     public DateTime Now { get; set; } = new(2026, 10, 10, 12, 0, 0, DateTimeKind.Utc);
     public TaskCompletionSource<(BrainStopReason Reason, string Message)> Stopped { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public bool StoppedWhileRunning { get; private set; }
@@ -2395,7 +2512,8 @@ file sealed class Rig : IDisposable
                 _delays.Enqueue(t);
                 ct.ThrowIfCancellationRequested();
                 await Task.Yield();
-            });
+            },
+            blocked: () => BlockedReason);
         brain.Stopped += (reason, message) =>
         {
             StoppedWhileRunning = brain.IsRunning;
