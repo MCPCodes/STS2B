@@ -1,6 +1,10 @@
 using System.Globalization;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+// Aliases rather than the namespace, so a game type of the same name in the mod's global usings
+// can never make them ambiguous.
+using PartyBot = SpireMind.Core.Coop.PartyBot;
+using PartyPitch = SpireMind.Core.Coop.PartyPitch;
 
 namespace SpireMind.Core;
 
@@ -29,11 +33,20 @@ public sealed partial class BotTools
     /// client went away (Esc in Claude Code) can't take chat messages nobody will read.</summary>
     private CancellationTokenSource? _liveWait;
 
+    /// <summary>The version of the decision the last wait_for_decision handed over, or
+    /// <see cref="NoneShown"/>; act and act_sequence clear it.</summary>
+    private long _waitShown = NoneShown;
+    private const long NoneShown = -1;
+
     /// <summary>Most ids one act_sequence takes.</summary>
     public const int MaxSequence = 12;
 
     public TimeSpan ActSettleTimeout { get; init; } = TimeSpan.FromSeconds(20);
     public TimeSpan MaxWait { get; init; } = TimeSpan.FromSeconds(240);
+
+    /// <summary>How long wait_for_decision holds back a co-op decision the last wait already
+    /// handed over, as <see cref="Brain.ApiBrain.RepeatWaitHold"/> does for the in-game brain.</summary>
+    public TimeSpan RepeatWaitHold { get; init; } = TimeSpan.FromSeconds(60);
 
     /// <summary>How act and act_sequence wait out a spoken line's hold
     /// (<see cref="ChatHub.SpeechHoldLeft"/>); tests replace it.</summary>
@@ -47,7 +60,63 @@ public sealed partial class BotTools
         _chat = chat;
     }
 
-    public IReadOnlyList<ToolSpec> Specs { get; } =
+    private PartyBot? _party;
+
+    /// <summary>
+    /// The bot copy's side of the party's planning sessions, or null (the human's copy, solo play
+    /// without co-op). Set once at mod load, before the bridge or a brain uses the tools; with it
+    /// the tools hold pick screens during a session, carry the turn brief and the plan under
+    /// "party", and offer party_pitch.
+    /// </summary>
+    public PartyBot? Party
+    {
+        get => Volatile.Read(ref _party);
+        set
+        {
+            if (Interlocked.CompareExchange(ref _party, value, null) is not null && value is not null)
+                throw new InvalidOperationException("BotTools.Party is set once.");
+        }
+    }
+
+    /// <summary>The tools: the game's, plus party_pitch in a bot copy that can plan with the party.</summary>
+    public IReadOnlyList<ToolSpec> Specs => Party is null ? BaseSpecs : PartySpecs;
+
+    // Built on first use: BaseSpecs, a static field further down, isn't set yet while the fields above it are.
+    private static IReadOnlyList<ToolSpec>? _partySpecs;
+    private static IReadOnlyList<ToolSpec> PartySpecs => _partySpecs ??= [.. BaseSpecs, PartyPitchSpec()];
+
+    private static ToolSpec PartyPitchSpec()
+    {
+        static JsonObject List(string what) => new()
+        {
+            ["type"] = "array",
+            ["items"] = new JsonObject { ["type"] = "string" },
+            ["maxItems"] = PartyPitch.MaxItems,
+            ["description"] = what,
+        };
+        return new("party_pitch",
+            "Only in a co-op planning session, when the result's party.your_turn is true. Give your part of the party plan: say is your " +
+            "line to the party (chat and bubble, under 150 characters; put a question for Mark there too). role is one of debuffer, " +
+            "protector, damage, support, flex. wants, needs, gives and calls take up to 4 short items each. question is one short " +
+            "question for Mark, if you need his view. Call wait_for_decision afterwards; it returns at your next turn or when the plan is set.",
+            Schema(new JsonObject
+            {
+                ["say"] = new JsonObject { ["type"] = "string", ["description"] = "Your line to the party" },
+                ["role"] = new JsonObject
+                {
+                    ["type"] = "string",
+                    ["enum"] = new JsonArray(PartyPitch.Roles.Select(r => (JsonNode)JsonValue.Create(r)!).ToArray()),
+                },
+                ["archetype"] = new JsonObject { ["type"] = "string", ["description"] = "The build you want, briefly" },
+                ["wants"] = List("Cards and relics you will take"),
+                ["needs"] = List("What you need from teammates"),
+                ["gives"] = List("What you will do for them"),
+                ["calls"] = List("Party-wide calls: who gets damage relics, Mend targets, route, boss duties"),
+                ["question"] = new JsonObject { ["type"] = "string", ["description"] = "One short question for Mark" },
+            }, required: ["say"]));
+    }
+
+    private static readonly IReadOnlyList<ToolSpec> BaseSpecs =
     [
         new("get_state",
             "Return the current Slay the Spire 2 snapshot: screen, facts (hand, enemies with intents, map, rewards, shop...), " +
@@ -57,6 +126,8 @@ public sealed partial class BotTools
             "Block until it is your turn to decide (or timeout_seconds passes), then return the snapshot. " +
             "It also returns early when the human sends you a chat message, maybe with awaiting_decision=false. " +
             "Use this instead of polling get_state, e.g. during enemy turns or while a co-op teammate chooses. " +
+            "In co-op, a decision the last wait already returned (your map vote is in and the human's isn't) is held back until " +
+            "something changes, for up to a minute, so calling it again really waits for the others. " +
             "While paused, pass the maximum timeout. A newer wait_for_decision cancels one still running.",
             Schema(new JsonObject
             {
@@ -68,7 +139,8 @@ public sealed partial class BotTools
         new("act",
             "Perform one legal action by id from the latest snapshot, then wait for the game to settle and return the next snapshot. " +
             "version is required: pass the version of the snapshot the id came from, so a stale id is refused instead of misfiring. " +
-            "Take the next id and version from the snapshot act returns.",
+            "Take the next id and version from the snapshot act returns. In a fight with teammates, an id from an older snapshot " +
+            "still runs when only teammates acted since and nothing it rests on moved; otherwise it is refused with what they changed.",
             Schema(new JsonObject
             {
                 ["action_id"] = new JsonObject { ["type"] = "string", ["description"] = "An id from snapshot.actions" },
@@ -82,7 +154,11 @@ public sealed partial class BotTools
             "then the rest of the turn. Those picks are checked when the choice opens, and a confirm the game no longer needs is skipped. " +
             "If only one card in hand could be picked, the game takes it without asking: leave the picks out. " +
             "It stops early when a label is gone, the screen changes any other way, your turn ends, " +
-            "an action is refused or changes nothing, the game doesn't settle, a chat message arrives or you are paused. End a sequence after " +
+            "an action is refused or changes nothing, the game doesn't settle, a chat message arrives or you are paused. " +
+            "In a fight with teammates they play at the same time, so before each step it also checks what they changed: your Block, " +
+            "energy, HP or powers, a planned target's HP, Block or powers, which enemies are alive, incoming_damage. On such a change it " +
+            "stops with \"A teammate acted: ...\" and you plan the rest of the turn from next; keep sequences short while teammates " +
+            "haven't ended their turn, and Block last. End a sequence after " +
             "any card or potion that draws, discovers, creates or transforms cards, has a random result you need to see, opens a pick from a " +
             "pile or ends your turn (a card that asks for hand cards and then draws, like Burning Pact: after its picks), and plan the rest " +
             "from the returned snapshot. end_turn can only be the last id; leave it out after a card that ends your turn.",
@@ -133,20 +209,30 @@ public sealed partial class BotTools
     /// <param name="takeChat">False for the curl debugging routes: unread messages are shown
     /// but stay unread, so peeking at /state doesn't take them from the model, and the result
     /// doesn't mark the bot as thinking, since nothing was handed to the model.</param>
-    internal async Task<ToolOutcome> CallAsync(string name, JsonObject args, bool takeChat, CancellationToken ct)
+    internal Task<ToolOutcome> CallAsync(string name, JsonObject args, bool takeChat, CancellationToken ct) =>
+        CallAsync(name, args, takeChat, holdRepeats: true, ct);
+
+    /// <param name="holdRepeats">False for the in-game brain, whose own loop holds a repeated
+    /// wait (ApiBrain.RepeatWaitHold), so the two holds don't add up.</param>
+    internal async Task<ToolOutcome> CallAsync(string name, JsonObject args, bool takeChat, bool holdRepeats, CancellationToken ct)
     {
+        // After an action or a pitch the model isn't repeating itself: the decision it was shown
+        // is its to answer now, so the next wait hands it over at once.
+        if (name is "act" or "act_sequence" or "party_pitch")
+            Interlocked.Exchange(ref _waitShown, NoneShown);
         ToolOutcome outcome;
         try
         {
             outcome = name switch
             {
                 "get_state" => new ToolOutcome(Present(await _waiter.CaptureAsync(ct))),
-                "wait_for_decision" => await WaitAsync(args, ct),
+                "wait_for_decision" => await WaitAsync(args, holdRepeats, ct),
                 "act" => await ActAsync(args, ct),
                 "act_sequence" => await ActSequenceAsync(args, ct),
                 "say" => Say(args),
                 "get_deck" => new ToolOutcome(await _game.DescribeDeckAsync(ct)),
                 "get_persona" => Persona(),
+                "party_pitch" when Party is not null => Pitch(args),
                 _ => new ToolOutcome(Error($"Unknown tool '{name}'"), IsError: true),
             };
         }
@@ -159,14 +245,15 @@ public sealed partial class BotTools
             outcome = new ToolOutcome(Error($"{ex.GetType().Name}: {ex.Message}"), IsError: true);
         }
         if (takeChat) TrackThinking(name, outcome.Payload);
-        return outcome with { Payload = WithChat(outcome.Payload, takeChat) };
+        return outcome with { Payload = WithParty(WithChat(outcome.Payload, takeChat), takeChat) };
     }
 
-    private async Task<ToolOutcome> WaitAsync(JsonObject args, CancellationToken ct)
+    private async Task<ToolOutcome> WaitAsync(JsonObject args, bool holdRepeats, CancellationToken ct)
     {
         var seconds = args.TryGetPropertyValue("timeout_seconds", out var t) && t is JsonValue v && v.TryGetValue<int>(out var s)
             ? s : 60;
         var timeout = TimeSpan.FromSeconds(Math.Clamp(seconds, 1, (int)MaxWait.TotalSeconds));
+        var started = DateTime.UtcNow;
 
         // Only one wait at a time. The one this replaces throws OperationCanceledException and
         // leaves the messages for this one.
@@ -179,9 +266,25 @@ public sealed partial class BotTools
         {
             // A message for the model ends the wait at once, and so does /stop, so a wait whose
             // client is gone can't take a later message; while paused no decision is handed over.
+            // So does the party's news (the bot's turn to pitch, the plan once set); a pick screen
+            // held for a planning session is no decision yet.
             var stops = _chat.Stops;
-            var snap = await _waiter.WaitAsync(afterVersion: null, timeout, live.Token,
-                interrupt: () => _chat.HasUnread || _chat.Stops != stops, hold: () => _chat.Paused);
+            var party = Party;
+            bool Interrupt() => _chat.HasUnread || _chat.Stops != stops || party?.HasNews == true;
+            Func<GameSnapshot, bool>? held = party is null ? null : party.Holds;
+            var snap = await _waiter.WaitAsync(afterVersion: null, timeout, live.Token, Interrupt, hold: () => _chat.Paused, holdFor: held);
+            if (holdRepeats)
+            {
+                // A co-op decision the last wait already handed over (the bot voted on the map and
+                // the human hasn't yet) is held back until something changes, for up to
+                // RepeatWaitHold: the model is waiting on purpose, and each return costs it a turn.
+                var left = timeout - (DateTime.UtcNow - started);
+                var hold = left < RepeatWaitHold ? left : RepeatWaitHold;
+                if (snap.AwaitingDecision && snap.Version == Interlocked.Read(ref _waitShown) && HasTeammates(snap)
+                    && hold > TimeSpan.Zero && !Interrupt())
+                    snap = await _waiter.WaitAsync(afterVersion: snap.Version, hold, live.Token, Interrupt, hold: () => _chat.Paused, holdFor: held);
+                Interlocked.Exchange(ref _waitShown, snap.AwaitingDecision && _chat.PausedBy is null && held?.Invoke(snap) != true ? snap.Version : NoneShown);
+            }
             return new ToolOutcome(Present(snap));
         }
         finally
@@ -201,25 +304,41 @@ public sealed partial class BotTools
 
         if (SentVersion(args) is not { } version)
             return new ToolOutcome(Error(VersionProblem(args)), IsError: true);
-        string? Check(GameSnapshot snap) =>
-            CannotAct(snap, version) ?? (Offers(snap, actionId) ? null : $"'{actionId}' is not a legal action now.");
+
+        // The id as the game offers it in snap, or why it can't run. Sent on an older snapshot
+        // of a co-op fight that only teammates moved on (PlanFrom), it is found again by label.
+        (string? Id, string? Why) Check(GameSnapshot snap)
+        {
+            var (plan, why) = PlanFrom(version, snap, [actionId]);
+            if (plan is null)
+                return (null, why);
+            if (!Offers(plan, actionId))
+                return (null, $"'{actionId}' is not a legal action now.");
+            if (plan == snap)
+                return (actionId, null);
+            return FindAgain(actionId, plan, snap, new HashSet<int>()) is { } again
+                ? (again, null)
+                : (null, $"'{LabelOf(plan, actionId)}' is no longer offered. Pick from the current actions.");
+        }
 
         var before = await _waiter.CaptureAsync(ct);
-        if (Check(before) is { } why)
-            return Rejected(why, before);
+        var (id, why) = Check(before);
+        if (id is null)
+            return Rejected(why!, before);
         if (await WaitOutSpeechAsync(before, ct))
         {
             // Checked again after the pause, like any stale id.
             before = await _waiter.CaptureAsync(ct);
-            if (Check(before) is { } stale)
-                return Rejected(stale, before);
+            (id, why) = Check(before);
+            if (id is null)
+                return Rejected(why!, before);
         }
 
-        var step = await StepAsync(actionId, before, ct);
+        var step = await StepAsync(id, before, ct);
         if (step.Refusal is { } refusal)
             return Rejected(refusal, step.After);
 
-        var reply = new JsonObject { ["done"] = actionId, ["next"] = Present(step.After) };
+        var reply = new JsonObject { ["done"] = id, ["next"] = Present(step.After) };
         if (Warning(step) is { } warning)
             reply["warning"] = warning;
         return new ToolOutcome(reply);
@@ -247,18 +366,29 @@ public sealed partial class BotTools
         if (ids.IndexOf("end_turn") is var endTurn and >= 0 && endTurn < ids.Count - 1)
             return new ToolOutcome(Error("end_turn can only be the last id, since the turn is over once it runs. Nothing was played."), IsError: true);
 
-        string? Check(GameSnapshot snap) => CannotAct(snap, version) ?? Illegal(snap, ids);
+        // The snapshot the ids came from, or why they can't run on snap. It is snap itself unless
+        // the ids came from an older snapshot of a co-op fight that only teammates moved on (PlanFrom).
+        (GameSnapshot? Plan, string? Why) Check(GameSnapshot snap)
+        {
+            var (plan, why) = PlanFrom(version, snap, ids);
+            return plan is null ? (null, why) : Illegal(plan, ids) is { } illegal ? (null, illegal) : (plan, null);
+        }
 
-        var start = await _waiter.CaptureAsync(ct);
-        if (Check(start) is { } why)
-            return Rejected(why, start);
-        if (await WaitOutSpeechAsync(start, ct))
+        var current = await _waiter.CaptureAsync(ct);
+        var (start, why) = Check(current);
+        if (start is null)
+            return Rejected(why!, current);
+        if (await WaitOutSpeechAsync(current, ct))
         {
             // Checked again after the pause, like any stale id.
-            start = await _waiter.CaptureAsync(ct);
-            if (Check(start) is { } stale)
-                return Rejected(stale, start);
+            current = await _waiter.CaptureAsync(ct);
+            (start, why) = Check(current);
+            if (start is null)
+                return Rejected(why!, current);
         }
+        // In a fight with teammates, every step first looks for what they changed (TeammateChanges).
+        var coop = IsCoopFight(current);
+        OwnStep? opener = null;
 
         var done = new JsonArray();
         var notNeeded = new JsonArray();
@@ -266,7 +396,6 @@ public sealed partial class BotTools
         var upgraded = new HashSet<int>();
         // Hand indices in start of the cards this sequence has played or picked, which a later pick can't mean.
         var used = new HashSet<int>();
-        var current = start;
         Step? last = null;
         string? stopped = null;
         var k = 0;
@@ -274,9 +403,39 @@ public sealed partial class BotTools
         {
             var id = ids[k];
             var pick = ForHandChoice(start, ids, k);
+            if (last is null && current != start)
+            {
+                // The first id, from an older snapshot: found again like any later one.
+                if (FindAgain(id, start, current, upgraded) is not { } first)
+                {
+                    stopped = $"'{PlannedLabel(start, id)}' is no longer offered.";
+                    break;
+                }
+                id = first;
+            }
             if (last is not null)
             {
                 stopped = WhyStop(last, start, stops, pick);
+                if (stopped is null && coop)
+                {
+                    // What changed while the last step ran that its card doesn't explain, then
+                    // anything at all that changed since it settled.
+                    var own = OwnStep.Of(last, opener);
+                    if (last.Id.StartsWith("play:", StringComparison.Ordinal))
+                        opener = own;
+                    var targets = Targets(ids.Skip(k));
+                    var changes = TeammateChanges(last.Before, last.After, own, targets);
+                    if (changes is null)
+                    {
+                        // The settle wait can take a while (a teammate's card resolving), so
+                        // /stop, /pause and chat are looked at again after it.
+                        current = await FreshAsync(last.After, ct);
+                        stopped = Drift(current, start, pick) ?? HumanStop(stops);
+                        changes = stopped is null ? TeammateChanges(last.After, current, own: null, targets) : null;
+                    }
+                    if (changes is not null)
+                        stopped = $"A teammate acted: {changes}. Plan the rest of your turn from next.";
+                }
                 if (stopped is null && pick && current.Screen != HandSelect)
                 {
                     // The choice closed by itself once enough was picked: its confirm has nothing left to do.
@@ -384,10 +543,19 @@ public sealed partial class BotTools
     /// settle into a newer decision. Shared by act and every step of act_sequence.</summary>
     private async Task<Step> StepAsync(string actionId, GameSnapshot before, CancellationToken ct)
     {
-        var result = await _game.ExecuteAsync(actionId, ct);
-        if (!result.Ok)
-            return new Step(actionId, before, await _waiter.CaptureAsync(ct), result.Error ?? "The game refused the action.");
-        return new Step(actionId, before, await _waiter.WaitAsync(before.Version, ActSettleTimeout, ct), null);
+        // No snapshot from before this action may be acted on once it ran (PlanFrom).
+        Interlocked.Exchange(ref _ownActionMark, long.MaxValue);
+        try
+        {
+            var result = await _game.ExecuteAsync(actionId, ct);
+            if (!result.Ok)
+                return new Step(actionId, before, await _waiter.CaptureAsync(ct), result.Error ?? "The game refused the action.");
+            return new Step(actionId, before, await _waiter.WaitAsync(before.Version, ActSettleTimeout, ct), null);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _ownActionMark, _versioner.Current);
+        }
     }
 
     /// <summary>
@@ -413,6 +581,8 @@ public sealed partial class BotTools
     /// stale, or it isn't the bot's decision. Null when one can.</summary>
     private string? CannotAct(GameSnapshot current, long version)
     {
+        if (current.AwaitingDecision && Party?.HeldText(current) is { } held)
+            return held;
         if (_chat.PausedBy is { } pausedBy)
             return $"Paused by {pausedBy}. Call wait_for_decision; you can still talk with say.";
         if (version != current.Version)
@@ -451,6 +621,16 @@ public sealed partial class BotTools
             return $"The game is still busy ({now.Waiting ?? "no decision yet"}). Call wait_for_decision before acting again.";
         if (!SameTurn(start, now))
             return $"Your turn ended after '{last.Label}'.";
+        return HumanStop(stops);
+    }
+
+    /// <summary>Why the human wants the sequence to stop: /stop since it started
+    /// (<paramref name="stops"/> is the count then), a pause, or a chat message for the model.
+    /// Null when none of these.</summary>
+    private string? HumanStop(long stops)
+    {
+        if (_chat.Stops != stops)
+            return "The bot was stopped with /stop.";
         if (_chat.PausedBy is { } pausedBy)
             return $"Paused by {pausedBy}. Call wait_for_decision; you can still talk with say.";
         if (_chat.HasUnread)
@@ -650,6 +830,28 @@ public sealed partial class BotTools
         }
     }
 
+    /// <summary>party_pitch: the pitch goes to the planning session (<see cref="PartyBot.Pitch"/>),
+    /// and its say line is spoken as say speaks it.</summary>
+    private ToolOutcome Pitch(JsonObject args)
+    {
+        var (pitch, error) = Party!.Pitch(args);
+        if (pitch is null)
+            return new ToolOutcome(Error(error ?? PartyBotNotYourTurn), IsError: true);
+        var reply = new JsonObject { ["pitched"] = true };
+        try
+        {
+            reply["said"] = _chat.Say(pitch.Say).Text;
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            // The pitch counts; only the chat line didn't go out.
+            reply["say_failed"] = ex.Message;
+        }
+        return new ToolOutcome(reply);
+    }
+
+    private const string PartyBotNotYourTurn = SpireMind.Core.Coop.PartyPrompts.NotYourTurn;
+
     private ToolOutcome Persona() =>
         _chat.Persona is { } persona
             ? new ToolOutcome(persona)
@@ -665,17 +867,57 @@ public sealed partial class BotTools
     /// </summary>
     private JsonObject Present(GameSnapshot snap)
     {
-        if (_chat.PausedBy is not { } pausedBy)
-            return snap.ToJson();
-
-        return new GameSnapshot
+        // A pick screen held for the party's planning session is masked like a paused one.
+        var party = Party;
+        var held = false;
+        if (party is not null)
         {
-            Version = snap.Version,
-            Screen = snap.Screen,
-            AwaitingDecision = false,
-            Waiting = $"paused by {pausedBy}",
-            State = snap.State,
-        }.ToJson();
+            if (snap.AwaitingDecision) held = party.Holds(snap);
+            else party.Observe(snap);
+        }
+
+        JsonObject json;
+        if (_chat.PausedBy is { } pausedBy || held)
+        {
+            json = new GameSnapshot
+            {
+                Version = snap.Version,
+                Screen = snap.Screen,
+                AwaitingDecision = false,
+                Waiting = _chat.PausedBy is { } by ? $"paused by {by}" : SpireMind.Core.Coop.PartyPrompts.HeldWaiting,
+                State = snap.State,
+            }.ToJson();
+        }
+        else
+        {
+            Remember(snap);
+            json = snap.ToJson();
+        }
+        // After a session, pick screens carry the bot's part of the plan and the party's calls.
+        if (party?.PickNotes(snap) is { } notes)
+            json["party"] = notes;
+        return json;
+    }
+
+    /// <summary>
+    /// Adds the party's news under "party" (merged into the snapshot's own notes when the result is
+    /// a snapshot): the turn brief while the bot's turn to pitch is open, and once, the plan when a
+    /// session it was in closed. <paramref name="take"/> marks them delivered.
+    /// </summary>
+    private JsonNode WithParty(JsonNode payload, bool take)
+    {
+        if (payload is not JsonObject json || Party?.Brief(take) is not { } brief)
+            return payload;
+        if (json["party"] is JsonObject notes)
+        {
+            foreach (var (key, value) in brief)
+                notes[key] = value?.DeepClone();
+        }
+        else
+        {
+            json["party"] = brief;
+        }
+        return json;
     }
 
     /// <summary>

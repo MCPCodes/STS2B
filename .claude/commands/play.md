@@ -46,7 +46,7 @@ Any tool result can carry `chat.messages` from the human, usually Mark.
 
 At Neow, unless `runs/current.md` already belongs to this run, start a fresh one (archiving the old one as above) with the header line and a "Build plan" section: the archetype you're aiming for given your character and starting choices, the key cards and relics you want, what you avoid, and what the deck still lacks for the act boss. If you take over a run that has no current file of its own, start one the same way and write a plan before your first off-combat choice.
 
-Before every card reward, shop purchase, card removal, upgrade or relic choice, check the plan. Skipping a card reward is fine when nothing fits. Call `get_deck` when the screen doesn't already list the cards with text (shops, deciding Smith vs Rest, events that touch the deck); removal and upgrade pickers already show them. Update the plan when the run pivots: a strong rare, a build-around relic, a standing order.
+Before every card reward, shop purchase, card removal, upgrade or relic choice, check the plan. Skipping a card reward is fine when nothing fits. Call `get_deck` when the screen doesn't already list the cards with text (shops, deciding Smith vs Rest, events that touch the deck); removal and upgrade pickers already show them. Update the plan when the run pivots: a strong rare, a build-around relic, a standing order. In co-op, also check `party.yours` and `party.calls` on the screen (strategy/coop.md, Planning sessions).
 
 ## Wiki
 

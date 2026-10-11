@@ -11,5 +11,7 @@ public sealed class BotToolsHost(BotTools tools) : IToolHost
 {
     public IReadOnlyList<ToolSpec> Specs => tools.Specs;
 
-    public Task<ToolOutcome> CallAsync(string name, JsonObject args, CancellationToken ct) => tools.CallAsync(name, args, ct);
+    // The brain holds a repeated wait itself (ApiBrain.RepeatWaitHold), so BotTools doesn't.
+    public Task<ToolOutcome> CallAsync(string name, JsonObject args, CancellationToken ct) =>
+        tools.CallAsync(name, args, takeChat: true, holdRepeats: false, ct);
 }

@@ -8,6 +8,7 @@ using SpireMind.Patches;
 // never make it ambiguous.
 using CoopRelay = SpireMind.Core.Coop.CoopRelay;
 using InstanceInfo = SpireMind.Core.Coop.InstanceInfo;
+using PartyBot = SpireMind.Core.Coop.PartyBot;
 // The game side of co-op (src/SpireMind/Game/Coop/), by alias for the same reason.
 using CoopGame = SpireMind.Game.Coop.CoopGame;
 
@@ -30,6 +31,7 @@ public static class ModEntry
     private static bool _bubblesFailed;
     private static bool _instancePollFailed;
     private static bool _coopTickFailed;
+    private static bool _botSelfFailed;
 
     /// <summary>What this copy reports about itself to the co-op relay; null if building it failed.</summary>
     private static InstanceInfo? _instance;
@@ -65,6 +67,15 @@ public static class ModEntry
             var port = ResolvePort();
             var role = DetectRole(port);
             _instance = NewInstanceInfo(role);
+            // A bot copy tells the relay where it stands and takes /bot stop and the lobby
+            // nudge through its bridge; the human's copy is left as it is.
+            if (_instance is { IsBot: true } botInfo)
+                BotSelf.Wire(botInfo, MainThread);
+            // A bot copy plans with the party (the sessions run from the human's copy): its tools
+            // hold pick screens during a session and offer party_pitch, and its bridge takes the
+            // sessions' ops on POST /coop/party. Before the bridge and the brain start.
+            if (_instance is { IsBot: true })
+                WireParty(tools);
 
             // The game side of co-op is told which copy this is before the bridge starts. Mark's
             // copy only remembers it. A bot copy puts its window away, takes over its own
@@ -105,7 +116,8 @@ public static class ModEntry
             // The human copy finds the bot copies on localhost and relays the chat to them, so
             // Mark talks to every bot from his own window. After the chat box, which shows only
             // lines added once it listens, so "Silent joined the chat" is never missed.
-            relay = CoopWiring.StartRelay(role, chat, port, MainThread, InCoop, Log, LogError);
+            relay = CoopWiring.StartRelay(role, chat, port, MainThread, InCoop, () => InstancePoll.InCoop, CoopNames.NameOf, Log, LogError,
+                BrainWiring.NotesRoot, ResolveHumanName(), () => chat.BotName);
             tree.Connect(SceneTree.SignalName.ProcessFrame, Callable.From(OnFrame));
         }
         catch (Exception ex)
@@ -222,6 +234,10 @@ public static class ModEntry
         try { CoopWiring.Tick(); }
         catch (Exception ex) { LogOnce(ref _coopTickFailed, $"coop: {ex}"); }
 
+        // A bot copy's snapshot of where it stands, for /bots in the human's window.
+        try { BotSelf.Tick(); }
+        catch (Exception ex) { LogOnce(ref _botSelfFailed, $"coop: {ex}"); }
+
         // A bot copy joins the lobby, picks, readies and leaves a finished run by itself. In
         // any other copy this returns at once; it guards itself and never throws.
         CoopGame.Tick();
@@ -230,13 +246,16 @@ public static class ModEntry
     /// <summary>
     /// This copy's role, logged with its warnings. Detect never throws for bad input; if it
     /// throws anyway, the copy counts as the human's with the default folders, which only loses
-    /// co-op. Runs on the main thread (Godot's command line).
+    /// co-op. A copy that runs with Steam is the human's whatever its command line says (a
+    /// stray --sts2bot=1 in Steam's launch options); Detect says so in a warning. Runs on the
+    /// main thread (Godot's command line, and Steam's flag, settled before mods load).
     /// </summary>
     private static InstanceRole DetectRole(int port)
     {
         try
         {
-            var role = InstanceRole.Detect(Godot.OS.GetCmdlineArgs(), port, System.Environment.GetEnvironmentVariable);
+            var role = InstanceRole.Detect(Godot.OS.GetCmdlineArgs(), port, System.Environment.GetEnvironmentVariable,
+                steamRunning: SteamRunning);
             Log($"role: {role}");
             foreach (var warning in role.Warnings)
                 LogError($"role: {warning}");
@@ -253,6 +272,20 @@ public static class ModEntry
                 SharedConfigDir = BrainSettings.DefaultConfigDir,
             };
         }
+    }
+
+    /// <summary>Whether this copy runs with Steam. In a method of its own, so a game member that
+    /// moved fails inside Detect's guard (which then ignores the bot flag) and not while
+    /// DetectRole is compiled.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool SteamRunning() => SteamInitializer.Initialized;
+
+    /// <summary>Gives a bot copy's tools its side of the party's planning sessions. A failure only
+    /// loses the sessions in this copy.</summary>
+    private static void WireParty(BotTools tools)
+    {
+        try { tools.Party = new PartyBot(log: Log); }
+        catch (Exception ex) { LogError($"coop: this bot copy can't plan with the party: {ex}"); }
     }
 
     /// <summary>What the bridge reports about this copy on /coop/info and /chat, or null if it

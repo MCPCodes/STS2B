@@ -124,7 +124,7 @@ public sealed class ApiBrain : IPlayBrain
 
     // Tools that move the game on. Only these reset the end-turn guard: a get_state or say
     // between two ended turns doesn't make them play.
-    private static readonly HashSet<string> ForwardTools = new(StringComparer.Ordinal) { "act", "act_sequence", "wait_for_decision" };
+    private static readonly HashSet<string> ForwardTools = new(StringComparer.Ordinal) { "act", "act_sequence", "wait_for_decision", "party_pitch" };
 
     private readonly IClaudeApi _api;
     private readonly IToolHost _host;
@@ -142,6 +142,7 @@ public sealed class ApiBrain : IPlayBrain
     private readonly Func<TimeSpan, CancellationToken, Task> _delay;
     private readonly Func<string?>? _blocked;
     private readonly FightLog? _fights;
+    private readonly Func<string?>? _partyPlan;
 
     private readonly object _gate = new();
     private CancellationTokenSource? _cts;
@@ -174,6 +175,7 @@ public sealed class ApiBrain : IPlayBrain
     private int _cutOffsInRow;
     private int _refusalsInRow;
     private long? _waitShown; // the version of the decision the last wait_for_decision handed to the model
+    private string? _partyTurnShown; // the planning session's turn ("A2-start#1") last handed to the model
     private int _conversation;
     private int _turn;
     private int _transcribed;
@@ -208,6 +210,8 @@ public sealed class ApiBrain : IPlayBrain
     /// once and not touch the game; one that throws counts as null.</param>
     /// <param name="fights">Optional record of each fight, fed from the snapshots the brain sees
     /// and its own requests. It never throws.</param>
+    /// <param name="partyPlan">The party plan from co-op planning sessions (PartyBot.PlanText), or
+    /// null; a fresh conversation carries it after the run journal. One that throws counts as null.</param>
     public ApiBrain(
         IClaudeApi api,
         IToolHost tools,
@@ -224,7 +228,8 @@ public sealed class ApiBrain : IPlayBrain
         Func<DateTime>? clock = null,
         Func<TimeSpan, CancellationToken, Task>? delay = null,
         Func<string?>? blocked = null,
-        FightLog? fights = null)
+        FightLog? fights = null,
+        Func<string?>? partyPlan = null)
     {
         _api = api;
         _host = tools;
@@ -242,6 +247,7 @@ public sealed class ApiBrain : IPlayBrain
         _delay = delay ?? Task.Delay;
         _blocked = blocked;
         _fights = fights;
+        _partyPlan = partyPlan;
     }
 
     /// <summary>
@@ -903,6 +909,9 @@ public sealed class ApiBrain : IPlayBrain
             .Append(journal.Length > 0 ? journal : "(empty: the file doesn't exist yet)")
             .Append("\n\n");
 
+        if (PartyPlan() is { } plan)
+            text.Append("## Party plan (from the planning sessions)\n\n").Append(plan).Append("\n\n");
+
         var chat = _recentChat();
         text.Append("## Recent chat\n\n")
             .Append(chat.Count > 0 ? string.Join("\n", chat.Skip(Math.Max(0, chat.Count - 10))) : "(none)")
@@ -927,6 +936,7 @@ public sealed class ApiBrain : IPlayBrain
         _refreshDeferred = false;
         _endTurnsInRow = 0;
         _waitShown = null;
+        _partyTurnShown = null;
         _conversation++;
         _turn = 0;
         _fights?.ConversationStarted(refresh: intro == Refreshed);
@@ -1083,15 +1093,36 @@ public sealed class ApiBrain : IPlayBrain
     private async Task<JsonArray> RunToolsAsync(IReadOnlyList<ToolUseBlock> toolUses, CancellationToken ct)
     {
         var results = new JsonArray();
+        // A party_pitch that went through is followed by a wait here, so a planning turn costs one
+        // request; a wait_for_decision after it in the same reply has nothing left to wait for.
+        var waitedAfterPitch = false;
         foreach (var use in toolUses)
         {
             ToolOutcome outcome;
             if (use.Name is "act" or "act_sequence")
+            {
                 _waitShown = null;
+                waitedAfterPitch = false;
+            }
             if (use.Name is "act" or "act_sequence" && BlockedReason() is { } blocked)
                 outcome = new ToolOutcome(new JsonObject { ["error"] = $"Not run: {blocked}" }, IsError: true);
+            else if (use.Name == "wait_for_decision" && waitedAfterPitch)
+                outcome = new ToolOutcome(new JsonObject { ["waited"] = "Already waited after party_pitch: its result's next is the game now." });
             else if (use.Name == "wait_for_decision")
                 outcome = await WaitLocallyAsync(ct);
+            else if (use.Name == "party_pitch")
+            {
+                outcome = await CallHostAsync(use.Name, use.Input, ct);
+                if (!outcome.IsError && IsTrue(outcome.Payload["pitched"]) && outcome.Payload is JsonObject pitched)
+                {
+                    // The wait that brought the turn may have shown a decision too (the map vote);
+                    // the model answered the turn, not that, so it isn't held back as a repeat.
+                    _waitShown = null;
+                    var next = await WaitLocallyAsync(ct);
+                    pitched["next"] = next.Payload;
+                    waitedAfterPitch = true;
+                }
+            }
             else if (_notes.Handles(use.Name))
                 outcome = await _notes.CallAsync(use.Name, use.Input, ct);
             else
@@ -1120,7 +1151,7 @@ public sealed class ApiBrain : IPlayBrain
             var decision = !outcome.IsError && IsTrue(outcome.Payload["awaiting_decision"]);
             var version = outcome.Payload["version"] is JsonValue v && v.TryGetValue<long>(out var n) ? n : (long?)null;
             var repeated = decision && shown is not null && version == shown && held < RepeatWaitHold;
-            if (outcome.IsError || HasChatMessages(outcome.Payload) || (decision && !repeated))
+            if (outcome.IsError || HasChatMessages(outcome.Payload) || (decision && !repeated) || PartyNews(outcome.Payload))
             {
                 _waitShown = decision ? version : null;
                 return outcome;
@@ -1208,6 +1239,36 @@ public sealed class ApiBrain : IPlayBrain
                 _newRunPending = true;
             _inRun = inRun;
             lock (_gate) _lastSeenInRun = inRun;
+        }
+    }
+
+    // True when a result carries the planning session's news for the model: its turn to pitch (one it
+    // wasn't handed yet), or the plan once a session it was in closed (carried only once).
+    private bool PartyNews(JsonNode payload)
+    {
+        if (payload["party"] is not JsonObject party)
+            return false;
+        if (party["closed"] is not null)
+            return true;
+        if (!IsTrue(party["your_turn"]))
+            return false;
+        var turn = $"{Str(party["session"])}#{party["round"]?.ToJsonString()}";
+        if (turn == _partyTurnShown)
+            return false;
+        _partyTurnShown = turn;
+        return true;
+    }
+
+    // The party plan for a fresh conversation, or null. A throwing callback counts as null.
+    private string? PartyPlan()
+    {
+        try
+        {
+            return _partyPlan?.Invoke() is { } plan && !string.IsNullOrWhiteSpace(plan) ? plan.Trim() : null;
+        }
+        catch (Exception)
+        {
+            return null;
         }
     }
 

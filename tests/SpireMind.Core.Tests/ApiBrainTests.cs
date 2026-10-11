@@ -162,6 +162,136 @@ public class ApiBrainTests
         Assert.Equal(60, rig.Delays.Count(d => d == TimeSpan.FromSeconds(1)));
     }
 
+    private static JsonObject WithPartyTurn(JsonObject snap, string session = "A1-start", int round = 1)
+    {
+        snap["party"] = new JsonObject
+        {
+            ["session"] = session, ["kind"] = "act_start", ["round"] = round, ["rounds"] = 2, ["your_turn"] = true,
+            ["seconds_left"] = 40, ["ask"] = "Pitch now.", ["said"] = new JsonArray(), ["mark"] = new JsonArray(), ["plan"] = null,
+        };
+        return snap;
+    }
+
+    [Fact]
+    public async Task Party_pitch_chains_a_wait_so_a_planning_turn_costs_one_request()
+    {
+        static JsonObject Freed()
+        {
+            var snap = Snap("card_reward", true, version: 9);
+            snap["party"] = new JsonObject { ["closed"] = "A1-start", ["plan"] = "# Party plan" };
+            return snap;
+        }
+
+        using var rig = new Rig();
+        var waits = 0;
+        rig.Host.Handler = (name, _, _) => Task.FromResult(name switch
+        {
+            "party_pitch" => Outcome(new JsonObject { ["pitched"] = true, ["said"] = "Poison for me." }),
+            // Held until the plan is set, then the freed pick with the news.
+            "wait_for_decision" => ++waits < 3
+                ? Outcome(Snap("card_reward", false, version: 8))
+                : Outcome(Freed()),
+            _ => Outcome(Snap("card_reward", false, version: 8)),
+        });
+        rig.Api.Then(Reply("tool_use", null,
+            ToolUse("toolu_p", "party_pitch", new JsonObject { ["say"] = "Poison for me.", ["role"] = "debuffer" }),
+            ToolUse("toolu_w", "wait_for_decision")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(2, rig.Api.Count);
+        Assert.Equal(3, waits);
+        var results = rig.Api[1]["messages"]![2]!["content"]!.AsArray();
+        var pitched = JsonNode.Parse(results[0]!["content"]!.GetValue<string>())!;
+        Assert.True(pitched["pitched"]!.GetValue<bool>());
+        Assert.Equal(9, pitched["next"]!["version"]!.GetValue<int>());
+        Assert.Equal("A1-start", pitched["next"]!["party"]!["closed"]!.GetValue<string>());
+        // The model's own wait after it has nothing left to wait for.
+        Assert.Contains("Already waited after party_pitch", results[1]!["content"]!.GetValue<string>());
+        Assert.Equal(3, rig.Host.Calls.Count(c => c.Name == "wait_for_decision"));
+    }
+
+    [Fact]
+    public async Task The_wait_after_a_pitch_hands_over_the_map_the_turn_brief_came_with()
+    {
+        // A mid-act session opens on the map: the turn brief arrives with the map vote, the model
+        // answers the brief only, and the vote must come back at once, not be held as a repeat.
+        using var rig = new Rig();
+        var waits = 0;
+        rig.Host.Handler = (name, _, _) => Task.FromResult(name switch
+        {
+            "party_pitch" => Outcome(new JsonObject { ["pitched"] = true, ["said"] = "Still poison." }),
+            "wait_for_decision" => ++waits == 1 ? Outcome(WithPartyTurn(Snap("map", true, version: 7), "A1-mid")) : Outcome(Snap("map", true, version: 7)),
+            _ => Outcome(Snap("map", true, version: 7)),
+        });
+        rig.Api
+            .Then(Reply("tool_use", null, ToolUse("toolu_w", "wait_for_decision")))
+            .Then(Reply("tool_use", null, ToolUse("toolu_p", "party_pitch", new JsonObject { ["say"] = "Still poison." })));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(3, rig.Api.Count);
+        Assert.Equal(2, waits);
+        Assert.Equal(0, rig.Delays.Count(d => d == TimeSpan.FromSeconds(1)));
+        var pitched = JsonNode.Parse(rig.Api[2]["messages"]![4]!["content"]![0]!["content"]!.GetValue<string>())!;
+        Assert.Equal(7, pitched["next"]!["version"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task The_local_wait_returns_on_a_new_planning_turn_only()
+    {
+        using var rig = new Rig();
+        var waits = 0;
+        rig.Host.Handler = (name, _, _) => Task.FromResult(name switch
+        {
+            // Held, then the brief arrives and stays on every result until the bot pitches.
+            "wait_for_decision" => ++waits switch
+            {
+                < 3 => Outcome(Snap("event", false, version: 5)),
+                < 6 => Outcome(WithPartyTurn(Snap("event", false, version: 5))),
+                _ => Outcome(Snap("event", true, version: 6)),
+            },
+            _ => Outcome(Snap("event", false, version: 5)),
+        });
+        rig.Api
+            .Then(Reply("tool_use", null, ToolUse("toolu_a", "wait_for_decision")))
+            .Then(Reply("tool_use", null, ToolUse("toolu_b", "wait_for_decision")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(3, rig.Api.Count);
+        var first = JsonNode.Parse(rig.Api[1]["messages"]![2]!["content"]![0]!["content"]!.GetValue<string>())!;
+        Assert.True(first["party"]!["your_turn"]!.GetValue<bool>());
+        // The same turn doesn't wake the brain again; the wait goes on to the decision.
+        Assert.Equal(6, waits);
+        var second = JsonNode.Parse(rig.Api[2]["messages"]![4]!["content"]![0]!["content"]!.GetValue<string>())!;
+        Assert.Equal(6, second["version"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task A_fresh_conversation_holds_the_party_plan()
+    {
+        using var rig = new Rig { PartyPlan = () => "# Party plan\nAct 1, last session A1-start (done)." };
+        rig.Api.Then(Reply("tool_use", null, ToolUse("toolu_1", "get_state")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        var opening = Text(rig.Api[0]["messages"]![0]!);
+        var plan = opening.IndexOf("## Party plan (from the planning sessions)\n\n# Party plan\nAct 1, last session A1-start (done).", StringComparison.Ordinal);
+        Assert.True(plan > opening.IndexOf("## Run journal", StringComparison.Ordinal));
+        Assert.True(plan < opening.IndexOf("## Recent chat", StringComparison.Ordinal));
+
+        using var without = new Rig { PartyPlan = () => throw new InvalidOperationException("no plan") };
+        without.Api.Then(Reply("tool_use", null, ToolUse("toolu_1", "get_state")));
+        without.Brain.Start();
+        await without.Api.Exhausted.Task.WaitAsync(Guard);
+        Assert.DoesNotContain("## Party plan", Text(without.Api[0]["messages"]![0]!));
+    }
+
     [Fact]
     public async Task The_wait_the_nudge_asks_for_is_not_held()
     {
@@ -2638,6 +2768,7 @@ file sealed class Rig : IDisposable
     public IToolHost? Tools { get; init; }
     public bool AnnounceThrows { get; init; }
     public bool LogThrows { get; init; }
+    public Func<string?>? PartyPlan { get; init; }
 
     /// <summary>What the brain's blocked callback returns (the controller's co-op gate).</summary>
     public volatile string? BlockedReason;
@@ -2682,7 +2813,8 @@ file sealed class Rig : IDisposable
                 await Task.Yield();
             },
             blocked: () => BlockedReason,
-            fights: UseFightLog ? new FightLog(Dir, _logged.Enqueue, () => Now) : null);
+            fights: UseFightLog ? new FightLog(Dir, _logged.Enqueue, () => Now) : null,
+            partyPlan: PartyPlan);
         brain.Stopped += (reason, message) =>
         {
             StoppedWhileRunning = brain.IsRunning;
