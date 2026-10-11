@@ -69,7 +69,7 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
 ## 2. Deckbuilding rules
 1. **Score each card on four axes: Damage, Block, Draw, Energy.** Take the card that best fixes your weakest axis.
    - In Act 1, until the deck holds 1-2 answers to the act boss (your character file's list, or the fight card in bosses-and-elites.md), take an answer when one is offered, and otherwise front-loaded damage or efficient Block over a skip. After that, if it fixes nothing, **skip**. Skipping is a real, frequently correct option.
-2. **Act 1 pick priority:** front-loaded damage > reliable block > draw > scaling.
+2. **Act 1 pick priority:** front-loaded damage > reliable block > draw > scaling, until a package reaches 3 pieces (12).
    - Starter decks cannot kill Act 1 elites. Take 2-3 real damage cards in your first ~4 rewards.
 3. **Lean beats big.** Cycle time = (deck size − draw effects) / cards drawn per turn. A 10-card starter cycles in 2 turns.
    - A card that only draws 1 is cycle-neutral. Powers and Exhaust cards don't recycle, so they don't count.
@@ -78,7 +78,7 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
 4. **Block density about 33%.** About a third of the deck should mitigate damage (block, Weak, Strength-down). 20% bricks often. 50% can't kill.
 5. **Upgrade density:** aim for 33-50% of cards upgraded by Act 3 at higher Ascension.
 6. **Two-phase drafting:**
-   - Phase 1: draft generic good cards until a core engine piece shows up (Demon Form, Noxious Fumes, Defragment, Genesis, Reaper Form...).
+   - Phase 1: draft generic good cards until a core engine piece shows up (Demon Form, Noxious Fumes, Defragment, Genesis, Reaper Form...) or a package reaches 3 pieces (12 says how to count).
    - Phase 2: commit. Never abandon a half-built engine for a shiny new one. That leaves two half-engines.
 7. **Directional relics are signals.** Commit toward what your relics reward. Examples:
    - Tingsha + Tough Bandages: Silent discard.
@@ -276,13 +276,25 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
 Rules 2.6 and 2.7 say when to commit. This is how to run it, with the plan written in `runs/current.md`.
 - **Pick a target lane at Neow.** Read your character file's archetypes and choose the one your Neow pick (and any rare it gave) points toward.
   - With no signal, aim for the lane the file calls most consistent, and stay open until rares and relics point elsewhere.
-  - The plan names the lane, the cards and relics that make it work, what to avoid, and what the deck lacks for the act boss.
-- **Act 1: flexible power first.** Take cards that are good in any deck (front-loaded damage, efficient block, draw) over narrow payoffs.
-  - An on-lane card wins a close call. A payoff with no enablers yet does not.
+  - The plan names the lane, the cards and relics that make it work, what to avoid, what the deck lacks for the act boss, and the package counts.
+- **Count packages before every pick** (card reward, shop card, removal, upgrade, relic). A package is the cards and relics that build one resource the rest of the deck uses: Strength, Vulnerable, exhaust, Block, poison, Shivs, orbs, Stars, Souls, Doom... Your character file's "Packages to count" lists their pieces and payoffs.
+  - Count each package's pieces in `player.deck` (upgraded copies count too).
+  - Value an offered card as its worth in an average deck plus what your packages add to it. The worth: the measured pages for your character in `strategy/wiki/cards/` where there are any (they rate upgrades and removals too), else the character file's draft priorities.
+  - Work the bonus out with numbers: the extra damage, Block or draw per play at the Strength, stacks or exhaust pile you expect by turn 2-3 of an elite fight. Where a measured page gives a card's gain for a package at your piece count, use that.
+  - 0-1 pieces: no change, a payoff is judged on its own. 2: its payoffs win close calls. 3 or more: a payoff that scales with it ranks above generic good cards, even in Act 1, and above off-package cards with a higher average value, unless the numbers say otherwise (the other card measures 3+ HP higher, or fixes a gap in the plan).
+  - Example (Ironclad, 15 cards, Strength pieces Inflame 2, Inflame 2, Fight Me 3, Brand 1): by the turn 2 draw you have seen 10 of 15 cards, 4 x 10/15 = 2.7 pieces; count 2 played, at 2 Strength each on average: Strength 4.
+    - Sword Boomerang and Pommel Strike measure the same in an average deck (HP +1.9), but at Strength 4 Boomerang deals 3 x (3 + 4) = 21 to a lone enemy and Pommel Strike 9 + 4 = 13 and draws 1.
+    - Twin Strike and Bludgeon also measure the same (HP +3.1): at Strength 4 Twin Strike deals 2 x (5 + 4) = 18 per energy, Bludgeon (32 + 4) / 3 = 12 (with no Strength, 10 against 10.7). Take the multi-hit.
+  - A package with payoffs but too few pieces wants pieces next, not more payoffs.
+  - Relic choices: one that feeds a package of 2+ pieces beats a generic relic of similar strength.
+  - Measured values come from a one-turn scripted player in random decks: they undervalue setup cards (marked (?)), and a payoff's number is what it does without its package.
+  - Co-op: a teammate's role in the party plan can count toward a package (a teammate who applies Vulnerable feeds your Vulnerable payoffs). Ask in party chat when unsure.
+- **Act 1: flexible power first, until a package reaches 3 pieces.** Take cards that are good in any deck (front-loaded damage, efficient block, draw) over narrow payoffs.
+  - An on-lane card wins a close call. A payoff whose package has 0-1 pieces does not.
 - **Commit by mid Act 2** (around the treasure room). By then you hold the engine's core, which the character files spell out (often 2+ enablers and a payoff).
   - After that, draft only for the engine and for gaps: block, AoE, an Artifact or boss answer.
   - Pivot late only for a run-defining rare or relic, or a standing order from the human. Rewrite the plan when you do.
 - **Skips and removals are build tools.** Every off-plan card makes the engine show up less often.
   - Once committed, skip any reward that is neither on plan nor fixing a gap.
-  - Count a Strike or Defend removal as a pick. It is often worth more than an average on-plan common.
-- **Check the plan before every card reward, purchase, removal, upgrade and relic choice.** Upgrade the cards the plan leans on.
+  - Count a removal as a pick. Cut what feeds no package and is worth least in an average deck: Strikes and Defends first, unless a package uses them (Perfected Strike and Hellraiser use Strike-tagged cards). A measured page that ranks removals beats this order.
+- **Check the plan and its package counts before every card reward, purchase, removal, upgrade and relic choice.** Upgrade the cards the plan leans on, package pieces and payoffs before off-package cards (Inflame 2 to 3 Strength, Sword Boomerang 3 to 4 hits).
