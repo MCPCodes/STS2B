@@ -1755,7 +1755,8 @@ public class ApiBrainTests
         var waiter = new DecisionWaiter(game, versioner) { PollInterval = TimeSpan.FromMilliseconds(1), SettleTime = TimeSpan.Zero };
         var tools = new BotTools(game, waiter, versioner, new ChatHub()) { ActSettleTimeout = TimeSpan.FromSeconds(5) };
         using var rig = new Rig { Tools = new BotToolsHost(tools) };
-        rig.Api.Then(Reply("tool_use", null, ToolUse("toolu_1", "act", new JsonObject { ["action_id"] = "play:0>e0" })));
+        var version = (await tools.CallAsync("get_state", new JsonObject(), CancellationToken.None)).Payload["version"]!.GetValue<long>();
+        rig.Api.Then(Reply("tool_use", null, ToolUse("toolu_1", "act", new JsonObject { ["action_id"] = "play:0>e0", ["version"] = version })));
 
         rig.Brain.Start();
         await rig.Api.Exhausted.Task.WaitAsync(Guard);

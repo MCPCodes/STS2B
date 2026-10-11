@@ -304,8 +304,8 @@ Refusals for potion ids:
 |---|---|---|---|
 | `get_state` | none | the snapshot | false |
 | `wait_for_decision` | `timeout_seconds` (integer 1 to 240, default 60; clamped) | the snapshot | false |
-| `act` | `action_id` (string, required), `version` (integer, optional) | `{"done": "<id>", "next": <snapshot>, "warning"?: "..."}` | false |
-| `act_sequence` | `version` (integer, required), `actions` (1 to 12 id strings, required) | `{"done": [{"id", "label"}...], "stopped"?, "not_run"?, "warning"?, "next": <snapshot>}` | true only when nothing ran |
+| `act` | `action_id` (string, required), `version` (integer, required) | `{"done": "<id>", "next": <snapshot>, "warning"?: "..."}` | false |
+| `act_sequence` | `version` (integer, required), `actions` (1 to 12 id strings, required) | `{"done": [{"id", "label"}...], "not_needed"?, "stopped"?, "not_run"?, "warning"?, "next": <snapshot>}` | true only when nothing ran |
 | `get_deck` | none | see get_deck | false, even when it carries `error` |
 | `say` | `text` (string, required) | `{"said": "<text as shown>"}` | false (true on a refusal, see Refusals) |
 | `get_persona` | none | `{"name", "title"?, "id", "pronouns"?: {"subject"?, "object"?, "possessive"?}, "tone"?, "voice_lines"?: [string]}` | false (true before a character is known, see Refusals) |
@@ -332,26 +332,31 @@ On a decision it returns `done` and `next`. Key order is `done`, `next`, `warnin
 - `warning: "Nothing changed after this action. The game may have ignored it; re-check the state before repeating it."` when `next` has the same version as `before`.
 - `warning: "The game is still busy. Call wait_for_decision before acting again."` when `next` is not a decision.
 
-Without `version`, `act` skips the stale check.
+Without `version`, `act` is refused before step 1 with `version is required: ...` (see Refusals) and nothing runs. The curl route `POST /act` is the same tool, so it needs `version` too.
 
 **act_sequence**:
 
-- Every id is checked against the snapshot named by `version` before anything runs.
+- Every id is checked against the snapshot named by `version` before anything runs, except the picks for a hand choice (below).
 - The first id runs like `act`. Each later id is found again in the current snapshot:
   - Ids with no digit (`end_turn`, `confirm`, `proceed`) are kept as they are while still offered.
   - Other ids are found by their label in the starting snapshot. If none match, a target id also matches an action with the same target part (`>e<j>` or `>p<j>`) whose label is equal once the twin tag `" (e1)"` or `" (p0)"` is dropped from both.
   - Between copies of a card, it prefers the one whose `state.hand` entry equals the original's (without `i`, `playable`, `unplayable`, `vs`, `selected`, `selectable`), first with `text` compared and then without it. Then it prefers the same id, then the first match.
-- Key order is `done`, then `stopped` and `not_run` if it stopped early, otherwise `warning` if there is one, then `next`.
+  - A play of a card picked earlier in the sequence for an upgrade (`state.selection.mode` `upgrade`) is found only under the upgraded name, the card's name followed by `+` or `+N` with the rest of the label unchanged, at the same target (twin tags dropped).
+- Picks for a hand choice: in a sequence whose snapshot is `combat`, a `select:<i>` or `confirm` that is not the first id answers the `hand_select` a card before it opens. `i` is the card's index in that snapshot's `state.hand`; up front it must name a card there. When the choice is open, `select:<i>` runs as the offered `select:` whose hand entry has the same `name`, the same entry first (as for copies above), and `confirm` runs while offered. A confirm reached after the choice closed by itself is not run and goes in `not_needed`. A pick with no hand choice open, or not offered in it, stops the sequence, and so does a `select:<i>` whose `i` is a card the sequence already played or picked, even while a copy with the same name is offered. With only one valid card the game takes it without a prompt, so no choice opens and the picks stop the sequence; the model is told to leave them out. Any other id runs only once the screen is back on `combat`.
+- `card:<n>` and `bundle:<n>` after the first id of a `combat` sequence are refused up front: a `card_select`'s cards aren't in the snapshot.
+- Key order is `done`, `not_needed` if a confirm was skipped, then `stopped` and `not_run` if it stopped early, otherwise `warning` if there is one, then `next`.
 - `done[].id` is the id actually run (it may be a re-found index). `not_run` lists the ids as sent, from the first one that did not run.
 - `stopped` texts, in the order they are checked:
   - `The bot was stopped with /stop.`
   - `Nothing changed after '<label>'. The game may have ignored it; re-check the state before repeating it.`
-  - `The screen changed to <screen>.`
+  - `The screen changed to <screen>.` (not for a `hand_select` while the next id is a pick for it)
   - `The game is still busy (<waiting, or "no decision yet">). Call wait_for_decision before acting again.`
   - `Your turn ended after '<label>'.` (`state.turn` or `state.round` changed; both are absent off combat, so this never fires there)
   - `Paused by <name>. Call wait_for_decision; you can still talk with say.`
   - `A chat message arrived.`
-  - `'<label>' is no longer offered.`
+  - `'Select <card>' was planned for a choice from your hand, but none is open.` (or `'Confirm selection' ...`), followed by ` If only one card could be picked, the game took it without asking.` when the step before was a play that opened no choice
+  - `'Select <card>' names a card this sequence already played or picked, so nothing was picked in its place.`
+  - `'<label>' is no longer offered.` (for a pick, `'Select <card>'` or `'Confirm selection'`)
   - `The game refused '<label>': <refusal>` (that id is put in `not_run`)
 
 #### Refusals
@@ -361,7 +366,8 @@ Argument errors return `{"error": "<text>"}` with `isError` true and no snapshot
 - `action_id is required`
 - `actions must be a list of action ids`
 - `actions takes 1 to 12 ids; you sent <n>.`
-- `version is required`
+- `version is required: pass the version of the snapshot your ids came from, so a stale id is refused instead of misfiring. Nothing was done.` (both `act` and `act_sequence`)
+- `version must be the integer snapshot.version; you sent <the JSON sent>. Nothing was done.` (a `version` that is a string or not a whole number, both tools)
 - `end_turn can only be the last id, since the turn is over once it runs. Nothing was played.`
 - `Unknown tool '<name>'`
 - `<ExceptionType>: <message>`
@@ -377,7 +383,7 @@ State refusals return `{"error": "<text>", "current": <snapshot>}` with `isError
 1. `Paused by <name>. Call wait_for_decision; you can still talk with say.`
 2. `Snapshot changed (you sent version <v>, current is <c>). Pick from the current actions.`
 3. `Not your decision right now (<waiting, or screen>). Call wait_for_decision.`
-4. For `act`, `'<id>' is not a legal action now.` For `act_sequence`, `'<id>' is not a legal action now, so nothing was played.` (the first illegal id)
+4. For `act`, `'<id>' is not a legal action now.` For `act_sequence`, `'<id>' is not a legal action now, so nothing was played.` (the first illegal id), or for a pick, `'select:<i>' names no card in your hand, so nothing was played. A pick for a card's choice uses the card's hand index in this snapshot.`, or `'card:<n>' can't be planned from combat: the cards of that pick aren't in this snapshot. End the sequence at the card that opens it. Nothing was played.`
 
 When the game refuses at execution time, `act` returns `{"error": "<game's text>", "current": <snapshot captured right after>}`, and `act_sequence` stops with `The game refused '<label>': <text>`. If the game gave no text, it is `The game refused the action.` Texts from the bridge (`GameBridge.ExecuteAsync`), which first captures again on the main thread:
 

@@ -197,18 +197,30 @@ Both brains get `act_sequence {version, actions: [id, ...]}` to play several act
 - An id with no index or target (`confirm`, `end_turn`, `proceed`) is taken as it is while it is still offered, since a label can carry a count that moves on ("Confirm selection (1 chosen)").
 - Any other id is found by its label in the original snapshot, so shifting hand indices don't matter. A play label names only the card, so a cheaper, enchanted or otherwise changed copy looks like the plain one. When several actions share the label, the tool prefers the card whose hand entry (name, cost, enchantment, text) equals the original's, then one that equals it without the text (a Strength gain rewrites every attack's text), then the same id, then the first.
 
+A card that asks for cards from the hand (Armaments, True Grit+, Burning Pact) opens `hand_select` in the middle of the turn. In a sequence that starts in combat, its picks can follow it: `select:<i>` with `i` the card's hand index in the original snapshot (the only one the model has seen), then `confirm`, then the rest of the turn. These picks are not offered in the original snapshot, so the up-front check only makes sure each `select:<i>` names a card in its hand; they are checked when the choice opens:
+
+- `select:<i>` runs as the select, among those the choice offers, for a card of the same name, preferring the one whose hand entry equals the original's, as for plays. The played card has left the hand and picked cards are not offered again, so positions shift. A card that is gone, already picked or not allowed in this choice stops the sequence, and nothing runs in its place. So does a `select:<i>` naming a card the sequence already played or picked, even when a copy with the same name is still in hand (Armaments, Armaments, Bash with `play:0, select:0` stops rather than upgrade the second Armaments).
+- `confirm` runs while the choice offers it. When the choice already closed by itself (enough cards picked), it is listed under `not_needed` and the sequence goes on.
+- With exactly 1 valid card the game takes it with no prompt (strategy/wiki/cards/ironclad.md), so no choice opens and a planned pick stops the sequence; the stop says the game may have taken the only card itself. The tool description and play.md tell the model to leave the picks out then. The tool doesn't try to tell this from a wrong plan.
+- The next play, potion or `end_turn` runs only once the screen is back on combat; a choice still open then stops the sequence as before. A pick with no hand choice open stops it too.
+- After an upgrade pick (`state.selection.mode` is `upgrade`, as for Armaments), a later play of that same card (by its original index) is found only under its upgraded name, "Play Bash+ on Jaw Worm" for "Play Bash on Jaw Worm", at the same target, so a plain copy is never played in its place.
+
+A pick from a pile or a choose-a-card screen (Headbutt, the card potions) is `card_select`, whose cards the original snapshot doesn't show, so a `card:<n>` or `bundle:<n>` after a play in combat is refused up front and the sequence stops when that screen opens.
+
 It stops early, returning what it did and the current snapshot, when:
 
 - nothing changed after the last step, or the game refused an action,
-- the screen is no longer the one the sequence started on (a hand selection opened, the fight ended),
+- the screen is no longer the one the sequence started on (a choice nobody planned picks for, a pick from a pile, the fight ended), except for the hand choice described above,
 - the game doesn't settle into a decision,
 - the turn ended (`state.turn` or `state.round` changed), say after a card like Void Form. The settle wait runs through the enemy turn, so without this check the rest of the plan would run on the next hand,
 - the bot is paused or a chat message arrives,
-- the next label is no longer offered.
+- the next label is no longer offered, or a planned pick isn't offered in the choice that opened.
 
-A target's label has " (e1)" after the enemy's name only while another living enemy shares it, so when a twin dies the tool also accepts the action at the same target whose label matches once that tag is dropped. Before anything runs, every id must be legal in the snapshot, `end_turn` may only be the last id, the version must match and the game must be waiting on the bot; otherwise it is refused like `act`, and nothing runs. It takes 1 to 12 ids. The result lists what ran, then why it stopped and which ids didn't run, then the snapshot: `{"done": [{"id", "label"}, ...], "stopped", "not_run", "warning", "next"}`, with `stopped` and `not_run` only when it stopped early. It is an error only when nothing ran.
+A target's label has " (e1)" after the enemy's name only while another living enemy shares it, so when a twin dies the tool also accepts the action at the same target whose label matches once that tag is dropped. Before anything runs, every id must be legal in the snapshot (picks for a hand choice as above), `end_turn` may only be the last id, the version must match and the game must be waiting on the bot; otherwise it is refused like `act`, and nothing runs. It takes 1 to 12 ids, picks included. The result lists what ran, the confirms that weren't needed, then why it stopped and which ids didn't run, then the snapshot: `{"done": [{"id", "label"}, ...], "not_needed", "stopped", "not_run", "warning", "next"}`, with `not_needed` only when a confirm was skipped and `stopped` and `not_run` only when it stopped early. It is an error only when nothing ran.
 
-`play.md` tells the model to end a sequence after any card or potion that draws, discovers, creates or transforms cards, has a random result it needs to see, opens a choice or ends its turn, so it sees what it got before planning further, and to leave out `end_turn` after a card that ends the turn.
+The model is told (tool description and `play.md`) to end a sequence after any card or potion that draws, discovers, creates or transforms cards, has a random result it needs to see, opens a pick from a pile or ends its turn, so it sees what it got before planning further (a card that asks for hand cards and then draws, like Burning Pact, ends it after its picks), and to leave out `end_turn` after a card that ends the turn. The tool can't tell those cards apart, so these stops are the model's to make.
+
+`act` and `act_sequence` both require `version`. An `act` without one is refused before anything runs (`version is required: pass the version of the snapshot your ids came from, ...`), since a second `act` sent in the same reply as the first would otherwise run unchecked on whatever the first led to (item 10 of `docs/opus-review.md`). A version sent as a string or a fraction is refused too, with `version must be the integer snapshot.version; you sent ...`, so the model isn't told it sent none.
 
 ## Smoke test
 

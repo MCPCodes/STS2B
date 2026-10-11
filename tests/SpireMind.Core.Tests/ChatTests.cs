@@ -627,7 +627,7 @@ public class ChatToolTests
         Assert.Equal("Bash first", acted.Payload["chat"]!["messages"]![0]!["text"]!.GetValue<string>());
 
         chat.PostFromHuman("Mark", "not that one");
-        var refused = Call(tools, "act", new JsonObject { ["action_id"] = "play:9>e0" });
+        var refused = Call(tools, "act", new JsonObject { ["action_id"] = "play:9>e0", ["version"] = acted.Payload["next"]!["version"]!.GetValue<long>() });
         Assert.True(refused.IsError);
         Assert.Equal("not that one", refused.Payload["chat"]!["messages"]![0]!["text"]!.GetValue<string>());
     }
@@ -855,8 +855,9 @@ public class ChatToolTests
         Assert.True(chat.ThinkingSince > first, "the next decision starts a new clock");
 
         // A refusal hands back the current decision, so the bot is deciding again.
-        var refused = Call(tools, "act", new JsonObject { ["action_id"] = "play:9>e0" });
+        var refused = Call(tools, "act", new JsonObject { ["action_id"] = "play:9>e0", ["version"] = acted.Payload["next"]!["version"]!.GetValue<long>() });
         Assert.True(refused.IsError);
+        Assert.EndsWith("is not a legal action now.", refused.Payload["error"]!.GetValue<string>());
         Assert.NotNull(chat.ThinkingSince);
         Assert.Single(duringAct);
     }
@@ -866,7 +867,7 @@ public class ChatToolTests
     {
         var (tools, chat) = Build(new BusyGame());
         chat.MarkThinking(true);
-        Call(tools, "get_state");
+        var version = Call(tools, "get_state").Payload["version"]!.GetValue<long>();
         Assert.Null(chat.ThinkingSince);
 
         chat.MarkThinking(true);
@@ -877,7 +878,9 @@ public class ChatToolTests
         Assert.Null(chat.ThinkingSince);
 
         chat.MarkThinking(true);
-        Assert.True(Call(tools, "act", new JsonObject { ["action_id"] = "end_turn" }).IsError);
+        var busy = Call(tools, "act", new JsonObject { ["action_id"] = "end_turn", ["version"] = version });
+        Assert.True(busy.IsError);
+        Assert.StartsWith("Not your decision right now", busy.Payload["error"]!.GetValue<string>());
         Assert.Null(chat.ThinkingSince);
     }
 
@@ -887,11 +890,13 @@ public class ChatToolTests
         var (tools, chat) = Build();
         chat.PostFromHuman("Mark", "/pause");
 
-        Call(tools, "get_state");
+        var version = Call(tools, "get_state").Payload["version"]!.GetValue<long>();
         Assert.Null(chat.ThinkingSince);
         Call(tools, "wait_for_decision", new JsonObject { ["timeout_seconds"] = 1 });
         Assert.Null(chat.ThinkingSince);
-        Assert.True(Call(tools, "act", new JsonObject { ["action_id"] = "end_turn" }).IsError);
+        var paused = Call(tools, "act", new JsonObject { ["action_id"] = "end_turn", ["version"] = version });
+        Assert.True(paused.IsError);
+        Assert.StartsWith("Paused by Mark.", paused.Payload["error"]!.GetValue<string>());
         Assert.Null(chat.ThinkingSince);
 
         chat.PostFromHuman("Mark", "/resume");

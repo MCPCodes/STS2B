@@ -67,19 +67,25 @@ public sealed partial class BotTools
             })),
         new("act",
             "Perform one legal action by id from the latest snapshot, then wait for the game to settle and return the next snapshot. " +
-            "Pass the snapshot's version so a stale id is rejected instead of misfiring.",
+            "version is required: pass the version of the snapshot the id came from, so a stale id is refused instead of misfiring. " +
+            "Take the next id and version from the snapshot act returns.",
             Schema(new JsonObject
             {
                 ["action_id"] = new JsonObject { ["type"] = "string", ["description"] = "An id from snapshot.actions" },
                 ["version"] = new JsonObject { ["type"] = "integer", ["description"] = "snapshot.version the id came from" },
-            }, required: ["action_id"])),
+            }, required: ["action_id", "version"])),
         new("act_sequence",
             "Play several actions from one snapshot in order, typically a whole combat turn, then return what ran and the snapshot after. " +
             "All ids come from the snapshot named by version; each later one is found again by its label (and copies of a card by their " +
-            "cost and text), so shifting hand positions don't matter. It stops early when a label is gone, the screen changes, your turn ends, " +
+            "cost and text), so shifting hand positions don't matter. A card that asks you to pick cards from your hand (Armaments, True Grit+) " +
+            "can be answered in the same sequence: right after it put select:<i> with each card's hand index in this snapshot, then confirm, " +
+            "then the rest of the turn. Those picks are checked when the choice opens, and a confirm the game no longer needs is skipped. " +
+            "If only one card in hand could be picked, the game takes it without asking: leave the picks out. " +
+            "It stops early when a label is gone, the screen changes any other way, your turn ends, " +
             "an action is refused or changes nothing, the game doesn't settle, a chat message arrives or you are paused. End a sequence after " +
-            "any card or potion that draws, discovers, creates or transforms cards, has a random result you need to see, opens a choice or " +
-            "ends your turn, and plan the rest from the returned snapshot. end_turn can only be the last id; leave it out after a card that ends your turn.",
+            "any card or potion that draws, discovers, creates or transforms cards, has a random result you need to see, opens a pick from a " +
+            "pile or ends your turn (a card that asks for hand cards and then draws, like Burning Pact: after its picks), and plan the rest " +
+            "from the returned snapshot. end_turn can only be the last id; leave it out after a card that ends your turn.",
             Schema(new JsonObject
             {
                 ["version"] = new JsonObject { ["type"] = "integer", ["description"] = "snapshot.version the ids came from" },
@@ -193,7 +199,8 @@ public sealed partial class BotTools
         if (string.IsNullOrWhiteSpace(actionId))
             return new ToolOutcome(Error("action_id is required"), IsError: true);
 
-        var version = SentVersion(args);
+        if (SentVersion(args) is not { } version)
+            return new ToolOutcome(Error(VersionProblem(args)), IsError: true);
         string? Check(GameSnapshot snap) =>
             CannotAct(snap, version) ?? (Offers(snap, actionId) ? null : $"'{actionId}' is not a legal action now.");
 
@@ -220,9 +227,11 @@ public sealed partial class BotTools
 
     /// <summary>
     /// Several actions from one snapshot, in order (docs/brain.md, act_sequence). Every id is
-    /// checked against that snapshot before anything runs. The first runs as act runs it; each
-    /// later one is found again by its label (<see cref="FindAgain"/>). It stops early, keeping what
-    /// ran, when the game or the human changes the picture (<see cref="WhyStop"/>).
+    /// checked against that snapshot before anything runs, except the picks for a hand choice a
+    /// card of the sequence opens (<see cref="ForHandChoice"/>), which are checked when it opens.
+    /// The first runs as act runs it; each later one is found again by its label
+    /// (<see cref="FindAgain"/>), or a pick by the card it names (<see cref="FindPick"/>). It stops
+    /// early, keeping what ran, when the game or the human changes the picture (<see cref="WhyStop"/>).
     /// </summary>
     private async Task<ToolOutcome> ActSequenceAsync(JsonObject args, CancellationToken ct)
     {
@@ -234,13 +243,11 @@ public sealed partial class BotTools
         if (ids.Count is 0 or > MaxSequence)
             return new ToolOutcome(Error($"actions takes 1 to {MaxSequence} ids; you sent {ids.Count}."), IsError: true);
         if (SentVersion(args) is not { } version)
-            return new ToolOutcome(Error("version is required"), IsError: true);
+            return new ToolOutcome(Error(VersionProblem(args)), IsError: true);
         if (ids.IndexOf("end_turn") is var endTurn and >= 0 && endTurn < ids.Count - 1)
             return new ToolOutcome(Error("end_turn can only be the last id, since the turn is over once it runs. Nothing was played."), IsError: true);
 
-        string? Check(GameSnapshot snap) =>
-            CannotAct(snap, version)
-            ?? (ids.FirstOrDefault(id => !Offers(snap, id)) is { } illegal ? $"'{illegal}' is not a legal action now, so nothing was played." : null);
+        string? Check(GameSnapshot snap) => CannotAct(snap, version) ?? Illegal(snap, ids);
 
         var start = await _waiter.CaptureAsync(ct);
         if (Check(start) is { } why)
@@ -254,6 +261,11 @@ public sealed partial class BotTools
         }
 
         var done = new JsonArray();
+        var notNeeded = new JsonArray();
+        // Hand indices in start of the cards picked in an upgrade choice, which come back with a "+".
+        var upgraded = new HashSet<int>();
+        // Hand indices in start of the cards this sequence has played or picked, which a later pick can't mean.
+        var used = new HashSet<int>();
         var current = start;
         Step? last = null;
         string? stopped = null;
@@ -261,18 +273,38 @@ public sealed partial class BotTools
         for (; k < ids.Count; k++)
         {
             var id = ids[k];
+            var pick = ForHandChoice(start, ids, k);
             if (last is not null)
             {
-                stopped = WhyStop(last, start, stops);
-                var match = stopped is null ? FindAgain(id, start, current) : null;
+                stopped = WhyStop(last, start, stops, pick);
+                if (stopped is null && pick && current.Screen != HandSelect)
+                {
+                    // The choice closed by itself once enough was picked: its confirm has nothing left to do.
+                    if (id == "confirm" && last.Before.Screen == HandSelect)
+                    {
+                        notNeeded.Add(id);
+                        continue;
+                    }
+                    stopped = $"'{PlannedLabel(start, id)}' was planned for a choice from your hand, but none is open."
+                              + (last.Id.StartsWith("play:", StringComparison.Ordinal) && last.Before.Screen != HandSelect
+                                  ? " If only one card could be picked, the game took it without asking." : "");
+                }
+                if (stopped is null && pick && HandIndex(id) is { } named && used.Contains(named))
+                    stopped = $"'{PlannedLabel(start, id)}' names a card this sequence already played or picked, so nothing was picked in its place.";
+                var match = stopped is null ? pick ? FindPick(id, start, current) : FindAgain(id, start, current, upgraded) : null;
                 if (match is null)
                 {
-                    stopped ??= $"'{LabelOf(start, id)}' is no longer offered.";
+                    stopped ??= $"'{PlannedLabel(start, id)}' is no longer offered.";
                     break;
                 }
+                if (pick && current.State["selection"]?["mode"] is JsonValue mode && mode.TryGetValue<string>(out var m) && m == "upgrade"
+                    && HandIndex(id) is { } picked)
+                    upgraded.Add(picked);
                 id = match;
             }
 
+            if (HandIndex(ids[k]) is { } at)
+                used.Add(at);
             last = await StepAsync(id, current, ct);
             current = last.After;
             if (last.Refusal is { } refusal)
@@ -285,6 +317,8 @@ public sealed partial class BotTools
         }
 
         var reply = new JsonObject { ["done"] = done };
+        if (notNeeded.Count > 0)
+            reply["not_needed"] = notNeeded;
         if (stopped is not null)
         {
             reply["stopped"] = stopped;
@@ -297,6 +331,47 @@ public sealed partial class BotTools
         reply["next"] = Present(current);
         return new ToolOutcome(reply, IsError: done.Count == 0);
     }
+
+    private const string HandSelect = "hand_select";
+
+    /// <summary>
+    /// Whether ids[k] answers a hand choice that a card earlier in the sequence opens: a
+    /// select:&lt;i&gt; or confirm, not first, in a sequence that starts in combat. Such an id
+    /// isn't offered in the snapshot the ids came from; its i is the card's hand index there.
+    /// </summary>
+    private static bool ForHandChoice(GameSnapshot start, List<string> ids, int k) =>
+        k > 0 && start.Screen == "combat" && (ids[k] == "confirm" || ids[k].StartsWith("select:", StringComparison.Ordinal));
+
+    /// <summary>Why the ids can't run on <paramref name="snap"/>, for the up-front check: the first
+    /// id the snapshot doesn't offer. A pick for a hand choice must name a card in its hand. Null
+    /// when all of them can.</summary>
+    private static string? Illegal(GameSnapshot snap, List<string> ids)
+    {
+        for (var k = 0; k < ids.Count; k++)
+        {
+            var id = ids[k];
+            if (ForHandChoice(snap, ids, k))
+            {
+                if (id == "confirm" || HandEntry(snap, id, withText: true) is not null)
+                    continue;
+                return $"'{id}' names no card in your hand, so nothing was played. A pick for a card's choice uses the card's hand index in this snapshot.";
+            }
+            if (Offers(snap, id))
+                continue;
+            if (k > 0 && snap.Screen == "combat" && (id.StartsWith("card:", StringComparison.Ordinal) || id.StartsWith("bundle:", StringComparison.Ordinal)))
+                return $"'{id}' can't be planned from combat: the cards of that pick aren't in this snapshot. End the sequence at the card that opens it. Nothing was played.";
+            return $"'{id}' is not a legal action now, so nothing was played.";
+        }
+        return null;
+    }
+
+    /// <summary>The label of an id from <paramref name="start"/>, or for a hand pick planned there,
+    /// the label its choice will show.</summary>
+    private static string PlannedLabel(GameSnapshot start, string id) =>
+        Offers(start, id) ? LabelOf(start, id)
+        : id == "confirm" ? "Confirm selection"
+        : HandEntry(start, id, withText: false)?["name"] is JsonValue name && name.TryGetValue<string>(out var n) ? $"Select {n}"
+        : id;
 
     /// <summary>One action run: the snapshot it ran on, the snapshot after, and the game's
     /// refusal when it wouldn't take it (After is then simply the state at that moment).</summary>
@@ -336,12 +411,12 @@ public sealed partial class BotTools
 
     /// <summary>Why no action can run on <paramref name="current"/>: paused, the model's version is
     /// stale, or it isn't the bot's decision. Null when one can.</summary>
-    private string? CannotAct(GameSnapshot current, long? version)
+    private string? CannotAct(GameSnapshot current, long version)
     {
         if (_chat.PausedBy is { } pausedBy)
             return $"Paused by {pausedBy}. Call wait_for_decision; you can still talk with say.";
-        if (version is { } expected && expected != current.Version)
-            return $"Snapshot changed (you sent version {expected}, current is {current.Version}). Pick from the current actions.";
+        if (version != current.Version)
+            return $"Snapshot changed (you sent version {version}, current is {current.Version}). Pick from the current actions.";
         if (!current.AwaitingDecision)
             return $"Not your decision right now ({current.Waiting ?? current.Screen}). Call wait_for_decision.";
         return null;
@@ -357,9 +432,12 @@ public sealed partial class BotTools
 
     /// <summary>Why act_sequence should stop after <paramref name="last"/> instead of running the
     /// next id, or null to go on. <paramref name="start"/> is the snapshot the sequence started on.
-    /// A card that ends the turn (Void Form) leaves the screen on combat, and the settle wait runs
-    /// through the enemy turn, so a new turn number is the only sign of it.</summary>
-    private string? WhyStop(Step last, GameSnapshot start, long stops)
+    /// The screen may only leave start's for the hand choice a card opened, and only while the
+    /// next id is a pick for it (<paramref name="pickNext"/>); the caller checks the other way
+    /// round, a pick with no choice open. A card that ends the turn (Void Form) leaves the screen
+    /// on combat, and the settle wait runs through the enemy turn, so a new turn number is the
+    /// only sign of it.</summary>
+    private string? WhyStop(Step last, GameSnapshot start, long stops, bool pickNext)
     {
         var now = last.After;
         // First, whatever the game shows: the human took the game back.
@@ -367,7 +445,7 @@ public sealed partial class BotTools
             return "The bot was stopped with /stop.";
         if (now.Version == last.Before.Version)
             return $"Nothing changed after '{last.Label}'. The game may have ignored it; re-check the state before repeating it.";
-        if (now.Screen != start.Screen)
+        if (now.Screen != start.Screen && !(pickNext && now.Screen == HandSelect))
             return $"The screen changed to {now.Screen}.";
         if (!now.AwaitingDecision)
             return $"The game is still busy ({now.Waiting ?? "no decision yet"}). Call wait_for_decision before acting again.";
@@ -392,14 +470,24 @@ public sealed partial class BotTools
     /// ("Confirm selection (1 chosen)"). Any other id is found by its label: the actions with that
     /// label, else, for an id with a target (">e1"), those at the same target whose label matches
     /// once a twin tag like " (e1)" is dropped from both; the tag comes and goes as a namesake
-    /// lives or dies. <see cref="PickCopy"/> chooses among several. Null when nothing matches.
+    /// lives or dies. A card picked in an upgrade choice earlier in the sequence (its start hand
+    /// index is in <paramref name="upgraded"/>) is found under its upgraded name only, "Bash+" for
+    /// "Bash", at the same target, so a plain copy is never played in its place. <see cref="PickCopy"/> chooses among
+    /// several. Null when nothing matches.
     /// </summary>
-    private static string? FindAgain(string id, GameSnapshot start, GameSnapshot now)
+    private static string? FindAgain(string id, GameSnapshot start, GameSnapshot now, IReadOnlySet<int> upgraded)
     {
         if (!id.Any(char.IsAsciiDigit))
             return Offers(now, id) ? id : null;
 
         var label = LabelOf(start, id);
+        if (HandIndex(id) is { } index && upgraded.Contains(index))
+        {
+            if (UpgradedLabel(start, id, TwinTag().Replace(label, "")) is not { } plus)
+                return null;
+            var at = TargetOf(id);
+            return now.Actions.FirstOrDefault(a => TargetOf(a.Id) == at && plus.IsMatch(TwinTag().Replace(a.Label, "")))?.Id;
+        }
         var matches = now.Actions.Where(a => a.Label == label).ToList();
         if (matches.Count == 0 && TargetOf(id) is { } target)
         {
@@ -407,6 +495,47 @@ public sealed partial class BotTools
             matches = now.Actions.Where(a => TargetOf(a.Id) == target && TwinTag().Replace(a.Label, "") == bare).ToList();
         }
         return PickCopy(id, start, now, matches);
+    }
+
+    /// <summary>
+    /// The pick in <paramref name="now"/>, an open hand choice, that a pick planned in
+    /// <paramref name="start"/> means. confirm is itself while offered. select:&lt;i&gt; names the
+    /// card at hand index i in start: of the selects offered for a card of that name, the one
+    /// whose hand entry is the same (<see cref="PickCopy"/>). The played card has left the hand
+    /// and picked ones are not offered again, so positions shift; a card that is gone, already
+    /// picked or not allowed in this choice gives null, and nothing runs in its place. The caller
+    /// first stops a pick of a card the sequence already played or picked, so a copy of it with
+    /// the same name is never taken for it.
+    /// </summary>
+    private static string? FindPick(string id, GameSnapshot start, GameSnapshot now)
+    {
+        if (id == "confirm")
+            return Offers(now, id) ? id : null;
+        if (NameOf(HandEntry(start, id, withText: false)) is not { } name)
+            return null;
+        var matches = now.Actions
+            .Where(a => a.Id.StartsWith("select:", StringComparison.Ordinal) && NameOf(HandEntry(now, a.Id, withText: false)) == name)
+            .ToList();
+        return PickCopy(id, start, now, matches);
+
+        static string? NameOf(JsonNode? entry) =>
+            entry?["name"] is JsonValue v && v.TryGetValue<string>(out var n) ? n : null;
+    }
+
+    /// <summary>
+    /// What the label of play id <paramref name="id"/>, <paramref name="label"/> in
+    /// <paramref name="start"/>, reads once its card is upgraded: the card's name with a "+" or
+    /// "+N" after it, the rest unchanged ("Play Bash+ on Jaw Worm"). Null when the label doesn't
+    /// start with the card's name.
+    /// </summary>
+    private static Regex? UpgradedLabel(GameSnapshot start, string id, string label)
+    {
+        if (HandEntry(start, id, withText: false)?["name"] is not JsonValue v || !v.TryGetValue<string>(out var name))
+            return null;
+        var head = $"Play {name}";
+        if (!label.StartsWith(head, StringComparison.Ordinal))
+            return null;
+        return new Regex($"^{Regex.Escape(head)}\\+\\d*{Regex.Escape(label[head.Length..])}$", RegexOptions.CultureInvariant);
     }
 
     /// <summary>
@@ -445,12 +574,7 @@ public sealed partial class BotTools
     /// unless <paramref name="withText"/>. Null for any other id.</summary>
     private static JsonNode? HandEntry(GameSnapshot snap, string id, bool withText)
     {
-        var colon = id.IndexOf(':');
-        if (colon < 0 || id[..colon] is not ("play" or "select"))
-            return null;
-        var end = id.IndexOf('>');
-        if (!int.TryParse(id[(colon + 1)..(end < 0 ? id.Length : end)], NumberStyles.None, CultureInfo.InvariantCulture, out var i)
-            || snap.State["hand"] is not JsonArray hand || i >= hand.Count)
+        if (HandIndex(id) is not { } i || snap.State["hand"] is not JsonArray hand || i >= hand.Count)
             return null;
         var entry = hand[i]?.DeepClone();
         if (entry is JsonObject card)
@@ -461,6 +585,16 @@ public sealed partial class BotTools
                 card.Remove("text");
         }
         return entry;
+    }
+
+    /// <summary>The hand index a play or select id names, 2 of "play:2>e0" and of "select:2". Null for any other id.</summary>
+    private static int? HandIndex(string id)
+    {
+        var colon = id.IndexOf(':');
+        if (colon < 0 || id[..colon] is not ("play" or "select"))
+            return null;
+        var end = id.IndexOf('>');
+        return int.TryParse(id[(colon + 1)..(end < 0 ? id.Length : end)], NumberStyles.None, CultureInfo.InvariantCulture, out var i) ? i : null;
     }
 
     private static string LabelOf(GameSnapshot snap, string id) => snap.Actions.First(a => a.Id == id).Label;
@@ -474,6 +608,17 @@ public sealed partial class BotTools
     /// enemy or player shares it.</summary>
     [GeneratedRegex(@" \([ep]\d+\)$")]
     private static partial Regex TwinTag();
+
+    /// <summary>What act and act_sequence say when the call has no version. Without it a second
+    /// act sent on the same snapshot would run unchecked on whatever the first one led to.</summary>
+    public const string VersionRequired =
+        "version is required: pass the version of the snapshot your ids came from, so a stale id is refused instead of misfiring. Nothing was done.";
+
+    /// <summary>Why the call's version can't be used: missing, or sent as something other than an integer.</summary>
+    private static string VersionProblem(JsonObject args) =>
+        args["version"] is { } sent
+            ? $"version must be the integer snapshot.version; you sent {sent.ToJsonString()}. Nothing was done."
+            : VersionRequired;
 
     private static long? SentVersion(JsonObject args) =>
         args["version"] is JsonValue v && v.TryGetValue<long>(out var version) ? version : null;

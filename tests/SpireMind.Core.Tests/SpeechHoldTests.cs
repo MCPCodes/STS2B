@@ -220,7 +220,8 @@ public class SpeechHoldTests
         };
         tools.CallAsync("say", new JsonObject { ["text"] = "Bash first." }, CancellationToken.None).GetAwaiter().GetResult();
 
-        var acted = tools.CallAsync("act", new JsonObject { ["action_id"] = "play:3>e0" }, CancellationToken.None).GetAwaiter().GetResult();
+        var version = tools.CallAsync("get_state", new JsonObject(), CancellationToken.None).GetAwaiter().GetResult().Payload["version"]!.GetValue<long>();
+        var acted = tools.CallAsync("act", new JsonObject { ["action_id"] = "play:3>e0", ["version"] = version }, CancellationToken.None).GetAwaiter().GetResult();
 
         Assert.False(acted.IsError, acted.Payload.ToJsonString());
         Assert.Equal(0, waits);
@@ -306,10 +307,11 @@ public class SpeechHoldTests
             Delay = (_, ct) => Task.Delay(Timeout.InfiniteTimeSpan, ct),
         };
         tools.CallAsync("say", new JsonObject { ["text"] = "Onward." }, CancellationToken.None).GetAwaiter().GetResult();
+        var version = tools.CallAsync("get_state", new JsonObject(), CancellationToken.None).GetAwaiter().GetResult().Payload["version"]!.GetValue<long>();
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
         Assert.ThrowsAny<OperationCanceledException>(() =>
-            tools.CallAsync("act", new JsonObject { ["action_id"] = "map:0" }, cts.Token).GetAwaiter().GetResult());
+            tools.CallAsync("act", new JsonObject { ["action_id"] = "map:0", ["version"] = version }, cts.Token).GetAwaiter().GetResult());
         Assert.Empty(log);
     }
 }

@@ -168,7 +168,13 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
 - **Act 2:** spend on elites and the boss, not hallway fights.
 - **Act 3:** keep 2 strong potions for the final boss unless an elite threatens the run.
 - Use a potion now if your slots are full and more are coming (a reward screen, a shop).
-- **Sequencing:** buff potions (Strength, Focus, Energy) BEFORE attacks. Damage potions to secure kills. Block Potion only on the turn you need it (Block expires).
+- **Sequencing:** buff potions (Strength, Focus, Energy) BEFORE attacks. Damage potions to secure kills.
+- A potion that adds a card: open it at the start of a turn, before any card. Do not open it to block a hit you can afford (elite or boss, above half HP).
+- A card you take inside a fight (Skill, Attack, Power or Colorless Potion) stays for the rest of the fight unless it exhausts, and costs 0 only this turn. Read every offer before you decide what you need. For each, count what it gives over the turns left, not only this turn, and name the card in your deck or the enemy rule it works with. In an elite or boss fight take the one that shortens the fight, unless another is the difference between living and dying this turn.
+- Flex Potion adds 5 to every hit this turn only: use it on the turn with the most hits, never on one attack unless it kills.
+- Gigantification goes on your biggest multiplied hit: Vulnerable target, after your Strength cards, never while Weak. Write the number first.
+- Snecko Oil: drink it with 2 or more energy left, on a low-damage turn, after the cards whose cost you already like.
+- Shackling, Speed and Block potions go on the biggest of the enemy's next 3 turns.
 - No potion gives Artifact in v0.107.1 (there is no Ancient Potion). Distilled Chaos is burst. Blood Potion heals 20% (Ironclad).
 - Potion drops: one roll after every fight. 40% at run start, 10 points down after a drop, 10 up after a miss, never reset between acts. Elites roll with +12.5 points. White Beast Statue guarantees drops. Exact effects and odds: strategy/wiki/potions.md.
 
@@ -176,8 +182,8 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
 1. **Read all intents and sum incoming damage.**
    - Count multi-hits (11×2 = 22). The intent number already includes the enemy's Strength and Weak and your Vulnerable: don't add them again. Frail cuts your card Block, not the incoming damage. Remember Thorns-like and end-of-turn effects (Beckon, Burn, Constrict, Disintegration, Wither).
 2. **Check lethal on enemies.** A dead enemy deals 0. Prefer the kill that removes the most incoming damage or scaling.
-3. **If no enemy attacks this turn, it's a free window.** Play Powers and setup, or all-out attack. Don't block, except against end-of-turn damage that Block absorbs (Constrict on you, Infection or Burn in hand).
-4. **Block only what's needed.** Never Block more than the incoming damage plus end-of-turn damage that Block absorbs. Up to that, each Block point saves 1 HP: weigh it against damage that ends the fight a turn sooner. Spend the rest on damage or setup.
+3. **If no enemy attacks this turn, it's a free window.** Play Powers and setup, or all-out attack. Don't block, except against end-of-turn damage that Block absorbs (Constrict on you, Infection or Burn in hand), or to play the cards you want to keep, Defends too, before a random exhaust takes one (play.md step 2).
+4. **Block only what's needed.** Never Block more than the incoming damage plus end-of-turn damage that Block absorbs (the exceptions in item 3 aside). Up to that, each Block point saves 1 HP: weigh it against damage that ends the fight a turn sooner. Spend the rest on damage or setup.
    - Exception: early Act 1 hallway fights, when the damage would not heal back (item 12): zero-damage lines are worth a little tempo.
    - Exception: when HP is your binding constraint for an upcoming elite or boss.
 5. **Sequence for value:**
@@ -187,7 +193,7 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
 6. **Spend all energy.** Unspent energy is wasted, unless you have Ice Cream, Pael's Tears, Convergence-type Retain, or similar.
 7. **Kill order:**
    - First: enemies that buff others, summon, revive, or scale fast.
-   - Except Minions and enemies that come back (Eye with Teeth): when the fight ends with one main enemy, damage goes there.
+   - Except Minions and enemies that come back (Eye with Teeth): when the fight ends with one main enemy, damage goes there, unless the low-HP count in play.md step 2 says not to race.
    - Then the highest damage dealer. Then the rest.
    - Don't overkill. Split damage when one more hit isn't needed.
    - In 3+ enemy fights, AoE beats focus fire.
@@ -199,7 +205,7 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
 10. **Delayed damage:**
     - Doom executes at the END of the enemy turn. The enemy still attacks once.
     - Poison ticks at the start of the enemy's turn and is blocked by Artifact. Strip Artifact first (Expose, Know Thy Place, cheap debuffs).
-11. **Avoid high-variance all-ins** unless you've verified you survive the next enemy turn.
+11. **Avoid high-variance all-ins** unless you've verified you survive the next enemy turn. Under 20 HP in an elite or boss fight, count two turns first (play.md step 2).
 12. **HP policy:**
     - Burning Blood (Ironclad) heals 6 after every won fight, up to max HP: a won fight that ends within 6 of max HP costs nothing, so stop chasing zero-damage lines there.
     - Act 1 Overgrowth, first 3 fights (the weak encounters, from floor 2; Underdocks unverified): prefer zero-damage lines when the damage would not heal back.

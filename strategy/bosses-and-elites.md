@@ -11,7 +11,7 @@ Verified from the game files, single player, ascension 0. From A8 HP and Vantom'
   - *Slow*: each card you finish this turn makes your later attack cards hit it 10% harder (card 3 x1.2, card 6 x1.5). Potions and reflected damage get no bonus.
   - Your turns 1-2: no Block. Play Powers, Vulnerable and attacks.
   - Every turn: Skills, Powers and cheap cards first, the biggest attack last.
-  - Weak on it cuts 23 to 17. Each turn after turn 2 costs 23 minus your Block.
+  - Weak on it cuts 23 to 17. Each turn after turn 2 costs 23 minus your Block. A kill on your turn 7 takes 4 Slashes: 92.
 - **Byrdonis** (81-84 HP, alone)
   - Swoop 17, Peck 3x3, alternating, +1 Strength after every enemy turn: 17, 4x3, 19, 6x3, 21, 8x3. No free turn.
   - The next number is known: never Block past it. Each Block point up to it saves 1 HP; weigh that against damage, since each Swoop + Peck pair deals 8 more (29, 37, 45) and stalling loses.
@@ -24,7 +24,7 @@ Verified from the game files, single player, ascension 0. From A8 HP and Vantom'
   - Then finish one biting pair (e1+e3 or e2+e4), starting with the pair that shows attack: with a pair dead, every other enemy turn has no attack.
 ### Bosses
 - **Vantom** (173 HP, alone)
-  - Ink Blot 7, Inky Lance 6x2, Dismember 26 + 3 Wounds into your discard (blocked or not), Prepare +2 Strength. By enemy turn: 7, 12, 26, 0, 9, 16, 28, 0, 11, 20, 30, 0.
+  - Ink Blot 7, Inky Lance 6x2, Dismember 26 + 3 Wounds into your discard (blocked or not), Prepare +2 Strength. By enemy turn: 7, 6x2 = 12, 26, 0, 9, 8x2 = 16, 28, 0, 11, 10x2 = 20, 30, 0.
   - *Slippery 8*: each instance that removes HP removes exactly 1 and 1 stack, from cards, potions, reflected damage and HP loss alike. After 8 such hits the other 165 HP take full damage.
   - Strip stacks with the cheapest hits first: count hits, not damage. Damage potions wait until Slippery is gone. A big single hit waits only while a cheaper hit can take the stack: with energy left and nothing better to play, it still strips 1. Play Bash when the stacks are nearly gone (its own hit strips one).
   - Turns 4, 8, 12 deal 0: no Block. Turns 3, 7, 11 bring the big hit (26, 28, 30). Weak works through Slippery: Dismember 26 becomes 19.
@@ -37,7 +37,7 @@ Verified from the game files, single player, ascension 0. From A8 HP and Vantom'
   - Each 1-card turn faces Stomp (15, 18, 21). Energy is full and potions are not limited: play your single strongest card, Block or attack.
 - **The Kin** (Kin Priest e2 190 HP; Kin Followers e0 and e1, 58-59 HP, Minions)
   - Killing the Priest kills both Followers and wins: 190 HP of work against 307 for all 3. Single-target damage goes into e2 by default.
-  - Kill a Follower only when a leftover hit or area damage finishes it, e0 before e1 (e0 deals 6 more per 3 turns). Feed on a Follower gives nothing.
+  - Kill a Follower only when a leftover hit or area damage finishes it, e0 before e1 (e0 deals 6 more per 3 turns), or when the low-HP count in play.md step 2 says not to race. Feed on a Follower gives nothing.
   - Priest: 8 + Frail, 8 + Weak, Beam 3x3, Ritual +2 Strength. All 3 together by enemy turn: 13, 19, 17, 7, 27, 22, 24, 23, 28, 23, 50, 20.
   - Your turns 2, 6, 10 are Frail (card Block x0.75): lean on attacks. Turns 3, 7, 11 are Weak (attacks x0.75): lean on Block.
   - Enemy turns 1 (13) and 4 (7) are the cheap ones to skip Block and set up. End it before enemy turn 11 (50 damage).

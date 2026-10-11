@@ -28,6 +28,22 @@ public class ActSequenceTests
         /// <summary>The hand selection may be confirmed with nothing picked (retain up to N).</summary>
         public bool OptionalSelection { get; set; }
 
+        /// <summary>state.selection.mode while selecting, when set ("upgrade" for Armaments).</summary>
+        public string? SelectionMode { get; set; }
+
+        /// <summary>The selection closes by itself at its first pick, with no confirm.</summary>
+        public bool ClosesAtOnePick { get; set; }
+
+        /// <summary>A pick comes back upgraded when the selection closes ("Bash" as "Bash+").</summary>
+        public bool PicksUpgrade { get; set; }
+
+        /// <summary>Picks stay in the hand at their index, marked "selected" and no longer offered,
+        /// as CombatReader shows them, instead of leaving it until confirm.</summary>
+        public bool KeepsPicksInHand { get; set; }
+
+        /// <summary>Hand indices picked so far, when <see cref="KeepsPicksInHand"/>.</summary>
+        public SortedSet<int> PickedAt { get; } = [];
+
         /// <summary>Goes into every card's text, as Strength does into an attack's.</summary>
         public int Strength { get; set; }
         public List<(string Name, bool Alive)> Enemies { get; } = [("Jaw Worm", true)];
@@ -83,16 +99,18 @@ public class ActSequenceTests
             if (Screen == "hand_select")
             {
                 for (var i = 0; i < Hand.Count; i++)
-                    actions.Add(new LegalAction($"select:{i}", $"Select {Name(Hand[i])}"));
-                if (OptionalSelection || Selected.Count > 0)
-                    actions.Add(new LegalAction("confirm", $"Confirm selection ({Selected.Count} chosen)"));
+                    if (!PickedAt.Contains(i))
+                        actions.Add(new LegalAction($"select:{i}", $"Select {Name(Hand[i])}"));
+                var chosen = Selected.Count + PickedAt.Count;
+                if (OptionalSelection || chosen > 0)
+                    actions.Add(new LegalAction("confirm", $"Confirm selection ({chosen} chosen)"));
             }
             else if (Screen == "combat")
             {
                 for (var i = 0; i < Hand.Count; i++)
                 {
                     var name = Name(Hand[i]);
-                    if (!Attacks.Contains(name))
+                    if (!Attacks.Contains(name.TrimEnd('+')))
                     {
                         actions.Add(new LegalAction($"play:{i}", $"Play {name}"));
                         continue;
@@ -108,24 +126,26 @@ public class ActSequenceTests
                 actions.Add(new LegalAction("proceed", "Proceed"));
             }
 
-            return Task.FromResult(new GameSnapshot
+            var state = new JsonObject
             {
-                Screen = Screen,
-                AwaitingDecision = true,
-                State = new JsonObject
+                ["turn"] = Turn,
+                ["hand"] = new JsonArray(Hand.Select((c, i) => (JsonNode)new JsonObject
                 {
-                    ["turn"] = Turn,
-                    ["hand"] = new JsonArray(Hand.Select((c, i) => (JsonNode)new JsonObject
-                    {
-                        ["i"] = i, ["name"] = Name(c), ["cost"] = Cost(c), ["text"] = $"{Name(c)} with {Strength} Strength.", ["playable"] = true,
-                    }).ToArray()),
-                    ["enemies"] = new JsonArray(Enemies.Select((e, j) => (JsonNode)new JsonObject
-                    {
-                        ["i"] = j, ["name"] = e.Name, ["alive"] = e.Alive,
-                    }).ToArray()),
-                },
-                Actions = actions,
-            });
+                    ["i"] = i, ["name"] = Name(c), ["cost"] = Cost(c), ["text"] = $"{Name(c)} with {Strength} Strength.", ["playable"] = true,
+                }).ToArray()),
+                ["enemies"] = new JsonArray(Enemies.Select((e, j) => (JsonNode)new JsonObject
+                {
+                    ["i"] = j, ["name"] = e.Name, ["alive"] = e.Alive,
+                }).ToArray()),
+            };
+            if (Screen == "hand_select" && SelectionMode is { } mode)
+                state["selection"] = new JsonObject { ["mode"] = mode };
+            if (Screen == "hand_select" && KeepsPicksInHand)
+                foreach (var (entry, i) in state["hand"]!.AsArray().Select((e, i) => (e!.AsObject(), i)))
+                    if (PickedAt.Contains(i)) entry["selected"] = true;
+                    else entry["selectable"] = true;
+
+            return Task.FromResult(new GameSnapshot { Screen = Screen, AwaitingDecision = true, State = state, Actions = actions });
         }
 
         public Task<ActionResult> ExecuteAsync(string actionId, CancellationToken ct)
@@ -160,16 +180,36 @@ public class ActSequenceTests
             else if (actionId.StartsWith("select:"))
             {
                 var i = int.Parse(actionId[7..]);
-                Selected.Add(Hand[i]);
-                Hand.RemoveAt(i);
+                if (KeepsPicksInHand)
+                {
+                    PickedAt.Add(i);
+                }
+                else
+                {
+                    Selected.Add(Hand[i]);
+                    Hand.RemoveAt(i);
+                }
+                if (ClosesAtOnePick)
+                    CloseSelection();
             }
             else if (actionId == "confirm")
             {
-                Hand.AddRange(Selected);
-                Selected.Clear();
-                Screen = "combat";
+                CloseSelection();
             }
             return Task.FromResult(ActionResult.Success);
+        }
+
+        private static string Upgraded(string card) => Name(card) + "+" + (card.Contains('/') ? "/" + Cost(card) : "");
+
+        private void CloseSelection()
+        {
+            if (PicksUpgrade)
+                foreach (var i in PickedAt)
+                    Hand[i] = Upgraded(Hand[i]);
+            PickedAt.Clear();
+            Hand.AddRange(PicksUpgrade ? Selected.Select(Upgraded) : Selected);
+            Selected.Clear();
+            Screen = "combat";
         }
 
         public Task<JsonObject> DescribeDeckAsync(CancellationToken ct) => Task.FromResult(new JsonObject());
@@ -399,6 +439,230 @@ public class ActSequenceTests
         Assert.Equal(["done", "stopped", "not_run", "next"], outcome.Payload.AsObject().Select(p => p.Key));
     }
 
+    /// <summary>Armaments: played, it opens an upgrade choice from the hand, and the pick comes back with a "+".</summary>
+    private static ScriptedFight Armaments(params string[] rest)
+    {
+        var game = new ScriptedFight(["Armaments", .. rest]) { SelectionMode = "upgrade", PicksUpgrade = true };
+        game.OnPlay["Armaments"] = _ => game.Screen = "hand_select";
+        return game;
+    }
+
+    [Fact]
+    public void Answers_the_hand_choice_its_card_opens_and_plays_on()
+    {
+        var game = Armaments("Strike", "Bash", "Defend");
+        var (tools, _) = Build(game);
+
+        // select:2 is Bash in the snapshot the plan came from; once Armaments has left, it sits at 1.
+        var outcome = Sequence(tools, Version(tools), "play:0", "select:2", "confirm", "play:2>e0", "play:1>e0", "end_turn");
+
+        Assert.False(outcome.IsError);
+        Assert.Equal(["play:0", "select:1", "confirm", "play:2>e0", "play:0>e0", "end_turn"], game.Executed);
+        Assert.Equal(["Play Armaments", "Select Bash", "Confirm selection (1 chosen)", "Play Bash+ on Jaw Worm", "Play Strike on Jaw Worm", "End turn"],
+            DoneLabels(outcome));
+        Assert.Equal(["Armaments", "Bash+", "Strike"], game.Played);
+        Assert.Equal(["done", "next"], outcome.Payload.AsObject().Select(p => p.Key));
+        Assert.Equal(2, game.Turn);
+    }
+
+    [Fact]
+    public void The_upgraded_card_is_played_and_not_a_plain_copy_in_its_place()
+    {
+        var game = Armaments("Defend", "Defend");
+        var (tools, _) = Build(game);
+
+        // The second Defend is upgraded, then the first is played, then the upgraded one.
+        var outcome = Sequence(tools, Version(tools), "play:0", "select:2", "confirm", "play:1", "play:2");
+
+        Assert.False(outcome.IsError);
+        Assert.Equal(["Play Armaments", "Select Defend", "Confirm selection (1 chosen)", "Play Defend", "Play Defend+"], DoneLabels(outcome));
+        Assert.Equal(["Armaments", "Defend", "Defend+"], game.Played);
+    }
+
+    [Fact]
+    public void A_confirm_the_choice_no_longer_needs_is_skipped()
+    {
+        var game = Armaments("Strike", "Bash");
+        game.ClosesAtOnePick = true;
+        var (tools, _) = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), "play:0", "select:2", "confirm", "play:1>e0");
+
+        Assert.False(outcome.IsError);
+        Assert.Equal(["play:0", "select:1", "play:0>e0"], game.Executed);
+        Assert.Equal(["confirm"], outcome.Payload["not_needed"]!.AsArray().Select(i => i!.GetValue<string>()));
+        Assert.Equal(["done", "not_needed", "next"], outcome.Payload.AsObject().Select(p => p.Key));
+        Assert.Equal(["Armaments", "Strike"], game.Played);
+    }
+
+    [Fact]
+    public void A_pick_for_a_card_that_left_the_hand_stops_without_picking()
+    {
+        var game = Armaments("Strike", "Bash");
+        var (tools, _) = Build(game);
+
+        // select:0 is Armaments itself, which is no longer in the hand once played.
+        var outcome = Sequence(tools, Version(tools), "play:0", "select:0", "confirm", "play:1>e0");
+
+        Assert.False(outcome.IsError);
+        Assert.Equal(["play:0"], game.Executed);
+        Assert.Equal("'Select Armaments' names a card this sequence already played or picked, so nothing was picked in its place.", Stopped(outcome));
+        Assert.Equal(["select:0", "confirm", "play:1>e0"], NotRun(outcome));
+        Assert.Equal("hand_select", outcome.Payload["next"]!["screen"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void A_pick_with_no_choice_open_stops()
+    {
+        var game = new ScriptedFight("Strike", "Defend", "Bash");
+        var (tools, _) = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), "play:0>e0", "select:2", "confirm", "play:1");
+
+        Assert.False(outcome.IsError);
+        Assert.Equal(["play:0>e0"], game.Executed);
+        Assert.Equal("'Select Bash' was planned for a choice from your hand, but none is open. If only one card could be picked, the game took it without asking.", Stopped(outcome));
+        Assert.Equal(["select:2", "confirm", "play:1"], NotRun(outcome));
+    }
+
+    [Fact]
+    public void A_pick_never_takes_a_copy_of_the_card_just_played()
+    {
+        // select:0 is the Armaments being played; the other Armaments has the same name.
+        var game = Armaments("Armaments", "Bash");
+        var (tools, _) = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), "play:0", "select:0", "confirm", "play:2>e0");
+
+        Assert.Equal(["play:0"], game.Executed);
+        Assert.Equal("'Select Armaments' names a card this sequence already played or picked, so nothing was picked in its place.", Stopped(outcome));
+        Assert.Equal(["select:0", "confirm", "play:2>e0"], NotRun(outcome));
+        Assert.Equal(["Armaments", "Bash"], game.Hand);
+    }
+
+    [Fact]
+    public void A_pick_never_takes_a_copy_of_a_card_played_earlier_in_the_sequence()
+    {
+        var game = Armaments("Strike", "Bash", "Strike");
+        var (tools, _) = Build(game);
+
+        // The Strike at 1 was played first; the other Strike is still in hand when the choice opens.
+        var outcome = Sequence(tools, Version(tools), "play:1>e0", "play:0", "select:1", "confirm");
+
+        Assert.Equal(["play:1>e0", "play:0"], game.Executed);
+        Assert.StartsWith("'Select Strike' names a card this sequence already played", Stopped(outcome));
+        Assert.Equal(["Bash", "Strike"], game.Hand);
+    }
+
+    [Fact]
+    public void A_choice_the_game_answers_by_itself_stops_with_a_hint()
+    {
+        // Only Bash can be upgraded, so Armaments upgrades it without opening a choice.
+        var game = new ScriptedFight("Armaments", "Bash", "Strike+");
+        game.OnPlay["Armaments"] = _ => game.Hand[0] = "Bash+";
+        var (tools, _) = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), "play:0", "select:1", "confirm", "play:1>e0");
+
+        Assert.False(outcome.IsError);
+        Assert.Equal(["play:0"], game.Executed);
+        Assert.Equal("'Select Bash' was planned for a choice from your hand, but none is open. If only one card could be picked, the game took it without asking.", Stopped(outcome));
+        Assert.Equal(["select:1", "confirm", "play:1>e0"], NotRun(outcome));
+    }
+
+    [Fact]
+    public void Picks_find_their_cards_when_picked_cards_stay_in_the_hand()
+    {
+        // As in the game: picked cards keep their place, marked selected, and copies differ by cost.
+        var game = new ScriptedFight("Gambit", "Strike", "Strike/0", "Defend") { KeepsPicksInHand = true };
+        game.OnPlay["Gambit"] = _ => game.Screen = "hand_select";
+        var (tools, _) = Build(game);
+
+        // The cheap Strike first, then the plain one, then Defend once the choice is closed.
+        var outcome = Sequence(tools, Version(tools), "play:0", "select:2", "select:1", "confirm", "play:3");
+
+        Assert.False(outcome.IsError);
+        Assert.Equal(["play:0", "select:1", "select:0", "confirm", "play:2"], game.Executed);
+        Assert.Equal(["Play Gambit", "Select Strike", "Select Strike", "Confirm selection (2 chosen)", "Play Defend"], DoneLabels(outcome));
+        Assert.Equal(["Gambit", "Defend"], game.Played);
+    }
+
+    [Fact]
+    public void An_upgrade_pick_that_stays_in_the_hand_is_played_under_its_new_name()
+    {
+        var game = Armaments("Bash", "Strike", "Bash/0");
+        game.KeepsPicksInHand = true;
+        var (tools, _) = Build(game);
+
+        // The cheap Bash is upgraded, then played; the plain Bash is never played for it.
+        var outcome = Sequence(tools, Version(tools), "play:0", "select:3", "confirm", "play:3>e0", "play:2>e0");
+
+        Assert.False(outcome.IsError);
+        Assert.Equal(["play:0", "select:2", "confirm", "play:2>e0", "play:1>e0"], game.Executed);
+        Assert.Equal(["Armaments", "Bash+/0", "Strike"], game.Played);
+    }
+
+    [Fact]
+    public void A_choice_that_opens_a_pile_pick_still_stops()
+    {
+        // A pick from a pile (Headbutt) is card_select, whose cards the plan couldn't see.
+        var game = new ScriptedFight("Headbutt", "Strike");
+        game.OnPlay["Headbutt"] = _ => game.Screen = "card_select";
+        var (tools, _) = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), "play:0", "confirm", "play:1>e0");
+
+        Assert.Equal(["play:0"], game.Executed);
+        Assert.Equal("The screen changed to card_select.", Stopped(outcome));
+        Assert.Equal(["confirm", "play:1>e0"], NotRun(outcome));
+    }
+
+    [Theory]
+    [InlineData(new[] { "play:0", "select:9", "confirm" }, "'select:9' names no card in your hand, so nothing was played. A pick for a card's choice uses the card's hand index in this snapshot.")]
+    [InlineData(new[] { "select:1", "play:0" }, "'select:1' is not a legal action now, so nothing was played.")]
+    [InlineData(new[] { "play:0", "card:0" }, "'card:0' can't be planned from combat: the cards of that pick aren't in this snapshot. End the sequence at the card that opens it. Nothing was played.")]
+    public void Picks_that_cant_be_meant_are_refused_before_anything_runs(string[] ids, string error)
+    {
+        var game = Armaments("Strike", "Bash");
+        var (tools, _) = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), ids);
+
+        Assert.True(outcome.IsError);
+        Assert.Equal(error, outcome.Payload["error"]!.GetValue<string>());
+        Assert.Empty(game.Executed);
+    }
+
+    [Fact]
+    public void A_choice_left_open_by_the_plan_stops_as_before()
+    {
+        var game = Armaments("Strike", "Bash");
+        var (tools, _) = Build(game);
+
+        // Picked but not confirmed, and the plan goes on with a play: that can't run on the choice.
+        var outcome = Sequence(tools, Version(tools), "play:0", "select:2", "play:1>e0");
+
+        Assert.Equal(["play:0", "select:1"], game.Executed);
+        Assert.Equal("The screen changed to hand_select.", Stopped(outcome));
+        Assert.Equal(["play:1>e0"], NotRun(outcome));
+    }
+
+    [Fact]
+    public void A_pause_while_choosing_stops_before_the_pick()
+    {
+        var game = Armaments("Strike", "Bash");
+        ChatHub? hub = null;
+        game.OnExecute = id => { if (id == "play:0") hub!.PostFromHuman("Mark", "/pause"); };
+        var (tools, chat) = Build(game);
+        hub = chat;
+
+        var outcome = Sequence(tools, Version(tools), "play:0", "select:2", "confirm");
+
+        Assert.Equal(["play:0"], game.Executed);
+        Assert.StartsWith("Paused by Mark.", Stopped(outcome));
+        Assert.Equal(["select:2", "confirm"], NotRun(outcome));
+    }
+
     [Fact]
     public void Stops_for_a_chat_message_that_arrives_mid_sequence()
     {
@@ -592,7 +856,9 @@ public class ActSequenceTests
     [InlineData("""{"version": V, "actions": ["end_turn","end_turn","end_turn","end_turn","end_turn","end_turn","end_turn","end_turn","end_turn","end_turn","end_turn","end_turn","end_turn"]}""", "actions takes 1 to 12 ids; you sent 13.")]
     [InlineData("""{"version": V, "actions": "end_turn"}""", "actions must be a list of action ids")]
     [InlineData("""{"version": V, "actions": ["end_turn", 3]}""", "actions must be a list of action ids")]
-    [InlineData("""{"actions": ["end_turn"]}""", "version is required")]
+    [InlineData("""{"actions": ["end_turn"]}""", BotTools.VersionRequired)]
+    [InlineData("""{"version": "57", "actions": ["end_turn"]}""", "version must be the integer snapshot.version; you sent \"57\". Nothing was done.")]
+    [InlineData("""{"version": 5.5, "actions": ["end_turn"]}""", "version must be the integer snapshot.version; you sent 5.5. Nothing was done.")]
     [InlineData("""{"version": V, "actions": ["end_turn", "play:0>e0"]}""", "end_turn can only be the last id, since the turn is over once it runs. Nothing was played.")]
     public void Bad_arguments_are_refused_before_anything_runs(string json, string error)
     {
@@ -658,12 +924,12 @@ public class ActSequenceTests
         Assert.Equal(["done", "next"], acted.Payload.AsObject().Select(p => p.Key));
         Assert.Equal("play:0>e0", acted.Payload["done"]!.GetValue<string>());
 
-        var dud = Call(tools, "act", new JsonObject { ["action_id"] = "play:0" });
+        var dud = Call(tools, "act", new JsonObject { ["action_id"] = "play:0", ["version"] = acted.Payload["next"]!["version"]!.GetValue<long>() });
         Assert.False(dud.IsError);
         Assert.Equal(["done", "next", "warning"], dud.Payload.AsObject().Select(p => p.Key));
         Assert.StartsWith("Nothing changed after this action.", dud.Payload["warning"]!.GetValue<string>());
 
-        var refused = Call(tools, "act", new JsonObject { ["action_id"] = "play:1" });
+        var refused = Call(tools, "act", new JsonObject { ["action_id"] = "play:1", ["version"] = dud.Payload["next"]!["version"]!.GetValue<long>() });
         Assert.True(refused.IsError);
         Assert.Equal("Not enough energy.", refused.Payload["error"]!.GetValue<string>());
         Assert.True(refused.Payload["current"]!["awaiting_decision"]!.GetValue<bool>());

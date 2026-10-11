@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using SpireMind.Core;
 using SpireMind.Core.Brain;
 using SpireMind.DevHost;
@@ -175,9 +176,13 @@ public class FightWatchTests
         Assert.Same(host.Specs, watch.Specs);
 
         // Bash and a Strike a turn: 14 damage against 40 HP.
+        var version = (await watch.CallAsync("get_state", new JsonObject(), CancellationToken.None)).Payload["version"]!.GetValue<long>();
         for (var turn = 0; turn < 3; turn++)
             foreach (var id in new[] { "play:3>e0", "play:0>e0", "end_turn" })
-                await watch.CallAsync("act", new JsonObject { ["action_id"] = id }, CancellationToken.None);
+            {
+                var acted = await watch.CallAsync("act", new JsonObject { ["action_id"] = id, ["version"] = version }, CancellationToken.None);
+                version = (acted.Payload["next"] ?? acted.Payload["current"])!["version"]!.GetValue<long>();
+            }
         await watch.CallAsync("get_state", new JsonObject(), CancellationToken.None);
 
         Assert.True(watch.FightOver);
@@ -205,6 +210,13 @@ public sealed class BrainSmokeTests : IDisposable
         public Script Then(ClaudeResponse response)
         {
             _steps.Enqueue(() => response);
+            return this;
+        }
+
+        /// <summary>A response made from the request it answers, as a model reads the snapshot's version.</summary>
+        public Script Then(Func<JsonObject, ClaudeResponse> respond)
+        {
+            _steps.Enqueue(() => respond(Requests[^1]));
             return this;
         }
 
@@ -242,8 +254,9 @@ public sealed class BrainSmokeTests : IDisposable
         };
     }
 
-    // One turn of the fake fight: Bash and a Strike (14 damage), then end the turn.
-    private static ClaudeResponse Turn(int n, long cacheRead, long cacheWrite) =>
+    // One turn of the fake fight as one act_sequence on the latest snapshot the request shows:
+    // Bash and a Strike (14 damage), then end the turn.
+    private static Func<JsonObject, ClaudeResponse> Turn(int n, long cacheRead, long cacheWrite) => request =>
         new(new JsonObject
         {
             ["id"] = $"msg_{n}",
@@ -251,9 +264,15 @@ public sealed class BrainSmokeTests : IDisposable
             ["stop_reason"] = "tool_use",
             ["content"] = new JsonArray(
                 new JsonObject { ["type"] = "text", ["text"] = "Bash, then a Strike." },
-                Act($"t{n}a", "play:3>e0"),
-                Act($"t{n}b", "play:0>e0"),
-                Act($"t{n}c", "end_turn")),
+                new JsonObject
+                {
+                    ["type"] = "tool_use", ["id"] = $"t{n}", ["name"] = "act_sequence",
+                    ["input"] = new JsonObject
+                    {
+                        ["version"] = LatestVersion(request),
+                        ["actions"] = new JsonArray("play:3>e0", "play:0>e0", "end_turn"),
+                    },
+                }),
             ["usage"] = new JsonObject
             {
                 ["input_tokens"] = 100, ["output_tokens"] = 50,
@@ -261,10 +280,16 @@ public sealed class BrainSmokeTests : IDisposable
             },
         });
 
-    private static JsonObject Act(string id, string action) => new()
+    /// <summary>The version of the last snapshot in the request's messages (the state it opened
+    /// with, or the latest tool result's), written as JSON inside a text block.</summary>
+    private static long LatestVersion(JsonObject request)
     {
-        ["type"] = "tool_use", ["id"] = id, ["name"] = "act", ["input"] = new JsonObject { ["action_id"] = action },
-    };
+        var texts = request["messages"]!.AsArray()
+            .SelectMany(m => m!["content"] as JsonArray ?? [])
+            .Select(block => block?["text"] ?? block?["content"])
+            .Select(text => text is JsonValue v && v.TryGetValue<string>(out var t) ? t : text?.ToJsonString() ?? "");
+        return long.Parse(Regex.Matches(string.Join("\n", texts), @"""version"":(\d+)")[^1].Groups[1].Value);
+    }
 
     [Fact]
     public async Task Winning_the_fight_passes_and_stops_before_another_request()
@@ -281,7 +306,7 @@ public sealed class BrainSmokeTests : IDisposable
         Assert.Contains("PASSED", text);
         // Every request, its tool calls and the totals.
         Assert.Contains($"#1 {BrainSettings.ResolveModel("haiku")}, tool_use: in 100, cache read 0, cache write 5,000 (1h 0), out 50, $", text);
-        Assert.Contains("     act {\"action_id\":\"play:3>e0\"}", text);
+        Assert.Matches(@"     act_sequence \{""version"":\d+,""actions"":\[""play:3>e0"",""play:0>e0"",""end_turn""\]\}", text);
         Assert.Contains("     text: Bash, then a Strike.", text);
         Assert.Contains("Total: 3 responses, in 300, cache read 10,300, cache write 5,600 (1h 0), out 150, $", text);
         Assert.DoesNotContain("Warning", text);

@@ -112,11 +112,13 @@ public static class ToolPathCheck
                 $"{game.CardsPlayed} cards; {session.Mcp.Calls.Values.Sum()} tool calls in {clock.Elapsed.TotalSeconds:0} s ({calls})"));
             output.WriteLine($"  act_sequence: longest {session.Longest} ids, {session.FoundAgain} found again at another hand position; " +
                              $"stopped on a dead target: {Seen(session.GoneStops)}, after the last blow: {Seen(session.ScreenStops)}");
-            output.WriteLine($"  card choices answered through act: {session.ChoiceSteps} steps on {string.Join(", ", session.ChoiceScreens.DefaultIfEmpty("no choice screen"))}; " +
+            output.WriteLine($"  card choices answered: {session.ChoiceSteps} steps through act, {session.SequencePicks} picks inside an act_sequence, " +
+                             $"on {string.Join(", ", session.ChoiceScreens.DefaultIfEmpty("no choice screen"))}, {session.UpgradedPlays} upgraded cards played after their pick there; " +
                              $"potions used: {session.PotionsUsed}");
             if (wantChoiceAndPotion)
             {
                 if (!session.ChoiceScreens.Contains("hand_select")) failures.Add("the fight never opened a hand selection, though Armaments was played");
+                if (session.SequencePicks == 0) failures.Add("no hand selection was answered inside the act_sequence of the card that opened it");
                 if (session.PotionsUsed == 0) failures.Add("no potion was used, though one was in the belt");
                 if (!session.Ran.Contains("confirm")) failures.Add("no hand selection was confirmed");
             }
@@ -307,8 +309,14 @@ public static class ToolPathCheck
         /// <summary>How long act took to run "done" on the finished fight.</summary>
         public TimeSpan DoneTook { get; private set; }
 
-        /// <summary>Actions that answered a card choice (a select, a pick, a confirm), and the screens they were on.</summary>
+        /// <summary>Actions that answered a card choice through act (a select, a pick, a confirm), and the screens they were on.</summary>
         public int ChoiceSteps { get; private set; }
+
+        /// <summary>Picks and confirms that answered a hand selection inside the act_sequence whose card opened it.</summary>
+        public int SequencePicks { get; private set; }
+
+        /// <summary>Cards played under their new name ("Bash+") later in the act_sequence that picked them for an upgrade.</summary>
+        public int UpgradedPlays { get; private set; }
         public SortedSet<string> ChoiceScreens { get; } = new(StringComparer.Ordinal);
 
         public int PotionsUsed => _ran.Count(id => id.StartsWith("potion:", StringComparison.Ordinal));
@@ -381,6 +389,7 @@ public static class ToolPathCheck
             var legal = _snap.Actions[0].Id;
             await RefusedAsync("act", new JsonObject { ["action_id"] = legal, ["version"] = _snap.Version - 1 }, "Snapshot changed");
             await RefusedAsync("act", new JsonObject { ["action_id"] = "play:99", ["version"] = _snap.Version }, "is not a legal action now");
+            await RefusedAsync("act", new JsonObject { ["action_id"] = legal }, "version is required");
             await RefusedAsync("act_sequence", new JsonObject { ["version"] = _snap.Version, ["actions"] = Ids(["end_turn", legal]) }, "end_turn can only be the last id");
             await RefusedAsync("act_sequence", new JsonObject { ["version"] = _snap.Version, ["actions"] = Ids([legal, "play:99>e7", "end_turn"]) }, "so nothing was played");
             await RefusedAsync("act_sequence", new JsonObject { ["actions"] = Ids([legal]) }, "version is required");
@@ -425,6 +434,15 @@ public static class ToolPathCheck
                 (reply, isError) = await mcp.ToolAsync("act_sequence", new JsonObject { ["version"] = _snap.Version, ["actions"] = Ids(plan.Ids) });
                 done = (reply["done"] as JsonArray ?? []).Select(d => Text(d?["id"]) ?? "").ToList();
                 CheckSequence(plan, reply, done);
+                if (_snap.Screen == "combat" && done.Count(id => id == "confirm" || id.StartsWith("select:", StringComparison.Ordinal)) is var picks and > 0)
+                {
+                    SequencePicks += picks;
+                    ChoiceScreens.Add("hand_select");
+                    var labels = (reply["done"] as JsonArray ?? []).Select(d => Text(d?["label"]) ?? "").ToList();
+                    var picked = labels.Where(l => l.StartsWith("Select ", StringComparison.Ordinal)).Select(l => l[7..]).ToHashSet(StringComparer.Ordinal);
+                    UpgradedPlays += labels.SkipWhile(l => !l.StartsWith("Confirm", StringComparison.Ordinal))
+                        .Count(l => picked.Any(name => l.StartsWith($"Play {name}+", StringComparison.Ordinal)));
+                }
             }
             _lastReply = reply;
             if (isError || reply["next"] is not JsonObject nextJson)
@@ -462,13 +480,18 @@ public static class ToolPathCheck
             {
                 Check(stopped is null && done.Count == plan.Ids.Count, $"[{sent}] ran {done.Count} of {plan.Ids.Count} ids: {stopped ?? "no stop given"}");
             }
-            FoundAgain += done.Where((id, i) => i < plan.Ids.Count && id != plan.Ids[i]).Count();
+            // Picks are counted under SequencePicks and always run at another index than planned, and a
+            // confirm the game didn't need is left out of done, so only plays, potions and end_turn are lined up.
+            static bool Pick(string id) => id == "confirm" || id.StartsWith("select:", StringComparison.Ordinal);
+            FoundAgain += done.Where(id => !Pick(id)).Zip(plan.Ids.Where(id => !Pick(id))).Count(p => p.First != p.Second);
         }
 
         /// <summary>
         /// The turn as one list of ids, all from <paramref name="start"/>: the player picks the first
         /// card from that snapshot and each following one from the game without a bridge, played
-        /// ahead. It ends where a model's plan ends: at end_turn, after a card that drew, or at a
+        /// ahead. A card that asks for hand cards gets its picks in the plan, by the cards' hand
+        /// indices in start, as play.md step 3 and the tool description say. It ends where a model's plan ends: at
+        /// end_turn, after a card that drew, after a choice that took cards from the hand, or at a
         /// card that snapshot doesn't offer yet (energy it only gets on the way).
         /// </summary>
         private Plan PlanFrom(GameSnapshot start)
@@ -477,6 +500,8 @@ public static class ToolPathCheck
             var ahead = Direct();
             // Where each card of the hand as it is now sat in the start snapshot.
             var startIndex = Enumerable.Range(0, (start.State["hand"] as JsonArray)?.Count ?? 0).ToList();
+            // Start hand indices of the cards picked for an upgrade, which come back with a "+".
+            var upgraded = new HashSet<int>();
             var current = start;
             while (ids.Count < BotTools.MaxSequence)
             {
@@ -507,7 +532,8 @@ public static class ToolPathCheck
                 }
 
                 var after = Capture(ahead);
-                if (after.Screen != "combat") break; // the card opened a choice: the plan ends on it
+                if (after.Screen == "hand_select" && !PlanPicks(ahead, ref after, ids, startIndex, upgraded)) break;
+                if (after.Screen != "combat") break; // the card opened another choice: the plan ends on it
                 if (!_triedGone && target.Length > 0 && ids.Count < BotTools.MaxSequence && !Living(after, target)
                     && start.Actions.FirstOrDefault(a => a.Id.EndsWith(target, StringComparison.Ordinal) && !ids.Contains(a.Id)
                                                          && TryParse(a.Id, out var other, out _) && startIndex.Contains(other)) is { } onTheDead)
@@ -519,7 +545,7 @@ public static class ToolPathCheck
                 if ((after.State["hand"] as JsonArray)?.Count > startIndex.Count) break;
                 // A card that changed its name on the way (Armaments made a Defend a Defend+) cannot be
                 // found again by the label the plan's snapshot gave it: the plan ends before it.
-                if (Renamed(start, after, startIndex)) break;
+                if (Renamed(start, after, startIndex, upgraded)) break;
                 current = after;
             }
             // Nothing to send can only mean the first pick isn't in the snapshot it was picked from.
@@ -570,14 +596,53 @@ public static class ToolPathCheck
             Check(game.RefusedActions == 0, $"the game itself refused {game.RefusedActions} actions");
         }
 
-        /// <summary>Whether a card still in hand reads another name now than in the snapshot the plan was made from.</summary>
-        private static bool Renamed(GameSnapshot start, GameSnapshot now, List<int> startIndex)
+        /// <summary>
+        /// The picks for the hand selection <paramref name="after"/> shows, added to the plan as the
+        /// player makes them on the game without a bridge, each by its card's hand index in the
+        /// plan's snapshot. True when the plan can go on after it: the selection closed into
+        /// combat with every card still in hand where the plan thinks it is. A pick of a card the
+        /// plan's snapshot didn't have ends it before that pick.
+        /// </summary>
+        private bool PlanPicks(ArenaGame ahead, ref GameSnapshot after, List<string> ids, List<int> startIndex, HashSet<int> upgraded)
+        {
+            while (after.Screen == "hand_select")
+            {
+                if (ids.Count == BotTools.MaxSequence) return false;
+                var choice = Choose(after, ahead);
+                if (choice.StartsWith("select:", StringComparison.Ordinal))
+                {
+                    var at = int.Parse(choice.AsSpan(7), NumberStyles.None, CultureInfo.InvariantCulture);
+                    if (at >= startIndex.Count) return false;
+                    ids.Add(string.Create(CultureInfo.InvariantCulture, $"select:{startIndex[at]}"));
+                    if (Text(after.State["selection"]?["mode"]) == "upgrade") upgraded.Add(startIndex[at]);
+                }
+                else if (choice == "confirm")
+                {
+                    ids.Add("confirm");
+                }
+                else
+                {
+                    return false;
+                }
+                ahead.ExecuteAsync(choice, CancellationToken.None).GetAwaiter().GetResult();
+                after = Capture(ahead);
+            }
+            return after.Screen == "combat" && (after.State["hand"] as JsonArray)?.Count == startIndex.Count;
+        }
+
+        /// <summary>Whether a card still in hand reads another name now than in the snapshot the plan
+        /// was made from, other than a "+" on one picked for an upgrade.</summary>
+        private static bool Renamed(GameSnapshot start, GameSnapshot now, List<int> startIndex, HashSet<int> upgraded)
         {
             var before = start.State["hand"] as JsonArray;
             var hand = now.State["hand"] as JsonArray;
             if (before is null || hand is null) return false;
             for (var i = 0; i < hand.Count && i < startIndex.Count; i++)
-                if (Text(hand[i]?["name"]) != Text(before[startIndex[i]]?["name"])) return true;
+            {
+                var was = Text(before[startIndex[i]]?["name"]);
+                var name = Text(hand[i]?["name"]);
+                if (name != was && !(upgraded.Contains(startIndex[i]) && name == was + "+")) return true;
+            }
             return false;
         }
 

@@ -114,9 +114,39 @@ public class BridgeTests
     public void Illegal_action_is_rejected()
     {
         var (tools, _) = Build();
-        var outcome = tools.CallAsync("act", new JsonObject { ["action_id"] = "play:9>e0" }, CancellationToken.None).Result;
+        var version = Call(tools, "get_state")["version"]!.GetValue<long>();
+        var outcome = tools.CallAsync("act", new JsonObject { ["action_id"] = "play:9>e0", ["version"] = version }, CancellationToken.None).Result;
         Assert.True(outcome.IsError);
         Assert.Contains("not a legal action", outcome.Payload["error"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void Act_without_a_version_is_refused_and_runs_nothing()
+    {
+        // A second act sent on the same snapshot would otherwise run on whatever the first led to.
+        var game = new FakeGame { ActionDelay = TimeSpan.Zero };
+        var versioner = new SnapshotVersioner();
+        var waiter = new DecisionWaiter(game, versioner) { PollInterval = TimeSpan.FromMilliseconds(2), SettleTime = TimeSpan.FromMilliseconds(5) };
+        var tools = new BotTools(game, waiter, versioner, new ChatHub()) { ActSettleTimeout = TimeSpan.FromSeconds(2) };
+        var before = Call(tools, "get_state");
+
+        var outcome = tools.CallAsync("act", new JsonObject { ["action_id"] = "play:0>e0" }, CancellationToken.None).Result;
+
+        Assert.True(outcome.IsError);
+        Assert.Equal(BotTools.VersionRequired, outcome.Payload["error"]!.GetValue<string>());
+        Assert.Equal(["error"], outcome.Payload.AsObject().Select(p => p.Key));
+        var after = Call(tools, "get_state");
+        Assert.Equal(before["version"]!.GetValue<long>(), after["version"]!.GetValue<long>());
+        Assert.Equal(40, after["state"]!["enemies"]![0]!["hp"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public void Act_schema_requires_the_version()
+    {
+        var (tools, _) = Build();
+        var act = tools.Specs.Single(s => s.Name == "act");
+        Assert.Equal(["action_id", "version"], act.InputSchema["required"]!.AsArray().Select(r => r!.GetValue<string>()));
+        Assert.Contains("version is required", act.Description);
     }
 
     [Fact]
@@ -149,7 +179,13 @@ public class BridgeTests
         var state = mcp.HandleAsync("""{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_state","arguments":{}}}""", default).Result!;
         Assert.Contains("play:0>e0", state["result"]!["content"]![0]!["text"]!.GetValue<string>());
 
-        var act = mcp.HandleAsync("""{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"act","arguments":{"action_id":"play:9>e0+"}}}""", default).Result!;
+        var version = JsonNode.Parse(state["result"]!["content"]![0]!["text"]!.GetValue<string>())!["version"]!.GetValue<long>();
+        var call = new JsonObject
+        {
+            ["jsonrpc"] = "2.0", ["id"] = 2, ["method"] = "tools/call",
+            ["params"] = new JsonObject { ["name"] = "act", ["arguments"] = new JsonObject { ["action_id"] = "play:9>e0+", ["version"] = version } },
+        };
+        var act = mcp.HandleAsync(call.ToJsonString(), default).Result!;
         var text = act["result"]!["content"]![0]!["text"]!.GetValue<string>();
         Assert.Contains("'play:9>e0+' is not a legal action", text);
         Assert.DoesNotContain("\\u00", text);
@@ -254,7 +290,8 @@ public class ActWarningTests
         var versioner = new SnapshotVersioner();
         var waiter = new DecisionWaiter(game, versioner) { PollInterval = TimeSpan.FromMilliseconds(5), SettleTime = TimeSpan.FromMilliseconds(5) };
         var tools = new BotTools(game, waiter, versioner, new ChatHub()) { ActSettleTimeout = TimeSpan.FromMilliseconds(100) };
-        var outcome = tools.CallAsync("act", new System.Text.Json.Nodes.JsonObject { ["action_id"] = "end_turn" }, default).Result;
+        var version = tools.CallAsync("get_state", new System.Text.Json.Nodes.JsonObject(), default).Result.Payload["version"]!.GetValue<long>();
+        var outcome = tools.CallAsync("act", new System.Text.Json.Nodes.JsonObject { ["action_id"] = "end_turn", ["version"] = version }, default).Result;
         Assert.False(outcome.IsError);
         Assert.Contains("Nothing changed", outcome.Payload["warning"]!.GetValue<string>());
     }
