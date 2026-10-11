@@ -61,6 +61,17 @@
 ### 5. Status (niche)
 - Smokestack (5 AoE per status created), Iteration, Trash to Treasure (orb per status), Flak Cannon, Compact, Overclock, Rocket Punch.
 
+## Packages to count
+Count these in `player.deck` and your relics before every pick (general.md 12). Upgraded copies count too.
+- **Lightning**: Ball Lightning, Lightning Rod, Tempest, Storm, Voltaic, Cracked Core or Infused Core.
+  - Payoffs: Thunder (+8 (11) per Lightning evoke hit), Tesla Coil (every Lightning passive again, 1 (2) times: more Lightning held, more damage), Gold-Plated Cables, Metronome, Loop. Storm adds a Lightning per Power played.
+  - Move up: Thunder and Tesla Coil once 2+ Lightning cards are in the deck.
+- **Focus and slots**: Defragment, Synchronize, Biased Cognition, Data Disk. Each Focus adds +1 to orb passives and evokes, so it gains with every channeler. Synchronize and Coolant count unique orb types.
+  - Slots (Capacitor, Modded, Runic Capacitor) pay only if you channel often.
+- **Frost**: Glacier, Chill, Cold Snap, Coolheaded, Ice Lance, Hailstorm. Focus adds Block to each Frost passive and evoke. A Frost-only deck still needs a damage plan before more Frost.
+- **Dark / evoke**: Darkness, Shadow Shield, Null, Consuming Shadow, Symbiotic Virus. A Dark orb stores +6 a turn and evoke releases it, so evoke cards (Dualcast, Multi-Cast, Quadcast; Hologram retrieves Dualcast) gain with every Dark source.
+- **Claw / zero-cost**: Claw (+2 (3) damage to all Claws per play: each Claw grows the others), Scrape, FTL, Skim, Hologram, All for One (returns 0-cost cards from discard), Go for the Eyes, Momentum Strike, Beam Cell, Power Cell, Kunai, Shuriken, Ornamental Fan.
+
 ## Scaling and energy (good in every Defect deck)
 - **Focus:**
   - Defragment (+1 (2) Focus; the best Focus card).
