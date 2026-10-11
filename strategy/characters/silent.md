@@ -62,6 +62,19 @@
 ### 4. Weak / control splash (any deck)
 - Tracking (Weak enemies take +50% Attack damage). Malaise (X: -Strength and Weak, Exhaust). Leg Sweep. Piercing Wail (all enemies -6 (8) Strength this turn). Neutralize or Suppress. Paper Krane.
 
+## Packages to count
+Count these in `player.deck` and your relics before every pick (general.md 12). Upgraded copies count too.
+- **Sly / discard**: Sly cards (Tactician, Reflex, Abrasive, Untouchable, Ricochet, Flick-Flack) and outlets (Survivor, Prepared, Acrobatics, Calculated Gamble, Dagger Throw, Tools of the Trade, Storm of Steel; Hand Trick and Master Planner add Sly). A Sly card is free only when an outlet discards it, so each half raises the other.
+  - Payoffs per discard: Tingsha (3 damage), Tough Bandages (3 Block). With both, commit to discard.
+  - Move up: once in the lane (a Sly card plus an outlet besides Survivor, or Tingsha or Tough Bandages), the missing part of the build shape (2-3 Sly cards + 1-2 discard triggers + 1 refill) beats a generic card of similar strength. In Act 1 it wins only a close call. A 4th Sly card gets no bump.
+- **Shiv**: Leading Strike, Blade Dance, Cloak and Dagger, Hidden Daggers, Infinite Blades, Blade of Ink, Storm of Steel, Fan of Knives, Ninja Scroll.
+  - Payoffs: Accuracy (+4 (6) per Shiv), Phantom Blades (first Shiv each turn +9 (12)), Fan of Knives (Shivs hit ALL), Knife Trap (replays exhausted Shivs), Finisher, Helical Dart (+1 Dexterity this turn per Shiv), Kunai, Shuriken, Ornamental Fan. Strength adds to every Shiv.
+  - Move up: Accuracy and Phantom Blades only once you make Shivs most turns (about 1 generator per 5 cards in the deck, or Infinite Blades). After that, every generator gains from them.
+- **Poison**: Noxious Fumes, Deadly Poison, Poisoned Stab, Bouncing Flask, Corrosive Wave, Envenom, Haze, Twisted Funnel.
+  - Payoffs: Bubble Bubble (9 (12) if already poisoned), Accelerant (poison ticks extra times), Mirage (Block equal to total enemy Poison), Snecko Skull (+1 per application: many small applications gain most).
+  - Move up: after the defensive base (Backflip, Footwork, Leg Sweep, Piercing Wail) and 2+ sources. Then a payoff beats another plain source (no Deadly Poison or Snakebite bloat).
+- **Weak**: Neutralize or Suppress, Leg Sweep, Malaise, other Weak cards (read get_deck). Payoffs: Tracking (Weak enemies take +50% Attack damage), Paper Krane (Weak enemies deal 40% less). Both are blank on an enemy without Weak.
+
 ## Draft priorities
 - **Act 1 (damage first):**
   - Leading Strike, Backstab (0 cost, Innate, 11 (15), Exhaust), Predator, Pounce, Echoing Slash (AoE that repeats on kills), Dagger Spray (early AoE only), Expose, Assassinate.

@@ -1,3 +1,16 @@
 # Lessons from our own runs
 
 Short, concrete rules the bot has learned from its runs. Newest at the bottom. Prune anything that proves wrong.
+- Lagavulin Matriarch (v0.107.1): waking her with damage stuns her for a turn and removes Plating entirely. With turn-1 Vulnerable (Bag of Marbles) or strong frontload, attack on turn 1 instead of waiting out the 3 sleep turns. Awake she hits 19, 9x2, 12+block, then Siphon.
+- Skulking Colony: Hardened Shell is 20 per turn; anything over is wasted, so hit 20 and put the rest of the energy into block. Four turns minimum.
+- Gremlin Merc splits into Sneaky and Fat Gremlins (both stunned a turn); the Fat one flees with the stolen gold on its second turn, so keep 13+ damage ready for it.
+- Stampede plays a random Attack left in hand at end of turn for free: leave the most expensive attack unplayed and spend the energy elsewhere. If that attack is Cinder, it then exhausts a random card still in hand: first play every card you want to keep, Defends too, even on a turn the enemy does not attack. Never leave Cinder alone with Defends.
+- Decimillipede: a segment killed while others live comes back 2 turns later with 25 HP, and a Feed kill on it gives no max HP. Chip all three low first (they apply Weak, so expect a dead turn), then kill them inside a two-turn window.
+- Knowledge Demon (v0.107.1): turn 1 and turn 5 are free curse turns, cycle is 17, 8x3, 11 + heal 30 + 2 Str. Disintegration is ordinary end-of-turn damage, so leftover block and Plating absorb it; taking it twice (13 a turn) was fine in a 7-turn kill. Break+ early gives 7+ turns of Vulnerable, which makes each Colossus half a boss hit for 1 energy.
+- Aeonglass (v0.107.1): starts with 3 Artifact (Bag of Marbles eats one). Loop is Ebb (26 + 33 Block that lasts through your next turn), Eye Lasers 11x2, then a no-attack buff turn. Do setup (Demon Form, Offering, Plating, Artifact strips) on the Block turn and burst on the other two. Wither is 3 damage if left in hand (6 after it upgrades them); Block and Plating absorb it and Brand exhausts it for Strength. Sword Boomerang+ at 20 Strength with Vulnerable is 144 for 1 energy.
+- Ironclad win (A0, 2026-10-09): Strike Dummy + Perfected Strike / Twin Strike / Pommel Strike is a full damage plan; once you have it, keep Strikes and remove Defends. Add Demon Form + Offering/Bloodletting to cast it, Break (Archaic Tooth) for long Vulnerable, and Colossus as the block card.
+- Ruined Helmet doubles only the first Strength gain of the combat: play Inflame+ (3 -> 6) or let the Demon Form+ tick (3 -> 6) land before Brand or a Strength Potion.
+- Brand is not exhausted when played, so it gives Strength every deck cycle; use it on Dazed, Burns, Withers or a Defend.
+- Feed: when the last enemy is not attacking this turn (or you are fully blocked), stop a hit short of the kill and finish with Feed next turn. Six such kills were +18 max HP over the run.
+- Spoils Map (Act 1 event) is worth a dead draw for one act: 600 gold at the Act 2 treasure room. Plan the shops after it, which may mean carrying the gold into Act 3.
+- Exoskeletons cap each hit at 9: count hits, not damage (Breakthrough, Twin Strike, Sword Boomerang). Axebot respawns twice and each new one opens with a non-attack turn, so chain the kills.
