@@ -38,9 +38,12 @@ public static class HonestyCommand
         Row("card Block", report.CardBlock, report.CardBlockKept);
         Row("card cost (against the energy paid)", report.CardCosts, report.CardCostsKept);
         Row("potion damage and Block", report.PotionNumbers, report.PotionNumbersKept);
+        // The forecast's promises (Sim/HonestyForecast.cs): worked out at every end_turn, whether or not the switch is on.
+        Honesty.AddForecastRows(report, Row);
         table.Write(output);
         output.WriteLine($"({report.EnemyTurns} enemy turns, {report.CardPlays} cards played, {report.PotionUses} potions used; {report.Won} fights won, " +
                          $"{report.TurnLimit.Count} lost to the turn limit of {Tuning.MaxTurns} turns.)");
+        Honesty.WriteForecast(report, output);
         foreach (var line in report.TurnLimit) output.WriteLine($"  TURN LIMIT: {line}");
 
         output.WriteLine();

@@ -126,6 +126,12 @@ public static class SelfCheck
             var honesty = Honesty.Run(scenarios, Policies.All);
             output.WriteLine($"Honesty: {honesty.Decisions} decisions in {honesty.Fights} fights; {honesty.Explained.Values.Sum(v => v.Count)} differences between " +
                              $"snapshot and outcome have a known cause, {honesty.Unexplained.Count} have none");
+            // The forecast experiment's promises were judged with the rest, whether or not a fight shows them.
+            var forecast = honesty.Forecast;
+            output.WriteLine($"Forecast: with the player passing {forecast.PassMovesKept} of {forecast.PassMoves} forecast moves came and {forecast.PassTextsKept} of {forecast.PassTexts} read word for word; " +
+                             $"as played {forecast.MovesKept} of {forecast.Moves} and {forecast.TextsKept} of {forecast.Texts}; {forecast.PassOddsExact} of {forecast.PassOdds} chance entries are the roll's own weights " +
+                             "(every difference is among the honesty check's)");
+            Honesty.WriteForecast(honesty, output);
             foreach (var line in honesty.Unexplained.Take(20)) failures.Add($"honesty: {line}");
             foreach (var line in honesty.Errors) failures.Add($"honesty: {line}");
         }

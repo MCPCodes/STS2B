@@ -20,7 +20,8 @@ Sources, in this order: the verified spec files in `/Users/mark/Projects/sts2-no
 | Scripted players | `Policies/GreedyPolicy.cs`, `Policies/LookaheadPolicy.cs` | `Policies/PolicyChecks.cs` |
 | The engine's rules | `Sim/Engine/*.cs` | `Sim/Content/Core*Checks.cs`, `Sim/Engine/EngineReviewChecks.cs`, `Sim/Engine/IntegrationChecks.cs` |
 | What the game has against what the registry has | `Sim/Completeness.cs` | (the self-check fails on a hole) |
-| Promise against outcome | `Sim/Honesty.cs` | (`scripts/arena.sh honesty`) |
+| Promise against outcome | `Sim/Honesty.cs`, `Sim/HonestyForecast.cs` | (`scripts/arena.sh honesty`) |
+| The forecast experiment (`--forecast`) | `Sim/Forecast.cs` | `Sim/ForecastChecks.cs`, and `arena honesty` (section 14) |
 
 - Namespace `SpireMind.Arena`, file-scoped; nullable is enabled; no warnings.
 - One public class per content file implements `IContentModule` (name it after the file: `Cards1`). It is found by reflection; nothing else has to be edited. The same for checks: one public class implementing `IArenaChecks` (`Cards1Checks`).
@@ -553,6 +554,8 @@ scripts/arena.sh content                                     # what is registere
 
 `honesty` (`Sim/Honesty.cs`) is the check to run after any change to the engine or to a card's text: before every action it notes what the snapshot promised (each enemy's intents and the incoming damage; a card's cost and the numbers of its text, its `vs` text for the enemy it is aimed at; a potion's numbers) and compares that with what the action then did, hit by hit as the damage chain left it. A difference must have a cause the check can tell from what happened before it (the player died first, the target died, an end-of-turn auto-play changed something after the snapshot, a card ran twice, a random-target card has no `vs`); one that has none fails the check and is a fault to look into. `ARENA_HONESTY_TRACE=<scenario id>,<policy>` in front of the command writes every action of that one fight with everything it did.
 
+The same run holds the forecast experiment to its word, whether or not a fight shows it (section 14).
+
 A check should be able to fail. After writing one, break the rule it checks in a scratch copy and see that it does.
 
 ## 12. For the scenario generator and the scripted players
@@ -580,3 +583,58 @@ Known gaps in the engine, none of which shows in a snapshot today:
 - `Fight.Afflict` has no "should afflict" hook, and no affliction in the arena is stackable; the stackable branch is written from the game's code and has no check of its own.
 - A random branch adds its weights up as the game does (in double, narrowed to float once). No in-scope monster has weights for which that differs from adding in float, so no check can tell the two apart.
 - Titles: every card, power, monster and potion name was compared with the game's English name table; the powers that have no title of their own there (the temporary Strength kinds) carry the name of the card or potion they come from. The player's creature is named by the character's title in that table, "The Ironclad" (`Fight.PlayerName`), as the mod's `state.me.name` and `get_deck` show it.
+
+One difference to the mod's reader does show in a snapshot: an enemy that is down and coming back (an Eye with Teeth at 0 HP) is left out of `enemies` here. The mod's reader has since begun to list it, with `"reviving": true` and its heal intent. The arena's snapshot was not changed for that.
+
+## 14. The forecast experiment (`--forecast`)
+
+`Sim/Forecast.cs`. With the switch on (`ArenaGame.Experiments.Forecast`; `arena run --forecast`, `arena position ... --forecast`, `arena snapshot ID --forecast`), every enemy a snapshot lists with its intents also says what it does after them. With the switch off nothing of it runs and every snapshot is the fight's own, byte for byte.
+
+```json
+"enemies": [
+  {"i": 0, "name": "Byrdonis", "hp": 81, "max_hp": 81, "powers": [...],
+   "intents": ["attack 17"],
+   "next_moves": ["attack 4x3", "attack 19", "attack 6x3"]}
+],
+"next_moves_note": "next_moves = this enemy's moves after its shown intent, ...",
+"incoming_damage": 17,
+```
+
+- `next_moves` is a list of strings, one per coming move, in order, in the words of `intents`, a move's intents joined by " + ". At most 3 entries. It lists only what is certain.
+- Where the next step is a random pick, the last entry gives its chances: `"50% debuff | 50% attack 11"`, whole percents, the game's order of options, options that read the same merged. Nothing follows it.
+- An attack number already holds the Strength the enemy will have by then: from its own moves (the table `Forecast.Roster.Gains`), from Territorial, from temporary Strength running out. A number with `~` (`"attack ~11"`) is today's number for a hit that something already in play will change: Weak or Shrink on the enemy or Vulnerable on the player runs out first, a coming move puts Vulnerable on the player or may, a cap decides today's number, or the enemy or the player holds one of the powers the mod marks for (`Forecast.Roster.EnemyMarks`: Suck, Enrage, Debilitate; `Forecast.Roster.PlayerMarks`: Colossus, Covered, Diamond Diadem, Intercept, Tainted, Debilitate, Surrounded). Of those ten the simulator has Colossus; the others are looked up by the game's class name and wait for the content that brings them.
+- No `next_moves` means unknown. There is never an empty list.
+- `next_moves_note` is the note on how to read it: the mod's `Forecast.Hint`, word for word.
+- Where the keys are is where the mod's reader puts them (`Forecast.AddTo`). The list follows `intents` in every enemy list: on the board of a `combat` and a `hand_select` snapshot, and in the `combat` part of a `card_select` snapshot. The note follows `enemies` on the board, whenever some enemy has a list. A `card_select` snapshot has the lists and no note: the mod's card choice screens take their enemies from `CombatReader.EnemiesJson`, where the list is added, and never pass through `BoardState`, where the note is.
+- The keys are `next_moves` and `next_moves_note`, not `next`: the tools already put the snapshot after an action under `next` in the result of `act` and `act_sequence`.
+
+**It shows what the mod shows.** The mod's version is `src/SpireMind/Game/Forecast.cs`, described in `docs/forecast.md`; the recipe both follow is `sts2-notes/forecast-v0.107.1/forecast.md`. The arithmetic here (weights, chances, the walk, the Strength ahead, the words) is that file's, line for line. Only the part under "the live fight" differs: it reads the simulator's machines where the mod reads the game's. `ForecastChecks` compares the two source files whenever the checkout is at hand: the note, the arithmetic, the mod's tables for the 29 monsters here, and the powers the mod tests on the player (`me.HasPower<...>`) and on the enemy (`_enemy.HasPower<...>`) to mark a number. It also reads the mod's two readers (`CombatReader.cs`, `CardSelectReader.cs`): the two keys, that the list is set in `EnemiesJson` behind the intents, that the note is set in `BoardState` behind the enemies, and that the card choice screens add no note. So a change to the mod's files fails `selfcheck` until this one follows. It did twice on 2026-10-11: the mod's review reworded the note and added Debilitate, Surrounded and Enrage to its marks, and then the reader's hook went in with the keys `next_moves` and `next_moves_note` where this file had `next` and `next_note`, and with no note on a card choice screen where this file had put one.
+
+Where the two still differ, and why:
+
+- The mod's reader lists an enemy that is down and coming back (`"reviving": true`) and gives it a list from its forced state. The snapshot here leaves a 0 HP Eye with Teeth out (section 13), so it has no list on that one turn.
+- The mod also marks for the Brimstone relic and for a Queen or an Obscura beside the enemy, and has rules for monsters that are not in act 1. None of that can be met here.
+- The mod switches itself off on another game build, after three failed reads, or when a read changed the game. Here a fault of the forecast is thrown (`Forecast.Fault`) so that a check sees it.
+
+**It could be had in the real game.** Everything it uses is on the game's live objects, read without changing them: the move that shows, whether it was performed since it was entered, each move's follow-up, a random branch's options with their weights, repeat rules and cooldowns, the move log, the powers. It never rolls, never looks at a random stream, and foresees nothing that is forced from outside the machine: a stun, an HP threshold, a revive, a summon. The mod's reader has called its forecast since commit 76e01a2 (2026-10-11). Not had yet: a live fight. Nothing of the mod's version has run in the game (`docs/forecast.md`).
+
+**Its one known limit.** A power of the player's that is already in play can stun or kill an enemy with no new action: Thorns and Flame Barrier when it attacks, Inferno, Stampede and Hellraiser at the turn's edges. The enemy's `next_moves` does not foresee that; the note says a stun, an HP threshold or a death replaces the list. With the player only ending turns that was every forecast move that did not come: 17 of 18,367 over 300 scenarios and three policies, all of them after such a forced move.
+
+**What holds it to its word** (`scripts/arena.sh honesty`, `Sim/HonestyForecast.cs`): before every `end_turn` of every fight each enemy's forecast is worked out and judged twice.
+
+1. *With the player passing.* The forecast says what happens if nothing changes, so a copy of the fight is played on with a player that only ends its turns. Every certain step must be the move the enemy then shows, and every number without `~` must read word for word. A chance entry must list the move that came, and its chances must be the roll's own weights over their sum. A difference needs a cause from the copy's own log (a forced move, a power the player's standing effects changed), or the check fails.
+2. *As played.* Every step against the move the enemy really made and the intent it showed then. Here a difference may also come from what the player did in between.
+
+It also checks, every time: that working a forecast out used no random number and moved no machine; that the same forecast comes out of a copy in which everything the player cannot know is replaced (`CloneDeterminized`); and that the snapshot shows exactly what was worked out. It judges the forecasts made before an `end_turn`. A separate pass on 2026-10-11 read the list off every snapshot of every screen, as JSON, in 1,010 more scenarios (56,000 snapshots, 82,000 forecasts) and played a passing copy on from each: 202,000 entries without `~` came word for word, and the 68 that did not were the Ceremonial Beast stunned by a standing power of the player's. Over 300 scenarios and all three policies (900 fights): with the player passing 18,350 of 18,367 moves came (the other 17 after a forced move) and all 18,520 unmarked entries read word for word; as played 10,462 of 10,742 moves (280 forced) and 10,562 of 10,655 entries (93 changed by the player); 982 of 982 chance entries were the roll's weights; nothing was left without a cause.
+
+**When you add or change a card, a potion or a power**, `ForecastChecks` puts every registered power on the player and on each enemy of six encounters, alone and beside Vulnerable and Weak, and plays a passing copy on (the group "no power of the simulator ..."; 3,332 set-ups, 10,868 plain entries). A power that changes what a monster's hit does, now or as it runs out, fails there until the forecast works it in or marks it. Three powers are left out for the enemy's side, by name and with the reason: Demon Form, and the Flex Potion's and Setup Strike's temporary Strength. Only their own player ever gets them (the same group holds that on 40 fights played at random), and on an enemy the forecast would be wrong: Demon Form is Strength every turn, and an Artifact stops the taking back of the other two.
+
+**When you add or change a monster**, `ForecastChecks` fails until `Forecast.Roster` knows it:
+
+- its class in `Fixed` or `Random` (a class in neither gets no forecast, and marks every number of its neighbours);
+- every move that gives its own monster Strength in `Gains` (the check performs every move of every monster and compares);
+- every move that puts Vulnerable on the player in `Vulnerable`;
+- a conditional branch that a walk can meet needs a rule in `Forecast.Pick`, written from the game's code for the moment the game asks, never "what the condition says now";
+- a random weight given as a function gets no chances.
+
+The mod's file must already say the same, or the source comparison fails.

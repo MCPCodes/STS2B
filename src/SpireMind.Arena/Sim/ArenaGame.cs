@@ -35,7 +35,25 @@ public sealed class ArenaGame : IGameBridge
         _fight = new Fight(FightConfig.From(setup));
     }
 
+    /// <summary>A game around a fight that a check built by hand. The game owns the fight from here on.</summary>
+    internal ArenaGame(Scenario scenario, Fight fight)
+    {
+        Scenario = scenario;
+        _fight = fight;
+    }
+
     public Scenario Scenario { get; }
+
+    /// <summary>
+    /// The experiment switches this fight was started with. All off unless the runner sets them,
+    /// and with all of them off every snapshot is exactly the fight's own, byte for byte. A switch
+    /// only ever adds keys to a snapshot's state; the fight itself goes the same way.
+    /// <list type="bullet">
+    /// <item>Forecast (<c>arena run --forecast</c>): each enemy a snapshot lists with its intents
+    /// also says, under <c>next_moves</c>, what it does after them (<see cref="Forecast"/>).</item>
+    /// </list>
+    /// </summary>
+    public ExperimentOptions Experiments { get; init; } = new();
 
     /// <summary>How long the snapshot stays busy after a card, and twice that after end_turn (the
     /// enemy turn). Zero for the scripted players, which never wait.</summary>
@@ -81,7 +99,11 @@ public sealed class ArenaGame : IGameBridge
         lock (_gate)
         {
             if (DateTime.UtcNow >= _busyUntil)
-                return Task.FromResult(_fight.Snapshot());
+            {
+                var snapshot = _fight.Snapshot();
+                if (Experiments.Forecast) Forecast.AddTo(_fight, snapshot);
+                return Task.FromResult(snapshot);
+            }
             return Task.FromResult(new GameSnapshot
             {
                 Screen = "combat", AwaitingDecision = false, Waiting = "resolving", State = _fight.WaitingState(),

@@ -26,6 +26,12 @@ namespace SpireMind.Arena;
 /// is over, the session can't go on or the time limit passes, and always leaves nothing behind:
 /// the child is stopped, the bridge closed, the temp folder deleted, and with it the folder
 /// Claude Code kept the session in so that it could be resumed.
+/// <para>
+/// A position run (<c>arena position</c>) is the same with one difference: the game is not at
+/// the scenario's first turn when the session starts but at <see cref="Position"/>, the start
+/// of a later turn of a recorded fight, and what the session does on that turn is kept for the
+/// result line (<see cref="ActionLog"/>).
+/// </para>
 /// </summary>
 public sealed class ClaudeFight
 {
@@ -47,7 +53,33 @@ public sealed class ClaudeFight
     /// <summary>The model, passed to <c>--model</c> as it is.</summary>
     public required string Model { get; init; }
 
+    /// <summary>The effort the sessions are started with (<c>--effort</c>, or what
+    /// <c>--effort-by-tier</c> names for the scenario's tier): passed to Claude Code and written
+    /// to the result as it is.</summary>
     public required string Effort { get; init; }
+
+    /// <summary><c>--brief</c>: the first session's prompt ends with the wiki pages of the
+    /// fight's enemies (<see cref="WikiBrief"/>). The system prompt must then be the one built
+    /// for it (<see cref="ArenaPrompt.Build"/> with brief), whose appendix says so.</summary>
+    public bool Brief { get; init; }
+
+    /// <summary>The simulator's experiment switches, handed to the fight as they are.</summary>
+    public ExperimentOptions Experiments { get; init; } = new();
+
+    /// <summary>The label of the run's experiment, written to the result
+    /// (<see cref="FightResult.Experiment"/>).</summary>
+    public string Experiment { get; init; } = ExperimentLabel.Base;
+
+    /// <summary>For a position run: the checked position the session takes the fight over at
+    /// (<see cref="PositionReplay.To"/>). Null plays the scenario from its first turn.</summary>
+    public PositionStart? Position { get; init; }
+
+    /// <summary>The run's number among the position's runs, from 1.</summary>
+    public int PositionRun { get; init; } = 1;
+
+    /// <summary><c>--reshuffle</c>: the seed this run's unseen cards and coming random numbers
+    /// are dealt from (<see cref="PositionStart.DealSeed"/>). Null keeps the recorded deal.</summary>
+    public int? DealSeed { get; init; }
 
     /// <summary>The Claude Code binary, by absolute path.</summary>
     public required string ClaudePath { get; init; }
@@ -149,25 +181,59 @@ public sealed class ClaudeFight
     {
         var startedAt = DateTime.UtcNow;
         var clock = Stopwatch.StartNew();
-        var game = new ArenaGame(Scenario);
+        var game = NewGame();
         var watch = new StreamWatch { OnUsage = OnUsage, StrategyRoot = ClaudeCli.StrategyFolder(Repo) };
         var progress = new Progress();
         var sessionId = Guid.NewGuid().ToString();
 
+        // A position run notes what its session does on the position's turn, where the actions reach the game.
+        var log = Position is null ? null : new ActionLog(game, Position.Turn);
+
         BridgeServer? server = null;
         string? folder = null;
         StreamWriter? transcript = null;
+        WikiBrief? brief = null;
         try
         {
             ct.ThrowIfCancellationRequested();
-            server = StartBridge(game, SettleTimeout, MaxWait, watch.Note);
+            server = StartBridge((IGameBridge?)log ?? game, SettleTimeout, MaxWait, watch.Note);
             folder = Directory.CreateTempSubdirectory(TempPrefix).FullName;
             transcript = OpenTranscript();
+            if (Position is not null)
+                Save(transcript, new JsonObject
+                {
+                    ["type"] = "arena",
+                    ["note"] = $"position run {PositionRun}: the session takes over {Scenario.Id} at the start of turn {Position.Turn}, after {Position.Actions.Count} recorded actions" +
+                               (DealSeed is { } seed ? $"; the unseen cards and the random numbers to come were dealt again from seed {seed}" : "; the recorded deal goes on"),
+                    ["state_hash"] = Position.StateHash,
+                }.ToJsonString());
+
+            // Under --brief the first message ends with the pages of the enemies the fight's
+            // first snapshot names. They are read off a second, plain game of the scenario
+            // (a scenario's fight starts the same way every time), so the fight being played
+            // isn't looked at before the model looks at it. A resumed session has the pages
+            // in its conversation already.
+            var firstPrompt = UserPrompt;
+            if (Brief)
+            {
+                brief = WikiBrief.For(Repo, WikiBrief.Enemies(new ArenaGame(Scenario)));
+                firstPrompt = ArenaPrompt.UserPromptWith(brief, UserPrompt);
+                foreach (var enemy in brief.Missing)
+                    watch.Note($"--brief: the wiki has no page for {enemy}");
+                Save(transcript, new JsonObject
+                {
+                    ["type"] = "arena",
+                    ["note"] = string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                        $"--brief: the first message ended with {brief.Pages.Count} wiki {(brief.Pages.Count == 1 ? "page" : "pages")} ({brief.Chars} characters)"),
+                    ["brief_pages"] = new JsonArray(brief.Pages.Select(page => (JsonNode)JsonValue.Create(page)!).ToArray()),
+                    ["brief_missing"] = new JsonArray(brief.Missing.Select(enemy => (JsonNode)JsonValue.Create(enemy)!).ToArray()),
+                }.ToJsonString());
+            }
 
             while (true)
             {
                 var resume = progress.Resumes > 0;
-                var arguments = ClaudeCli.Arguments(resume ? ResumePrompt : UserPrompt, sessionId, resume, Model, Effort, SystemPrompt, server.Port, Repo);
+                var arguments = ClaudeCli.Arguments(resume ? ResumePrompt : firstPrompt, sessionId, resume, Model, Effort, SystemPrompt, server.Port, Repo);
                 await RunSessionAsync(new ChildProcessSpec(ClaudePath, arguments, folder, Environment), game, watch, clock, transcript, progress, ct);
                 if (!ShouldResume(game, watch, clock, progress))
                     break;
@@ -201,8 +267,13 @@ public sealed class ClaudeFight
         }
 
         progress.FightSeconds ??= clock.Elapsed.TotalSeconds;
-        return Result(game, watch, startedAt, progress);
+        return Result(game, watch, startedAt, progress, brief, log);
     }
+
+    /// <summary>The scenario's fight, with the simulator's experiment switches handed to it: at
+    /// its first turn, or for a position run at the position (<see cref="PositionStart.NewGame"/>).</summary>
+    internal ArenaGame NewGame() =>
+        Position is null ? new ArenaGame(Scenario) { Experiments = Experiments } : Position.NewGame(Experiments, DealSeed);
 
     // One Claude Code process, from its start to its end: by itself, or stopped because the
     // fight is over and it has gone quiet, it can't go on, or the fight's time is up.
@@ -320,7 +391,7 @@ public sealed class ClaudeFight
 
     // The result line from what the game and the sessions' output say. The game decides first: a
     // fight that was played to the end is won or lost however the session ended afterwards.
-    private FightResult Result(ArenaGame game, StreamWatch watch, DateTime startedAt, Progress progress)
+    private FightResult Result(ArenaGame game, StreamWatch watch, DateTime startedAt, Progress progress, WikiBrief? brief, ActionLog? log)
     {
         var over = game.IsOver;
         var error = progress.Error;
@@ -370,7 +441,9 @@ public sealed class ClaudeFight
         // there for it (an MCP server still connecting) or the service kept it waiting. That says
         // nothing about how the model plays, so it is an error, to be played again, and not a
         // fight the model gave up or ran out of time on.
-        if (outcome is Outcomes.Abandoned or Outcomes.Timeout && watch.GameToolCalls == 0 && game is { Turn: <= 1, CardsPlayed: 0 })
+        // (Where the fight started: its first turn, or the position a position run took over at.)
+        var (startTurn, startCards) = Position is null ? (1, 0) : (Position.Turn, Position.CardsPlayed);
+        if (outcome is Outcomes.Abandoned or Outcomes.Timeout && watch.GameToolCalls == 0 && game.Turn <= startTurn && game.CardsPlayed == startCards)
         {
             error = (outcome == Outcomes.Timeout
                         ? "The time limit passed before the session made one call to the fight's tools"
@@ -399,6 +472,26 @@ public sealed class ClaudeFight
             Model = Model,
             ModelsUsed = modelUsage?.Select(m => m.Key).ToArray() ?? [],
             Effort = Effort,
+            Experiment = Experiment,
+            Position = Position is null ? null : new PositionInfo
+            {
+                Turn = Position.Turn,
+                Run = PositionRun,
+                Reshuffle = DealSeed is not null,
+                DealSeed = DealSeed,
+                StateHash = Position.StateHash,
+                HpAtStart = Position.Hp,
+                ReplayedActions = Position.Actions.Count,
+                SnapshotsChecked = Position.SnapshotsChecked,
+                SourceFolder = Position.SourceFolder,
+                SourceModel = Position.SourceModel,
+                SourceOutcome = Position.SourceOutcome,
+                SourceHpLeft = Position.SourceHpLeft,
+                SourceLine = Position.SourceLine,
+                Line = log?.Labels ?? [],
+                LineIds = log?.Ids ?? [],
+                LineComplete = log?.Complete ?? false,
+            },
             Outcome = outcome,
             HpLeft = game.PlayerHp,
             MaxHp = game.PlayerMaxHp,
@@ -412,6 +505,9 @@ public sealed class ClaudeFight
             ReadErrors = watch.ReadErrors,
             WikiPages = watch.WikiPages,
             OtherReads = watch.OtherReads,
+            BriefPages = brief?.Pages,
+            BriefChars = brief?.Chars,
+            BriefMissing = brief?.Missing ?? [],
             WallSeconds = progress.FightSeconds ?? 0,
             Resumes = progress.Resumes,
             CliDurationMs = watch.DurationMs,
@@ -468,8 +564,9 @@ public sealed class ClaudeFight
     /// says is free. The port is released before the bridge binds it, so a lost race tries
     /// another. The self-check plays through the same wiring (<see cref="ToolPathCheck"/>).
     /// </summary>
+    /// <param name="game">The fight, or for a position run the <see cref="ActionLog"/> in front of it.</param>
     /// <param name="note">Gets what the bridge logs about requests that failed.</param>
-    internal static BridgeServer StartBridge(ArenaGame game, TimeSpan settleTimeout, TimeSpan maxWait, Action<string> note)
+    internal static BridgeServer StartBridge(IGameBridge game, TimeSpan settleTimeout, TimeSpan maxWait, Action<string> note)
     {
         var versioner = new SnapshotVersioner();
         var waiter = new DecisionWaiter(game, versioner);

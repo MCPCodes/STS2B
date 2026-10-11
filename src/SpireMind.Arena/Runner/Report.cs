@@ -7,6 +7,18 @@ namespace SpireMind.Arena;
 /// and at what price, per scenario each model's fight next to the scripted policies' on the same
 /// fight, and a paired comparison of the HP the models had left. docs/arena.md says what the
 /// columns mean and how much (little) a handful of fights can show.
+/// <para>
+/// Fights of different experiments (<see cref="FightResult.Experiment"/>) are never pooled into
+/// one table: the plain report refuses a file that holds several labels and says so.
+/// <c>report --by-label</c> lists each model once per label and compares the labels fight by
+/// fight on the same scenarios; <c>arena compare</c> (<see cref="CompareCommand"/>) does the
+/// same across two folders.
+/// </para>
+/// <para>
+/// Position runs (<c>arena position</c>, lines with a <c>position</c> object) are no fights of
+/// their scenario: every table here leaves them out, and <see cref="Run"/> prints them in a
+/// part of their own (<see cref="PositionReport"/>).
+/// </para>
 /// </summary>
 public static class Report
 {
@@ -15,22 +27,169 @@ public static class Report
     // What every wiki page's path starts with in a result line; left off where the report lists pages.
     private const string Wiki = SpireMind.Core.Brain.NotesTools.WikiFolder + "/";
 
-    /// <summary><c>arena report DIR|results.jsonl</c>.</summary>
+    /// <summary><c>arena report DIR|results.jsonl [--by-label]</c>. Returns 1 when there is no
+    /// such file, and when the file holds fights of several experiments and <c>--by-label</c>
+    /// wasn't given: those are not pooled into one table.</summary>
     public static int Run(ArenaOptions options, TextWriter output)
     {
-        var path = Path.GetFullPath(options.ReportPath!);
+        if (Read(options.ReportPath!, output) is not var (path, all))
+            return 1;
+        var order = RunCommand.ModelsOf(Path.GetDirectoryName(path)!);
+        // Whole fights and position runs are two reports: a file can hold either or both.
+        var results = all.Where(r => r.Position is null).ToList();
+        var positions = all.Where(r => r.Position is not null).ToList();
+        var code = 0;
+        if (results.Count > 0 || positions.Count == 0)
+        {
+            if (options.ByLabel)
+                PrintByLabel(results, output, path, order);
+            else if (MixedLabels(results, path) is { } refusal)
+            {
+                output.WriteLine(refusal);
+                code = 1;
+            }
+            else
+                Print(results, output, path, order);
+        }
+        if (positions.Count > 0)
+        {
+            if (results.Count > 0)
+                output.WriteLine();
+            PositionReport.Print(positions, output, path, order);
+        }
+        return code;
+    }
+
+    /// <summary>The results of a run's folder or results.jsonl, with the file's full path; null,
+    /// after saying so, when there is no such file.</summary>
+    internal static (string Path, List<FightResult> Results)? Read(string given, TextWriter output)
+    {
+        var path = Path.GetFullPath(given);
         if (Directory.Exists(path))
             path = Path.Combine(path, RunCommand.ResultsFile);
         if (!File.Exists(path))
         {
             output.WriteLine($"There's no {path}.");
-            return 1;
+            return null;
         }
         var results = FightResult.ReadFile(path, out var unreadable);
         if (unreadable > 0)
             output.WriteLine($"Skipped {unreadable} {(unreadable == 1 ? "line" : "lines")} of {path} that {(unreadable == 1 ? "isn't a result" : "aren't results")}.");
-        Print(results, output, path, RunCommand.ModelsOf(Path.GetDirectoryName(path)!));
-        return 0;
+        return (path, results);
+    }
+
+    /// <summary>
+    /// What the plain report says instead of a table when <paramref name="results"/> hold
+    /// fights of more than one experiment, or null when they are all of one. Two labels are two
+    /// different treatments of the model, so one win rate over both would describe neither.
+    /// </summary>
+    public static string? MixedLabels(IReadOnlyList<FightResult> results, string? source = null)
+    {
+        if (results.Select(r => r.Experiment).Distinct(StringComparer.Ordinal).Count() < 2)
+            return null;
+        return $"{(source is null ? "These results hold" : source + " holds")} fights of {results.Select(r => r.Experiment).Distinct(StringComparer.Ordinal).Count()} " +
+               $"experiments ({LabelCounts(results)}). Fights played under different switches are not pooled into one table. " +
+               "Run report with --by-label to see each model once per label and the labels compared fight by fight.";
+    }
+
+    /// <summary>The labels in <paramref name="results"/> with how many result lines each has: "base 40, brief 38".</summary>
+    internal static string LabelCounts(IReadOnlyList<FightResult> results) =>
+        string.Join(", ", ExperimentLabel.Ordered(results.Select(r => r.Experiment))
+            .Select(label => $"{label} {results.Count(r => r.Experiment == label)}"));
+
+    /// <summary>
+    /// One row of the per-model table: a model at one <c>--effort</c> under one experiment.
+    /// <see cref="Effort"/> is null when no line can tell the batch's <c>--effort</c>, because
+    /// the label names an effort for every tier that was played.
+    /// </summary>
+    internal sealed record Player(string Model, string? Effort, string Label)
+    {
+        /// <summary>
+        /// True for a line that is one of this player's fights. A fight whose tier the label
+        /// gives its own effort (<see cref="FightResult.BaseEffort"/> null) would have been the
+        /// same fight under any <c>--effort</c>, so it belongs to the model's players at every
+        /// <c>--effort</c> under that label, which is also why a batch skips it.
+        /// </summary>
+        public bool Played(FightResult r) =>
+            r.Model == Model && r.Experiment == Label && (r.BaseEffort is not { } effort || effort == Effort);
+
+        /// <summary>The experiment and effort in words: "experiment brief, effort medium (elite high)".</summary>
+        public string Describe()
+        {
+            var tiers = ExperimentLabel.TierEfforts(Label);
+            return $"experiment {Label}" +
+                   (Effort is not null ? $", effort {Effort}" + (tiers is null ? "" : $" ({tiers})") : tiers is null ? "" : $", effort by tier ({tiers})");
+        }
+    }
+
+    /// <summary>
+    /// The players in <paramref name="results"/>, in the order the tables list them: models in
+    /// the order of <paramref name="order"/> (then by name), under each its labels with "base"
+    /// first, under each label its <c>--effort</c>s from low to max. A model played at two
+    /// efforts is two players; a batch run with <c>--effort-by-tier</c> is one, whose fights
+    /// differ in effort by tier.
+    /// </summary>
+    internal static List<Player> PlayersOf(IReadOnlyList<FightResult> results, IReadOnlyList<string>? order = null)
+    {
+        int Place(string model) => order?.ToList().IndexOf(model) is { } at and >= 0 ? at : int.MaxValue;
+        var labels = ExperimentLabel.Ordered(results.Select(r => r.Experiment));
+        var players = new List<Player>();
+        foreach (var model in results.Select(r => r.Model).Distinct().OrderBy(Place).ThenBy(m => m, StringComparer.Ordinal))
+            foreach (var label in labels)
+            {
+                var lines = results.Where(r => r.Model == model && r.Experiment == label).ToList();
+                if (lines.Count == 0)
+                    continue;
+                var efforts = lines.Select(r => r.BaseEffort).OfType<string>().Distinct()
+                    .OrderBy(effort => ArenaOptions.Efforts.ToList().IndexOf(effort)).ToList();
+                if (efforts.Count == 0)
+                    players.Add(new Player(model, null, label));
+                else
+                    players.AddRange(efforts.Select(effort => new Player(model, effort, label)));
+            }
+        return players;
+    }
+
+    /// <summary>
+    /// The fights of a set of result lines, one per player and scenario: the last line that
+    /// counts (won, lost or abandoned), else the last line there is (a timeout or an error), so
+    /// a fight played again after one of those replaces it.
+    /// </summary>
+    internal sealed class Sheet
+    {
+        private readonly Dictionary<(string Scenario, string Name), FightResult> _fights = [];
+
+        /// <param name="withLabel">Name each player with its label ("claude-x [brief]"), for
+        /// tables that hold several.</param>
+        public Sheet(IReadOnlyList<FightResult> results, IReadOnlyList<string>? order, bool withLabel)
+        {
+            Players = PlayersOf(results, order);
+            // A model played at two efforts is two players.
+            var severalEfforts = Players.Select(p => p.Effort).OfType<string>().Distinct().Count() > 1;
+            Names = Players
+                .Select(p => p.Model + (severalEfforts && p.Effort is not null ? $" ({p.Effort})" : "") + (withLabel ? $" [{p.Label}]" : ""))
+                .ToList();
+            Scenarios = results.Select(r => r.ScenarioId).Distinct().ToList();
+            for (var i = 0; i < Players.Count; i++)
+                foreach (var lines in results.Where(Players[i].Played).GroupBy(r => r.ScenarioId))
+                    _fights[(lines.Key, Names[i])] = lines.LastOrDefault(r => r.Counts) ?? lines.Last();
+        }
+
+        public List<Player> Players { get; }
+
+        /// <summary>The players' names as the tables show them, in the players' order.</summary>
+        public List<string> Names { get; }
+
+        /// <summary>The scenarios in the order their first lines stand in the file.</summary>
+        public List<string> Scenarios { get; }
+
+        public FightResult? Fight(string scenario, string name) => _fights.GetValueOrDefault((scenario, name));
+
+        /// <summary>A player's fights, one per scenario it has a line on.</summary>
+        public List<FightResult> FightsOf(string name) => Scenarios.Select(id => Fight(id, name)).OfType<FightResult>().ToList();
+
+        /// <summary>Every fight once, also one that two players share.</summary>
+        public List<FightResult> All => _fights.Values.Distinct(ReferenceEqualityComparer.Instance).Cast<FightResult>().ToList();
     }
 
     /// <summary>
@@ -42,56 +201,114 @@ public static class Report
     /// models it doesn't name follow by name.</param>
     public static void Print(IReadOnlyList<FightResult> results, TextWriter output, string? source = null, IReadOnlyList<string>? order = null)
     {
+        // A position run is no fight of its scenario.
+        results = results.Where(r => r.Position is null).ToList();
         if (results.Count == 0)
         {
             output.WriteLine(source is null ? "No fights to report." : $"No fights in {source}.");
             return;
         }
 
-        // A model played at two efforts is two players.
-        var severalEfforts = results.Select(r => r.Effort).Distinct().Count() > 1;
-        string Player(FightResult r) => severalEfforts ? $"{r.Model} ({r.Effort})" : r.Model;
+        // Two labels are two treatments: never one table.
+        if (MixedLabels(results, source) is { } refusal)
+        {
+            output.WriteLine(refusal);
+            return;
+        }
 
-        int Place(FightResult r) => order?.ToList().IndexOf(r.Model) is { } at and >= 0 ? at : int.MaxValue;
-        var players = results
-            .OrderBy(Place).ThenBy(r => r.Model, StringComparer.Ordinal).ThenBy(r => ArenaOptions.Efforts.ToList().IndexOf(r.Effort))
-            .Select(Player).Distinct().ToList();
-        var scenarios = results.Select(r => r.ScenarioId).Distinct().ToList();
-        var fights = results
-            .GroupBy(r => (r.ScenarioId, Player: Player(r)))
-            .ToDictionary(g => g.Key, g => g.LastOrDefault(r => r.Counts) ?? g.Last());
-        FightResult? Fight(string scenario, string player) => fights.GetValueOrDefault((scenario, player));
+        var sheet = new Sheet(results, order, withLabel: false);
+        var (players, scenarios) = (sheet.Names, sheet.Scenarios);
+        var label = results[0].Experiment;
+        // The effort: the batch's own when there is one, with the tiers the label gives another.
+        var efforts = sheet.Players.Select(p => p.Effort).OfType<string>().Distinct().ToList();
+        var tiers = ExperimentLabel.TierEfforts(label);
+        var effort = efforts.Count switch
+        {
+            1 => $", effort {efforts[0]}" + (tiers is null ? "" : $" ({tiers})"),
+            0 => tiers is null ? "" : $", effort by tier ({tiers})",
+            _ => tiers is null ? "" : $", {tiers} at every effort",
+        };
 
-        var counted = fights.Values.Count(r => r.Counts);
-        var timeouts = fights.Values.Count(r => r.Outcome == Outcomes.Timeout);
-        var errors = fights.Values.Count(r => !r.Counts) - timeouts;
-        output.WriteLine($"Arena report: {counted} {(counted == 1 ? "fight" : "fights")} on {scenarios.Count} " +
-                         $"{(scenarios.Count == 1 ? "scenario" : "scenarios")} by {players.Count} {(players.Count == 1 ? "model" : "models")}" +
-                         (severalEfforts ? "" : $", effort {results[0].Effort}") +
+        Header("Arena report", $"by {players.Count} {(players.Count == 1 ? "model" : "models")}{effort}, experiment {label}", sheet, source, output);
+        Warnings(results, output);
+        Usage(results, output);
+        SameFights(sheet, "models", "model", output);
+        output.WriteLine();
+
+        PerModel(players, sheet, output);
+        output.WriteLine();
+        ToolCalls(players, sheet, output);
+
+        var baselines = Baselines(scenarios);
+        output.WriteLine();
+        PerScenario(players, scenarios, sheet.Fight, baselines, results, output);
+        output.WriteLine();
+        Paired(players, scenarios, sheet.Fight, baselines, output);
+    }
+
+    /// <summary>
+    /// <c>arena report --by-label</c>: the same tables with one row per model and label
+    /// ("claude-x [brief]"), and in place of the comparison between models the comparison
+    /// between each model's own rows: its labels (and efforts) on the same scenarios, fight by
+    /// fight (<see cref="PairedVariants"/>).
+    /// </summary>
+    public static void PrintByLabel(IReadOnlyList<FightResult> results, TextWriter output, string? source = null, IReadOnlyList<string>? order = null)
+    {
+        results = results.Where(r => r.Position is null).ToList();
+        if (results.Count == 0)
+        {
+            output.WriteLine(source is null ? "No fights to report." : $"No fights in {source}.");
+            return;
+        }
+
+        var sheet = new Sheet(results, order, withLabel: true);
+        var (players, scenarios) = (sheet.Names, sheet.Scenarios);
+        var labels = ExperimentLabel.Ordered(results.Select(r => r.Experiment));
+        var models = sheet.Players.Select(p => p.Model).Distinct().Count();
+        Header("Arena report by experiment",
+            $"by {models} {(models == 1 ? "model" : "models")} under {labels.Count} {(labels.Count == 1 ? "experiment" : "experiments")} ({string.Join(", ", labels)})",
+            sheet, source, output);
+        Warnings(results, output);
+        Usage(results, output);
+        SameFights(sheet, "rows", "row", output);
+        output.WriteLine();
+
+        PerModel(players, sheet, output);
+        output.WriteLine();
+        ToolCalls(players, sheet, output);
+
+        output.WriteLine();
+        PerScenario(players, scenarios, sheet.Fight, Baselines(scenarios), results, output);
+        output.WriteLine();
+        PairedVariants(sheet, output);
+    }
+
+    // The report's first line: how many fights count, on how many scenarios, by whom, and how
+    // many ran out of time or couldn't be played.
+    private static void Header(string title, string who, Sheet sheet, string? source, TextWriter output)
+    {
+        var fights = sheet.All;
+        var counted = fights.Count(r => r.Counts);
+        var timeouts = fights.Count(r => r.Outcome == Outcomes.Timeout);
+        var errors = fights.Count(r => !r.Counts) - timeouts;
+        output.WriteLine($"{title}: {counted} {(counted == 1 ? "fight" : "fights")} on {sheet.Scenarios.Count} " +
+                         $"{(sheet.Scenarios.Count == 1 ? "scenario" : "scenarios")} {who}" +
                          (timeouts > 0 ? $", plus {timeouts} that ran out of time" : "") +
                          (errors > 0 ? $"{(timeouts > 0 ? " and" : ", plus")} {errors} that couldn't be played" : "") +
                          (source is null ? "." : $" ({source})."));
         if (timeouts + errors > 0)
             output.WriteLine("Fights that ran out of time or couldn't be played count for nothing below; the same run command with the same --out plays them again.");
-        Warnings(results, output);
-        Usage(results, output);
-        // The per-model rows only compare like with like when every model's fights are the same ones.
-        var played = players.Select(p => scenarios.Where(id => Fight(id, p) is { Counts: true }).ToList()).ToList();
+    }
+
+    // The per-model rows only compare like with like when every model's fights are the same ones.
+    private static void SameFights(Sheet sheet, string rows, string row, TextWriter output)
+    {
+        var (players, scenarios) = (sheet.Names, sheet.Scenarios);
+        var played = players.Select(p => scenarios.Where(id => sheet.Fight(id, p) is { Counts: true }).ToList()).ToList();
         if (played.Any(mine => !mine.SequenceEqual(played[0])))
-            output.WriteLine("Note: the models didn't all play the same fights (" +
+            output.WriteLine($"Note: the {rows} didn't all play the same fights (" +
                              string.Join(", ", players.Select((p, i) => $"{p} {played[i].Count}")) +
-                             $" of {scenarios.Count}), so the per-model rows cover different fights. Compare models on the paired table, or play the missing fights first.");
-        output.WriteLine();
-
-        PerModel(players, fights.Values.ToList(), Player, output);
-        output.WriteLine();
-        ToolCalls(players, fights.Values.ToList(), Player, output);
-
-        var baselines = Baselines(scenarios);
-        output.WriteLine();
-        PerScenario(players, scenarios, Fight, baselines, results, output);
-        output.WriteLine();
-        Paired(players, scenarios, Fight, baselines, output);
+                             $" of {scenarios.Count}), so the per-{row} rows cover different fights. Compare {rows} on the paired table, or play the missing fights first.");
     }
 
     // Things that make the numbers below mean something else than they seem to.
@@ -142,8 +359,9 @@ public static class Report
                          $"5 hour window {five ?? "not reported"}, 7 day window {seven ?? "not reported"}.");
     }
 
-    private static void PerModel(List<string> players, List<FightResult> fights, Func<FightResult, string> player, TextWriter output)
+    private static void PerModel(List<string> players, Sheet sheet, TextWriter output)
     {
+        var fights = sheet.All;
         output.WriteLine("Per model (fights are those won, lost or abandoned; HP left counts 0 for a fight that wasn't won; " +
                          "turns and cards are of fights played to the end; resumes are sessions started again because they ended mid-fight):");
         var showUnfinished = fights.Any(r => r.Outcome is Outcomes.Abandoned or Outcomes.Timeout or Outcomes.Error);
@@ -154,7 +372,7 @@ public static class Report
 
         foreach (var name in players)
         {
-            var mine = fights.Where(r => player(r) == name).ToList();
+            var mine = sheet.FightsOf(name);
             var counted = mine.Where(r => r.Counts).ToList();
             var finished = counted.Where(r => r.Finished).ToList();
             var won = counted.Where(r => r.Won).ToList();
@@ -193,13 +411,13 @@ public static class Report
 
     // How each model drove the tools: a model that plays card by card with act pays for it in
     // time and tokens, and so does one that reads a page it has no use for.
-    private static void ToolCalls(List<string> players, List<FightResult> fights, Func<FightResult, string> player, TextWriter output)
+    private static void ToolCalls(List<string> players, Sheet sheet, TextWriter output)
     {
         output.WriteLine("Tool calls per fight (Read is Claude Code's file tool, the way a session opens the wiki; wiki pages are the different pages a fight opened):");
         var table = new TextTable(["model", .. MainTools, ClaudeCli.ReadTool, "wiki pages", "other", "tool errors", "Claude Code turns"]);
         foreach (var name in players)
         {
-            var counted = fights.Where(r => player(r) == name && r.Counts).ToList();
+            var counted = sheet.FightsOf(name).Where(r => r.Counts).ToList();
             double PerFight(Func<FightResult, int> count) => counted.Count == 0 ? 0 : counted.Average(r => (double)count(r));
             table.Add(
             [
@@ -219,7 +437,7 @@ public static class Report
         output.WriteLine("Wiki pages opened (the prompt asks for an enemy's page before an elite or a boss):");
         foreach (var name in players)
         {
-            var counted = fights.Where(r => player(r) == name && r.Counts).ToList();
+            var counted = sheet.FightsOf(name).Where(r => r.Counts).ToList();
             var hard = counted.Where(r => r.Tier is "elite" or "boss").ToList();
             var pages = counted.SelectMany(r => r.WikiPages)
                 .GroupBy(page => page, StringComparer.Ordinal)
@@ -234,6 +452,32 @@ public static class Report
             if (failed > 0)
                 line += $"; {failed} of {counted.Sum(r => r.ReadCalls)} Read calls failed (a file that isn't there, or one outside the strategy folder)";
             output.WriteLine(line + ".");
+        }
+
+        // Under --brief the enemies' pages were in the first message: how many, how long, and
+        // whether a model opened one of them again all the same.
+        if (players.Any(name => sheet.FightsOf(name).Any(r => r.Counts && r.BriefPages is not null)))
+        {
+            output.WriteLine("Wiki pages given in the first message (--brief; opened again counts a fight whose Read calls opened a page it was given):");
+            foreach (var name in players)
+            {
+                var counted = sheet.FightsOf(name).Where(r => r.Counts).ToList();
+                var briefed = counted.Where(r => r.BriefPages is not null).ToList();
+                if (briefed.Count == 0)
+                {
+                    output.WriteLine($"  {name}: none.");
+                    continue;
+                }
+                var line = $"  {name}: in {briefed.Count} of {counted.Count} {(counted.Count == 1 ? "fight" : "fights")}, " +
+                           $"{Stats.Mean(briefed.Select(r => (double)r.BriefPages!.Count))} pages and {Stats.Mean(briefed.Select(r => (double)(r.BriefChars ?? 0)), "0")} characters a fight; " +
+                           $"opened again in {briefed.Count(r => r.WikiPages.Intersect(r.BriefPages!, StringComparer.Ordinal).Any())}";
+                var missing = briefed.SelectMany(r => r.BriefMissing)
+                    .GroupBy(enemy => enemy, StringComparer.Ordinal)
+                    .OrderByDescending(g => g.Count()).ThenBy(g => g.Key, StringComparer.Ordinal).ToList();
+                if (missing.Count > 0)
+                    line += "; the wiki had no page for " + string.Join(", ", missing.Select(g => $"{g.Key} ({g.Count()} {(g.Count() == 1 ? "fight" : "fights")})"));
+                output.WriteLine(line + ".");
+            }
         }
 
         static string Short(string page) => page.StartsWith(Wiki, StringComparison.Ordinal) ? page[Wiki.Length..] : page;
@@ -374,6 +618,100 @@ public static class Report
                (abandonedPairs > 0
                    ? " An abandoned fight counts as 0 HP in the per-model table but is missing here, so this table flatters a model that gives up."
                    : "");
+    }
+
+    /// <summary>
+    /// What a set of paired fights comes to: on the same scenarios, how often the first side
+    /// won and the second, in how many the first had more HP left, the same, less (a fight that
+    /// wasn't won is 0 HP), the mean of first minus second, and the two-sided sign test's p for
+    /// the better/worse split.
+    /// </summary>
+    internal sealed record PairStats(int Fights, int FirstWon, int SecondWon, int Better, int Same, int Worse, double MeanDifference, double SignTestP)
+    {
+        public static PairStats Of(IReadOnlyList<(FightResult First, FightResult Second)> pairs)
+        {
+            var better = pairs.Count(p => p.First.HpScore > p.Second.HpScore);
+            var worse = pairs.Count(p => p.First.HpScore < p.Second.HpScore);
+            return new PairStats(pairs.Count, pairs.Count(p => p.First.Won), pairs.Count(p => p.Second.Won), better, pairs.Count - better - worse, worse,
+                pairs.Count == 0 ? 0 : pairs.Average(p => (double)(p.First.HpScore - p.Second.HpScore)), Stats.SignTest(better, worse));
+        }
+    }
+
+    /// <summary>The columns of the table that compares two variants of a model (<see cref="AddPairRows"/>).</summary>
+    internal static readonly string[] VariantHeaders = ["pair", "tier", "fights", "won", "better", "same", "worse", "HP left difference", "sign test p"];
+
+    /// <summary>
+    /// The rows for one pair of variants: all its paired fights first, then one row per tier
+    /// that has any, in the tiers' own order. "won" is the first side's wins against the
+    /// second's on those fights, which is the wins by tier.
+    /// </summary>
+    internal static void AddPairRows(TextTable table, string name, IReadOnlyList<(FightResult First, FightResult Second)> pairs)
+    {
+        var tiers = Scenarios.Tiers.Where(tier => pairs.Any(p => p.First.Tier == tier)).ToList();
+        tiers.AddRange(pairs.Select(p => p.First.Tier).Distinct().Where(tier => !tiers.Contains(tier)));
+        Add(name, "all", pairs);
+        if (tiers.Count > 1)
+            foreach (var tier in tiers)
+                Add("", tier, pairs.Where(p => p.First.Tier == tier).ToList());
+
+        void Add(string pair, string tier, IReadOnlyList<(FightResult First, FightResult Second)> rows)
+        {
+            var stats = PairStats.Of(rows);
+            table.Add(
+                pair, tier,
+                stats.Fights.ToString(CultureInfo.InvariantCulture),
+                string.Create(CultureInfo.InvariantCulture, $"{stats.FirstWon} vs {stats.SecondWon}"),
+                stats.Better.ToString(CultureInfo.InvariantCulture),
+                stats.Same.ToString(CultureInfo.InvariantCulture),
+                stats.Worse.ToString(CultureInfo.InvariantCulture),
+                stats.MeanDifference.ToString("+0.0;-0.0;0.0", CultureInfo.InvariantCulture) + " HP",
+                stats.SignTestP.ToString("0.00", CultureInfo.InvariantCulture));
+        }
+    }
+
+    /// <summary>What stands above a table of <see cref="AddPairRows"/> rows.</summary>
+    internal const string VariantLegend =
+        "on the scenarios both played to the end (a loss is 0 HP; won is the first's wins vs the second's; better, same and worse count " +
+        "the fights in which the first had more HP left, the same, less; the difference is the mean of first minus second)";
+
+    /// <summary>
+    /// The comparison between a model's own rows: every two of them, the later against the
+    /// earlier (so everything is first compared with "base"), on the scenarios both played to
+    /// the end. A pair is dropped when either side didn't play its fight to the end, as in the
+    /// comparison between models.
+    /// </summary>
+    private static void PairedVariants(Sheet sheet, TextWriter output)
+    {
+        output.WriteLine($"Paired comparison between experiments: each model's rows against each other, {VariantLegend}:");
+        var table = new TextTable(VariantHeaders);
+        var dropped = new List<string>();
+        foreach (var model in sheet.Players.Select(p => p.Model).Distinct())
+        {
+            var mine = Enumerable.Range(0, sheet.Players.Count).Where(i => sheet.Players[i].Model == model).ToList();
+            for (var a = 0; a < mine.Count; a++)
+                for (var b = a + 1; b < mine.Count; b++)
+                {
+                    var (first, second) = (sheet.Names[mine[b]], sheet.Names[mine[a]]);
+                    var both = sheet.Scenarios.Where(id => sheet.Fight(id, first) is not null && sheet.Fight(id, second) is not null).ToList();
+                    var pairs = both
+                        .Where(id => sheet.Fight(id, first) is { Finished: true } && sheet.Fight(id, second) is { Finished: true })
+                        .Select(id => (sheet.Fight(id, first)!, sheet.Fight(id, second)!))
+                        .ToList();
+                    if (pairs.Count > 0)
+                        AddPairRows(table, $"{first} vs {second}", pairs);
+                    if (pairs.Count < both.Count)
+                        dropped.Add($"{first} vs {second} {both.Count - pairs.Count}");
+                }
+        }
+        if (table.Count == 0)
+            output.WriteLine(sheet.Players.GroupBy(p => p.Model).Any(g => g.Count() > 1)
+                ? "  none yet: no two rows of a model have played the same scenario to the end."
+                : "  nothing to compare: every model is here under one label and effort.");
+        else
+            table.Write(output, "  ");
+        if (dropped.Count > 0)
+            output.WriteLine("  A pair is dropped when either side didn't play its fight to the end (abandoned, a timeout or an error). Pairs dropped: " +
+                             string.Join("; ", dropped) + ".");
     }
 
     private static string[] PairRow(string name, List<(int Mine, int Theirs)> pairs)

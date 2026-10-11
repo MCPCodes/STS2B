@@ -1,5 +1,7 @@
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using System.Threading.Channels;
+using SpireMind.Core;
 using SpireMind.Core.Brain;
 
 namespace SpireMind.Arena;
@@ -12,6 +14,21 @@ namespace SpireMind.Arena;
 /// written), that the prompt and the Read rule name the same checkout when it is a frozen copy,
 /// what the init line must list for a fight to go on, and how Read calls are counted into the
 /// result line and the report. The expected values are written out by hand.
+/// <para>
+/// The experiments of <c>arena run</c> are held to the same: what a run's label is and how it
+/// reads back, what the switches parse to and that none of them is on by default, which pages
+/// <c>--brief</c> puts into a fight's first message (found by the name in a page's first line)
+/// and that nothing else changes, what each session of a fight is started with (through a
+/// launcher that starts nothing), when a fight counts as already played, and the numbers of
+/// <c>report --by-label</c> and <c>arena compare</c> on fights whose HP was chosen by hand.
+/// </para>
+/// <para>
+/// Position tests (<c>arena position</c>) are checked in the file beside this one
+/// (RunnerChecks.Positions.cs): how a transcript is read, that a recorded fight is rebuilt to a
+/// turn and every difference from the recording is caught, that a game put at a position plays
+/// on exactly as the recorded fight did, what a reshuffle changes and what it leaves, what a
+/// run's line holds, and the numbers of the position report and of compare.
+/// </para>
 /// <para>
 /// What these can't show is Claude Code's own permission check: that needs a real session. The
 /// flags' meaning was read from Claude Code 2.1.296 (docs/arena.md says how), and every
@@ -32,6 +49,16 @@ public sealed partial class RunnerChecks : IArenaChecks
         check.Group("read counting", () => Reads(check));
         check.Group("result line", () => ResultLine(check));
         check.Group("report", () => ReportColumns(check));
+        check.Group("experiment label", () => Labels(check));
+        check.Group("experiment switches", () => Switches(check));
+        check.Group("brief", () => Brief(check));
+        check.Group("brief in a fight", () => BriefFight(check));
+        check.Group("same fight", () => SameFight(check));
+        check.Group("experiment in the result line", () => ExperimentLine(check));
+        check.Group("effort by tier in the report", () => EffortGroups(check));
+        check.Group("labels in the report", () => LabelReport(check));
+        check.Group("compare", () => Compare(check));
+        Positions(check);
     }
 
     // ---------- the flags ----------
@@ -443,6 +470,600 @@ public sealed partial class RunnerChecks : IArenaChecks
         check.That(mixed.ToString().Contains("Note: the wiki's pages changed between these fights (2 versions of strategy/wiki)", StringComparison.Ordinal), "two wikis are noted");
     }
 
+    // ---------- experiments: the label and the switches ----------
+
+    private static readonly Dictionary<string, string> NoTiers = [];
+
+    private static void Labels(Check check)
+    {
+        var off = new ExperimentOptions();
+        check.Equal("base", ExperimentLabel.Of(false, off, NoTiers), "no switch on");
+        check.Equal("brief", ExperimentLabel.Of(true, off, NoTiers), "--brief");
+        check.Equal("forecast", ExperimentLabel.Of(false, new ExperimentOptions(Forecast: true), NoTiers), "--forecast");
+        check.Equal("elite=high+boss=high", ExperimentLabel.Of(false, off, new Dictionary<string, string> { ["boss"] = "high", ["elite"] = "high" }),
+            "--effort-by-tier boss=high,elite=high: the tiers in their own order, however they were typed");
+        check.Equal("brief+forecast+weak=low+normal=medium+elite=high+boss=max",
+            ExperimentLabel.Of(true, new ExperimentOptions(true), new Dictionary<string, string> { ["boss"] = "max", ["weak"] = "low", ["elite"] = "high", ["normal"] = "medium" }),
+            "every switch at once");
+
+        check.Equal("high", ExperimentLabel.TierEffort("brief+elite=high+boss=xhigh", "elite"), "the elite effort read back from a label");
+        check.Equal("xhigh", ExperimentLabel.TierEffort("brief+elite=high+boss=xhigh", "boss"), "the boss effort read back");
+        check.Equal(null, ExperimentLabel.TierEffort("brief+elite=high+boss=xhigh", "weak"), "a tier the label doesn't name");
+        check.Equal(null, ExperimentLabel.TierEffort("base", "elite"), "base names no tier");
+        check.Equal(null, ExperimentLabel.TierEffort("brief", "boss"), "brief names no tier");
+        check.Equal("elite high, boss xhigh", ExperimentLabel.TierEfforts("brief+elite=high+boss=xhigh"), "the tier efforts in words");
+        check.Equal(null, ExperimentLabel.TierEfforts("brief+forecast"), "no tier efforts, no words");
+        check.Sequence(["base", "brief", "forecast"], ExperimentLabel.Ordered(["forecast", "brief", "base", "brief"]), "labels in the reports' order: base first, each once");
+
+        check.Equal(new ExperimentOptions(false), new ExperimentOptions(), "the simulator's switch is off unless set");
+        check.Sequence([], ExperimentLabel.Switches(new ExperimentOptions()), "no simulator switch on");
+        check.Sequence(["--forecast"], ExperimentLabel.Switches(new ExperimentOptions(true)), "the simulator's switch as it is typed");
+
+        // A position test's own name comes first, and never hides a switch.
+        check.Equal("old", ExperimentLabel.Of(false, off, NoTiers, "old"), "a batch's own name is its label");
+        check.Equal("new+brief+forecast", ExperimentLabel.Of(true, new ExperimentOptions(true), NoTiers, "new"), "a name, then the switches that are on");
+        check.Equal("base", ExperimentLabel.Of(false, off, NoTiers, "base"), "the name base is no name");
+        check.Equal("forecast", ExperimentLabel.Of(false, new ExperimentOptions(true), NoTiers, "base"), "nor is it beside a switch");
+        check.Equal(null, ExperimentLabel.TierEffort("old", "elite"), "a name names no tier's effort");
+        foreach (var good in new[] { "old", "new", "prompt-2026.10.11", "rules_1-4", "A" })
+            check.Equal(null, ExperimentLabel.NameProblem(good), $"'{good}' can be a batch's name");
+        foreach (var bad in new[] { "", "a+b", "elite=high", "two words", "a/b", "brief", "forecast", new string('x', 41) })
+            check.That(ExperimentLabel.NameProblem(bad) is not null, $"'{bad}' can't be a batch's name");
+    }
+
+    private static void Switches(Check check)
+    {
+        // With no switch a batch is the batch it always was.
+        var plain = ArenaOptions.Parse(["run", "--models", "claude-x"]);
+        check.Equal("base", plain.Experiment, "the label of a run without a switch");
+        check.That(!plain.Brief && plain.Experiments == new ExperimentOptions() && plain.EffortByTier.Count == 0, "every switch is off by default");
+        foreach (var tier in Scenarios.Tiers)
+            check.Equal("medium", plain.EffortFor(tier), $"the effort of a {tier} fight without --effort-by-tier");
+
+        var all = ArenaOptions.Parse(["run", "--models", "claude-x", "--effort", "low", "--brief", "--effort-by-tier", "boss=high, elite=xhigh", "--forecast"]);
+        check.Equal("brief+forecast+elite=xhigh+boss=high", all.Experiment, "the label with every switch on");
+        check.Sequence(["low", "low", "xhigh", "high"], Scenarios.Tiers.Select(all.EffortFor), "the effort of weak, normal, elite and boss fights");
+        check.Equal(new ExperimentOptions(Forecast: true), all.Experiments, "the simulator's switch as parsed");
+        // The suggested-line helper was ruled out and is no switch any more.
+        check.That(Refused(["run", "--models", "claude-x", "--advisor"]) && Refused(["snapshot", "elite-1", "--advisor"]) && Refused(["position", "a", "elite-1", "claude-x", "--turn", "2", "--advisor"]),
+            "there is no --advisor");
+        check.That(all.Brief, "--brief as parsed");
+        check.Equal("elite=high", ArenaOptions.Parse(["run", "--models", "claude-x", "--effort", "high", "--effort-by-tier", "elite=high"]).Experiment,
+            "a tier named at the batch's own effort is still in the label: the label is what was asked for");
+
+        foreach (var bad in new[] { "elite", "elite=", "=high", "elite=huge", "mini=high", "elite=high,elite=low", "elite=high=low", "", "," })
+            check.That(Refused(["run", "--models", "claude-x", "--effort-by-tier", bad]), $"--effort-by-tier '{bad}' is refused");
+        check.That(Refused(["run", "--models", "claude-x", "--effort-by-tier"]), "--effort-by-tier without a value is refused");
+        foreach (var (command, option) in new[] { ("baseline", "--brief"), ("report", "--brief"), ("baseline", "--forecast"), ("report", "--forecast"), ("run", "--by-label"), ("compare", "--by-label") })
+            check.That(Refused(command == "run" ? ["run", "--models", "claude-x", option] : command == "compare" ? ["compare", "a", "b", option] : [command, "a", option]),
+                $"{option} doesn't go with {command}");
+        check.That(Refused(["report", "a", "--model", "claude-x"]) && Refused(["run", "--models", "claude-x", "--model", "claude-x"]), "--model only goes with compare");
+        check.That(Refused(["run", "--models", "claude-x", "--effort-by-tier", "elite=high", "--effort-by-tier"]), "a second --effort-by-tier needs its value too");
+
+        check.That(ArenaOptions.Parse(["report", "a", "--by-label"]).ByLabel && !ArenaOptions.Parse(["report", "a"]).ByLabel, "report --by-label");
+        var compare = ArenaOptions.Parse(["compare", "a", "--model", "claude-x", "b"]);
+        check.Equal(ArenaCommand.Compare, compare.Command, "the compare command");
+        check.Sequence(["a", "b"], compare.ComparePaths, "compare's two folders, in the order typed");
+        check.Equal("claude-x", compare.CompareModel, "compare --model");
+        check.Equal(null, ArenaOptions.Parse(["compare", "a", "b"]).CompareModel, "compare without --model takes every model");
+        check.That(Refused(["compare", "a"]) && Refused(["compare"]) && Refused(["compare", "a", "b", "c"]), "compare takes exactly two folders");
+        check.Equal(new ExperimentOptions(Forecast: true), ArenaOptions.Parse(["snapshot", "elite-1", "--forecast"]).Experiments, "snapshot takes the simulator's switches");
+
+        static bool Refused(string[] args)
+        {
+            try { ArenaOptions.Parse(args); }
+            catch (UsageException) { return true; }
+            return false;
+        }
+    }
+
+    // ---------- --brief ----------
+
+    private const string VantomPage = "# Vantom\nA boss.\n\n## Facts\n\n## Lessons\n";
+
+    // A checkout whose enemy pages are named so that only the first line can find them.
+    private static Checkout BriefCheckout()
+    {
+        var checkout = new Checkout(VantomPage);
+        checkout.Write("strategy/wiki/enemies/some-other-name.md", "# Leaf Slime (M)\nA slime.\n\n## Facts\nSplits.\n");
+        checkout.Write("strategy/wiki/enemies/nibbit.md", "\n# Nibbit\nSmall.\n\n");
+        checkout.Write("strategy/wiki/enemies/the-priest.md", "# Kin Priest\nLeads the Kin.\n");
+        // Not an enemy page, whatever its first line says.
+        checkout.Write("strategy/wiki/cards/byrdonis.md", "# Byrdonis\nA card group that happens to be called so.\n");
+        return checkout;
+    }
+
+    private static void Brief(Check check)
+    {
+        using var checkout = BriefCheckout();
+        var repo = checkout.Path;
+
+        var pages = WikiBrief.PagesByName(repo);
+        check.Sequence(["Kin Priest", "Leaf Slime (M)", "Nibbit", "Vantom"], pages.Keys.OrderBy(name => name, StringComparer.Ordinal), "the enemy pages by the name in their first line");
+        check.Equal("strategy/wiki/enemies/some-other-name.md", pages["Leaf Slime (M)"], "a page is found by its first line, whatever the file is called");
+        check.That(!pages.ContainsKey("Byrdonis") && !pages.ContainsKey("Potions"), "pages outside enemies/ are not enemy pages");
+
+        // Each different enemy once, in the order they stand; capitals don't count; one line for the one without a page.
+        var brief = WikiBrief.For(repo, ["Leaf Slime (M)", "Vantom", "Leaf Slime (M)", "Byrdonis", "nibbit"]);
+        check.Sequence(["strategy/wiki/enemies/some-other-name.md", "strategy/wiki/enemies/vantom.md", "strategy/wiki/enemies/nibbit.md"], brief.Pages, "the pages given");
+        check.Sequence(["Byrdonis"], brief.Missing, "the enemy without a page");
+        // 43 characters of the slime's page, 38 of Vantom's, 15 of the Nibbit's, each without the blank lines around it.
+        check.Equal(96, brief.Chars, "the pages' length together");
+        check.Equal(
+            "## What the wiki says about this fight\n\n" +
+            "<file path=\"strategy/wiki/enemies/some-other-name.md\">\n# Leaf Slime (M)\nA slime.\n\n## Facts\nSplits.\n</file>\n\n" +
+            "<file path=\"strategy/wiki/enemies/vantom.md\">\n# Vantom\nA boss.\n\n## Facts\n\n## Lessons\n</file>\n\n" +
+            "The wiki has no page for Byrdonis.\n\n" +
+            "<file path=\"strategy/wiki/enemies/nibbit.md\">\n# Nibbit\nSmall.\n</file>",
+            brief.Section, "the section: its heading, each page whole, one line for the enemy without one, and nothing else");
+
+        var none = WikiBrief.For(repo, ["Byrdonis"]);
+        check.Equal("## What the wiki says about this fight\n\nThe wiki has no page for Byrdonis.", none.Section, "the section of a fight whose enemy has no page");
+        check.That(none.Pages.Count == 0 && none.Chars == 0, "no page, no length");
+
+        // The first message: the plain one, then the section, and the end.
+        check.Equal(ArenaPrompt.UserPrompt + "\n\n" + brief.Section, ArenaPrompt.UserPromptWith(brief), "the first message under --brief");
+        check.That(!ArenaPrompt.UserPrompt.Contains(WikiBrief.Heading, StringComparison.Ordinal) && !ArenaPrompt.ResumePrompt.Contains(WikiBrief.Heading, StringComparison.Ordinal),
+            "neither the plain first message nor the resume prompt speaks of the section");
+
+        // The appendix: one more line under --brief, and without the switch not a letter moved.
+        var plainNotes = ArenaPrompt.ArenaNotes(repo);
+        var briefNotes = ArenaPrompt.ArenaNotes(repo, brief: true);
+        check.Equal(plainNotes, ArenaPrompt.ArenaNotes(repo, brief: false), "the appendix without the switch is the appendix as it was");
+        var added = briefNotes.Split('\n').Except(plainNotes.Split('\n')).ToList();
+        check.Equal(1, added.Count, "lines --brief adds to the appendix");
+        if (added.Count == 1)
+        {
+            check.That(added[0].StartsWith("- The pages of this fight's enemies are the exception: their full text is already in your first message, under `What the wiki says about this fight`", StringComparison.Ordinal),
+                "the added line says the pages are already there: " + added[0]);
+            check.That(added[0].Contains("Don't open those again", StringComparison.Ordinal), "and that they need not be opened again");
+            check.Equal(plainNotes, briefNotes.Replace(added[0] + "\n", ""), "the appendix under --brief without that line");
+            check.That(!added[0].Contains(repo, StringComparison.Ordinal), "the added line doesn't spell the checkout's path");
+        }
+        var plain = ArenaPrompt.Build(repo).Text;
+        var briefed = ArenaPrompt.Build(repo, brief: true).Text;
+        check.That(briefed.EndsWith(briefNotes + "\n", StringComparison.Ordinal) && plain.EndsWith(plainNotes + "\n", StringComparison.Ordinal), "each system text ends with its own appendix");
+        check.Equal(plain[..^(plainNotes.Length + 1)], briefed[..^(briefNotes.Length + 1)], "above the appendix the two system texts are the same");
+        check.That(!plain.Contains(WikiBrief.Heading, StringComparison.Ordinal), "the plain system text never speaks of the section");
+        // One hash for both, so a hash that differs between two runs means the notes changed, not the switch.
+        check.Equal(ArenaPrompt.Hash(plain, repo), ArenaPrompt.Hash(briefed, repo), "the prompt hash under --brief is the plain run's");
+
+        // The enemies are read off a snapshot's state.enemies[].name, each different one once.
+        var snapshot = new GameSnapshot
+        {
+            Screen = "combat", AwaitingDecision = true,
+            State = new JsonObject
+            {
+                ["enemies"] = new JsonArray(
+                    new JsonObject { ["i"] = 0, ["name"] = "Kin Follower" }, new JsonObject { ["i"] = 1, ["name"] = "Kin Follower" },
+                    new JsonObject { ["i"] = 2, ["name"] = "Kin Priest" }, new JsonObject { ["i"] = 3 }),
+            },
+        };
+        check.Sequence(["Kin Follower", "Kin Priest"], WikiBrief.Enemies(snapshot), "the enemies of a snapshot");
+        check.Sequence([], WikiBrief.Enemies(new GameSnapshot { Screen = "combat" }), "a snapshot without enemies");
+
+        // A fight of the batch Opus played (seed 7): two Kin Followers and the Kin Priest.
+        check.Sequence(["Kin Follower", "Kin Priest"], WikiBrief.Enemies(new ArenaGame(Scenarios.FromId("boss-878005"))), "the enemies boss-878005 starts with");
+        // And whatever the generator deals: the first snapshot names the line-up its summary ends with.
+        foreach (var scenario in Scenarios.Generate(10, 1))
+        {
+            var lineUp = scenario.Summary[(scenario.Summary.LastIndexOf(" vs ", StringComparison.Ordinal) + 4)..];
+            lineUp = lineUp[..lineUp.LastIndexOf(" (", StringComparison.Ordinal)];
+            check.Sequence(lineUp.Split(" + ").Distinct(), WikiBrief.Enemies(new ArenaGame(scenario)), $"the enemies {scenario.Id} starts with");
+        }
+
+        // Looking at a fight's first snapshot changes nothing about it: the same first snapshot,
+        // and the same one after the same first action.
+        var fight = Scenarios.Generate(1, 1)[0];
+        var looked = new ArenaGame(fight) { ActionDelay = TimeSpan.Zero };
+        var untouched = new ArenaGame(fight) { ActionDelay = TimeSpan.Zero };
+        WikiBrief.Enemies(looked);
+        check.Equal(Shown(untouched), Shown(looked), "the first snapshot of a fight whose enemies were read off it");
+        var action = untouched.CaptureAsync(CancellationToken.None).GetAwaiter().GetResult().Actions[0].Id;
+        looked.ExecuteAsync(action, CancellationToken.None).GetAwaiter().GetResult();
+        untouched.ExecuteAsync(action, CancellationToken.None).GetAwaiter().GetResult();
+        check.Equal(Shown(untouched), Shown(looked), $"the snapshot after {action}");
+
+        static string Shown(ArenaGame game) => game.CaptureAsync(CancellationToken.None).GetAwaiter().GetResult().ToJson().ToJsonString();
+    }
+
+    // What a fight's sessions are started with, through a launcher that starts nothing: every
+    // session "ends" at once without a tool call, so the fight is resumed until the runner gives up.
+    private static void BriefFight(Check check)
+    {
+        using var checkout = BriefCheckout();
+        var repo = checkout.Path;
+        var scenario = Scenarios.FromId("boss-878005"); // Kin Follower + Kin Follower + Kin Priest
+        var section = WikiBrief.For(repo, ["Kin Follower", "Kin Priest"]).Section;
+        check.Equal(
+            "## What the wiki says about this fight\n\nThe wiki has no page for Kin Follower.\n\n" +
+            "<file path=\"strategy/wiki/enemies/the-priest.md\">\n# Kin Priest\nLeads the Kin.\n</file>", section, "the section for this fight");
+
+        var launcher = new NoLauncher();
+        var fight = new ClaudeFight
+        {
+            Scenario = scenario, Model = "claude-x", Effort = "high", Brief = true,
+            Experiments = new ExperimentOptions(Forecast: true), Experiment = "brief+forecast+boss=high",
+            ClaudePath = "/nowhere/claude", SystemPrompt = ArenaPrompt.Build(repo, brief: true).Text, Repo = repo,
+            Environment = new Dictionary<string, string?>(), Launcher = launcher,
+        };
+        var result = fight.RunAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+        check.Equal(1 + ClaudeFight.MaxResumes, launcher.Started.Count, "sessions started: the first and every resume");
+        if (launcher.Started.Count == 1 + ClaudeFight.MaxResumes)
+        {
+            var first = launcher.Started[0].Arguments.ToList();
+            check.Equal(ArenaPrompt.UserPrompt + "\n\n" + section, Values(first, "-p").Single(), "the first session's prompt ends with the section");
+            check.That(first.Contains("--session-id") && !first.Contains("--resume"), "the first session is a new one");
+            var id = Values(first, "--session-id").Single();
+            foreach (var (spec, n) in launcher.Started.Skip(1).Select((spec, n) => (spec, n + 1)))
+            {
+                var args = spec.Arguments.ToList();
+                check.Equal(ArenaPrompt.ResumePrompt, args[args.IndexOf("-p") + 1], $"resume {n} gets the resume prompt and no pages");
+                check.Sequence([id], Values(args, "--resume"), $"resume {n} carries on the same session");
+            }
+            check.That(launcher.Started.All(spec => Values(spec.Arguments.ToList(), "--effort").SequenceEqual(["high"])), "every session is started at the fight's effort");
+            check.That(launcher.Started.All(spec => Values(spec.Arguments.ToList(), "--append-system-prompt").Single() == fight.SystemPrompt), "every session gets the same system prompt");
+        }
+
+        check.Equal("high", result.Effort, "the effort in the result is the one the sessions were started with");
+        check.Equal("brief+forecast+boss=high", result.Experiment, "the label in the result");
+        check.Sequence(["strategy/wiki/enemies/the-priest.md"], result.BriefPages ?? ["(none)"], "the pages given, in the result");
+        check.Equal(27, result.BriefChars ?? -1, "their length: \"# Kin Priest\" and \"Leads the Kin.\" with the line break between");
+        check.Sequence(["Kin Follower"], result.BriefMissing, "the enemy without a page, in the result");
+        check.That(result.Notes.Contains("--brief: the wiki has no page for Kin Follower"), "and in its notes: " + string.Join(" | ", result.Notes));
+        check.Equal(ClaudeFight.MaxResumes, result.Resumes, "resumes");
+        check.Equal(Outcomes.Error, result.Outcome, "a fight no session made a call in wasn't played");
+
+        check.Equal(new ExperimentOptions(Forecast: true), fight.NewGame().Experiments, "the simulator's switches reach the fight");
+
+        // Without the switch: the plain prompt, no pages in the result, the switches off.
+        var plainLauncher = new NoLauncher();
+        var plain = new ClaudeFight
+        {
+            Scenario = scenario, Model = "claude-x", Effort = "medium",
+            ClaudePath = "/nowhere/claude", SystemPrompt = ArenaPrompt.Build(repo).Text, Repo = repo,
+            Environment = new Dictionary<string, string?>(), Launcher = plainLauncher,
+        };
+        var plainResult = plain.RunAsync(CancellationToken.None).GetAwaiter().GetResult();
+        check.Equal(ArenaPrompt.UserPrompt, plainLauncher.Started.Count > 0 ? Values(plainLauncher.Started[0].Arguments.ToList(), "-p").Single() : null, "without --brief the first prompt is the plain one");
+        check.That(plainResult.BriefPages is null && plainResult.BriefChars is null && plainResult.BriefMissing.Count == 0, "and the result holds nothing about pages given");
+        check.That(plainResult.ToJson()["brief_pages"] is null && plainResult.ToJson()["brief_chars"] is null && plainResult.ToJson()["brief_missing"] is null, "nor does its line");
+        check.Equal("base", plainResult.Experiment, "the label of a fight without a switch");
+        check.Equal(new ExperimentOptions(), plain.NewGame().Experiments, "and its fight has the simulator's switches off");
+    }
+
+    /// <summary>A launcher that starts nothing: each "session" prints an init line that lists Read
+    /// and the fight's tools and a result line, and has exited with 0, as Claude Code does when the
+    /// model answers without a tool call. It keeps what it was asked to start.</summary>
+    private sealed class NoLauncher : IProcessLauncher
+    {
+        public List<ChildProcessSpec> Started { get; } = [];
+
+        public IChildProcess Start(ChildProcessSpec spec)
+        {
+            Started.Add(spec);
+            return new Ended(
+                new JsonObject
+                {
+                    ["type"] = "system", ["subtype"] = "init", ["model"] = "claude-x", ["claude_code_version"] = "0.0.0-check", ["apiKeySource"] = "none",
+                    ["tools"] = new JsonArray("Read", "mcp__spiremind__act", "mcp__spiremind__wait_for_decision"),
+                    ["mcp_servers"] = new JsonArray(new JsonObject { ["name"] = "spiremind", ["status"] = "connected" }),
+                }.ToJsonString(),
+                new JsonObject
+                {
+                    ["type"] = "result", ["subtype"] = "success", ["is_error"] = false, ["result"] = "Done for now.", ["num_turns"] = 1, ["duration_ms"] = 1,
+                    ["total_cost_usd"] = 0.01, ["usage"] = new JsonObject { ["input_tokens"] = 1, ["output_tokens"] = 1 },
+                }.ToJsonString());
+        }
+
+        private sealed class Ended : IChildProcess
+        {
+            private readonly Channel<string> _output = Channel.CreateUnbounded<string>();
+            private readonly Channel<string> _error = Channel.CreateUnbounded<string>();
+
+            public Ended(params string[] lines)
+            {
+                foreach (var line in lines)
+                    _output.Writer.TryWrite(line);
+                _output.Writer.Complete();
+                _error.Writer.Complete();
+            }
+
+            public int Id => 0;
+            public ChannelReader<string> StandardOutput => _output.Reader;
+            public ChannelReader<string> StandardError => _error.Reader;
+            public Task<int> Exited { get; } = Task.FromResult(0);
+            public bool Interrupt() => true;
+            public void Kill() { }
+            public void Dispose() { }
+        }
+    }
+
+    // ---------- when a fight is already played ----------
+
+    private static FightResult Played(Scenario scenario, string effort, string label, string outcome = Outcomes.Won, string model = "claude-x") => new()
+    {
+        ScenarioId = scenario.Id, Tier = scenario.Tier, Summary = scenario.Summary, Seed = scenario.Seed, Model = model,
+        Effort = effort, Experiment = label, Outcome = outcome,
+    };
+
+    private static void SameFight(Check check)
+    {
+        var weak = new Scenario("weak-1", 1, "weak", "a weak fight");
+        var elite = new Scenario("elite-2", 2, "elite", "an elite");
+        FightResult[] earlier =
+        [
+            Played(weak, "medium", "base"), Played(elite, "medium", "base"),
+            Played(elite, "high", "elite=high", Outcomes.Error),
+        ];
+        bool Skips(string[] switches, Scenario scenario, IReadOnlyList<FightResult>? lines = null, string model = "claude-x") =>
+            RunCommand.AlreadyPlayed(lines ?? earlier, ArenaOptions.Parse(["run", "--models", "claude-x", .. switches]))(scenario, model);
+
+        check.That(Skips([], weak) && Skips([], elite), "the same command again skips what it has played");
+        check.That(!Skips([], weak, model: "claude-y"), "another model's fight isn't skipped");
+        check.That(!Skips(["--effort", "high"], weak) && !Skips(["--effort", "high"], elite), "another effort plays every fight again");
+        check.That(!Skips(["--brief"], weak) && !Skips(["--brief"], elite), "another label plays every fight again, at the same effort too");
+        check.That(!Skips(["--forecast"], weak) && !Skips(["--forecast"], elite) && !Skips(["--brief", "--forecast"], elite), "so does the simulator's switch");
+        // --effort-by-tier elite=high: the weak fight is at medium as in the base run, and still its own fight.
+        check.That(!Skips(["--effort-by-tier", "elite=high"], weak), "a weak fight under elite=high isn't the base run's weak fight");
+        check.That(!Skips(["--effort-by-tier", "elite=high"], elite), "an error is played again");
+
+        FightResult[] more = [.. earlier, Played(weak, "medium", "elite=high"), Played(elite, "high", "elite=high", Outcomes.Lost)];
+        check.That(Skips(["--effort-by-tier", "elite=high"], weak, more) && Skips(["--effort-by-tier", "elite=high"], elite, more), "the tiered batch again skips its own fights");
+        check.That(Skips([], weak, more) && Skips([], elite, more), "and the base run still skips its own");
+        // The same label under another --effort: the elite fight is played at high either way, so it is the same fight.
+        check.That(Skips(["--effort", "low", "--effort-by-tier", "elite=high"], elite, more), "an elite fight at high under elite=high is the same fight whatever --effort is");
+        check.That(!Skips(["--effort", "low", "--effort-by-tier", "elite=high"], weak, more), "the weak fight at low is not the one played at medium");
+        check.That(!Skips(["--effort", "high"], elite, more), "an elite fight at high under base is not the one played under elite=high");
+
+        check.Equal(("elite-2", "claude-x", "high", "elite=high"), more[^1].Identity, "what makes a line the same fight");
+
+        // A line from before there were labels is a base fight.
+        var old = FightResult.FromJson(new JsonObject { ["scenario"] = "weak-1", ["tier"] = "weak", ["model"] = "claude-x", ["effort"] = "medium", ["outcome"] = "won" })!;
+        check.Equal("base", old.Experiment, "the label of a line without one");
+        check.That(Skips([], weak, [old]) && !Skips(["--brief"], weak, [old]), "so the base run skips it and an experiment doesn't");
+
+        // Transcripts: the plain run's name as ever, an experiment's with its label.
+        check.Equal("elite-2__claude-opus-5-5.jsonl", RunCommand.TranscriptName("elite-2", "claude-opus-5-5", "base"), "a plain run's transcript");
+        check.Equal("elite-2__claude-opus-5-5__brief_elite_high_boss_high.jsonl", RunCommand.TranscriptName("elite-2", "claude-opus-5-5", "brief+elite=high+boss=high"), "an experiment's transcript");
+    }
+
+    private static void ExperimentLine(Check check)
+    {
+        var scenario = new Scenario("elite-1", 1, "elite", "an elite");
+        var plain = Line(scenario, Outcomes.Won, 0, 0, [], [], null);
+        var json = plain.ToJson();
+        check.Equal("base", FightResult.Str(json["experiment"]), "a line without a switch says base");
+        var keys = json.Select(pair => pair.Key).ToList();
+        check.Equal(keys.IndexOf("effort") + 1, keys.IndexOf("experiment"), "experiment stands right after effort");
+        check.That(!keys.Any(key => key.StartsWith("brief", StringComparison.Ordinal)), "and has no brief_ fields");
+        check.Equal("medium", plain.BaseEffort, "the --effort of a base line is its effort");
+
+        var switched = plain with
+        {
+            Effort = "high", Experiment = "brief+elite=high",
+            BriefPages = ["strategy/wiki/enemies/byrdonis.md"], BriefChars = 2300, BriefMissing = ["Wriggler"],
+        };
+        var line = switched.ToJson();
+        check.Equal("brief+elite=high", FightResult.Str(line["experiment"]), "experiment in the line");
+        check.Equal("high", FightResult.Str(line["effort"]), "effort in the line");
+        check.Equal("[\"strategy/wiki/enemies/byrdonis.md\"]", line["brief_pages"]!.ToJsonString(), "brief_pages in the line");
+        check.Equal(2300, (int)(FightResult.Long(line["brief_chars"]) ?? -1), "brief_chars in the line");
+        check.Equal("[\"Wriggler\"]", line["brief_missing"]!.ToJsonString(), "brief_missing in the line");
+        var back = FightResult.FromJson((JsonObject)JsonNode.Parse(switched.ToLine())!)!;
+        check.Equal("brief+elite=high", back.Experiment, "experiment read back");
+        check.Sequence(switched.BriefPages!, back.BriefPages ?? [], "brief_pages read back");
+        check.Equal(2300, back.BriefChars ?? -1, "brief_chars read back");
+        check.Sequence(["Wriggler"], back.BriefMissing, "brief_missing read back");
+        // An elite fight under elite=high would have been played at high under any --effort.
+        check.Equal(null, back.BaseEffort, "an elite line under elite=high can't tell the batch's --effort");
+        check.Equal("medium", (back with { Tier = "weak", Effort = "medium" }).BaseEffort, "a weak line under elite=high can");
+
+        // A fight given no page at all still says that it was briefed.
+        var empty = FightResult.FromJson((JsonObject)JsonNode.Parse((plain with { Experiment = "brief", BriefPages = [], BriefChars = 0, BriefMissing = ["Mawler"] }).ToLine())!)!;
+        check.That(empty.BriefPages is { Count: 0 } && empty.BriefChars == 0, "a briefed fight with no page reads back as briefed, with none");
+        check.That(FightResult.FromJson((JsonObject)JsonNode.Parse(plain.ToLine())!)!.BriefPages is null, "and a plain one as not briefed");
+    }
+
+    // ---------- the report, by effort and by label ----------
+
+    // A fight on a scenario no build can generate again (so the report doesn't replay the policies on it).
+    private static FightResult Fought(string id, string tier, string label, string effort, int? hp, string model = "claude-x", string? outcome = null, string? prompt = "0123456789ab") => new()
+    {
+        ScenarioId = id, Tier = tier, Summary = $"a {tier} fight, vs Something ({id})", Model = model, Effort = effort, Experiment = label,
+        Outcome = outcome ?? (hp is null ? Outcomes.Lost : Outcomes.Won), HpLeft = hp ?? 0, MaxHp = 80, Turns = 5, CardsPlayed = 10, PromptHash = prompt, WikiHash = "aaaaaaaaaaaa",
+    };
+
+    private static void EffortGroups(Check check)
+    {
+        // One batch run with --effort medium --effort-by-tier elite=high.
+        FightResult[] tiered =
+        [
+            Fought("weak-x1", "weak", "elite=high", "medium", 70), Fought("elite-x2", "elite", "elite=high", "high", 20),
+        ];
+        check.Sequence([new Report.Player("claude-x", "medium", "elite=high")], Report.PlayersOf(tiered), "a batch with --effort-by-tier is one player, not one per effort");
+        var output = new StringWriter();
+        Report.Print(tiered, output);
+        var header = output.ToString().Split('\n')[0];
+        check.Equal("Arena report: 2 fights on 2 scenarios by 1 model, effort medium (elite high), experiment elite=high.", header.TrimEnd('\r'), "the header of a tiered run's report");
+        var row = output.ToString().Split('\n').Select(line => Columns().Split(line.Trim())).FirstOrDefault(cells => cells[0] == "claude-x" && cells.Length > 10);
+        check.Sequence(["claude-x", "2", "2"], row?.Take(3) ?? [], "its one row: both fights, both won");
+
+        // The same label under two --efforts: two players, and the elite fight (high either way) is in both.
+        FightResult[] twice = [.. tiered, Fought("weak-x1", "weak", "elite=high", "low", 60)];
+        var players = Report.PlayersOf(twice);
+        check.Sequence([new Report.Player("claude-x", "low", "elite=high"), new Report.Player("claude-x", "medium", "elite=high")], players, "the same label under two --efforts");
+        check.That(players.All(p => p.Played(tiered[1])), "the elite fight at high belongs to both");
+        check.That(players[1].Played(tiered[0]) && !players[0].Played(tiered[0]), "the weak fight at medium only to the one at medium");
+        var sheet = new Report.Sheet(twice, null, withLabel: true);
+        check.Sequence(["claude-x (low) [elite=high]", "claude-x (medium) [elite=high]"], sheet.Names, "their names in a table by label");
+        check.Equal(60, sheet.Fight("weak-x1", sheet.Names[0])?.HpLeft ?? -1, "the weak fight of the player at low");
+        check.Equal(70, sheet.Fight("weak-x1", sheet.Names[1])?.HpLeft ?? -1, "the weak fight of the player at medium");
+        check.Equal(3, sheet.All.Count, "every fight once, the shared one too");
+
+        // A label that names every tier played: no line can tell the batch's --effort, and none is needed.
+        check.Sequence([new Report.Player("claude-x", null, "elite=high")], Report.PlayersOf([tiered[1]]), "only fights of a tier the label names");
+        check.Equal("experiment elite=high, effort by tier (elite high)", new Report.Player("claude-x", null, "elite=high").Describe(), "such a player in words");
+        check.Equal("experiment brief, effort medium", new Report.Player("claude-x", "medium", "brief").Describe(), "a player in words");
+
+        // A plain run at two efforts is two players, as it always was.
+        FightResult[] efforts = [Fought("weak-x1", "weak", "base", "high", 70), Fought("weak-x1", "weak", "base", "medium", 65)];
+        check.Sequence(["claude-x (medium)", "claude-x (high)"], new Report.Sheet(efforts, null, withLabel: false).Names, "a model at two efforts, from low to high");
+        check.Sequence(["claude-x"], new Report.Sheet([efforts[0]], null, withLabel: false).Names, "a model at one effort has no effort in its name");
+        // Models keep the order of --models; under each, base comes first.
+        FightResult[] mixed = [Fought("weak-x1", "weak", "brief", "medium", 70, "claude-b"), Fought("weak-x1", "weak", "base", "medium", 70, "claude-b"), Fought("weak-x1", "weak", "brief", "medium", 70, "claude-a")];
+        check.Sequence(["claude-b [base]", "claude-b [brief]", "claude-a [brief]"], new Report.Sheet(mixed, ["claude-b", "claude-a"], withLabel: true).Names, "rows by model, then label");
+    }
+
+    // Six scenarios, played once without a switch and once under --brief. HP left (L is a loss):
+    //            weak-x1  normal-x2  normal-x3  elite-x4  elite-x5  boss-x6
+    //   base       70        40         30         L         12        L
+    //   brief      75        44         30         9         L         3
+    //   brief-base +5        +4          0        +9        -12       +3
+    private static FightResult[] SixFights(string label, int?[] hp, string effort = "medium", string? prompt = "0123456789ab")
+    {
+        (string Id, string Tier)[] scenarios = [("weak-x1", "weak"), ("normal-x2", "normal"), ("normal-x3", "normal"), ("elite-x4", "elite"), ("elite-x5", "elite"), ("boss-x6", "boss")];
+        return scenarios.Select((s, i) => Fought(s.Id, s.Tier, label, effort, hp[i], prompt: prompt)).ToArray();
+    }
+
+    private static readonly int?[] BaseHp = [70, 40, 30, null, 12, null];
+    private static readonly int?[] BriefHp = [75, 44, 30, 9, null, 3];
+
+    // The rows both tables must show for brief against base, after the pair's name. All six:
+    // brief won 5 and base 4; brief had more HP in 4 fights, the same in 1, less in 1; the mean of
+    // +5, +4, 0, +9, -12, +3 is 9/6 = +1.5; the sign test for 4 against 1 is 2 x (1 + 5)/32 = 0.375.
+    private static readonly string[][] BriefAgainstBase =
+    [
+        ["all", "6", "5 vs 4", "4", "1", "1", "+1.5 HP", "0.38"],
+        ["weak", "1", "1 vs 1", "1", "0", "0", "+5.0 HP", "1.00"],     // +5; 1 against 0 is 2 x 1/2
+        ["normal", "2", "2 vs 2", "1", "1", "0", "+2.0 HP", "1.00"],   // +4 and 0
+        ["elite", "2", "1 vs 1", "1", "0", "1", "-1.5 HP", "1.00"],    // +9 and -12; 1 against 1
+        ["boss", "1", "1 vs 0", "1", "0", "0", "+3.0 HP", "1.00"],     // +3
+    ];
+
+    private static void LabelReport(Check check)
+    {
+        var plain = SixFights("base", BaseHp);
+        var brief = SixFights("brief", BriefHp);
+        FightResult[] both = [.. plain, .. brief];
+
+        // The plain report refuses to pool two labels, and says how to see them.
+        var refusal = Report.MixedLabels(both, "results.jsonl");
+        check.Equal("results.jsonl holds fights of 2 experiments (base 6, brief 6). Fights played under different switches are not pooled into one table. " +
+                    "Run report with --by-label to see each model once per label and the labels compared fight by fight.", refusal, "what the plain report says of two labels");
+        check.Equal(null, Report.MixedLabels(plain), "one label is nothing to refuse");
+        var refused = new StringWriter();
+        Report.Print(both, refused);
+        check.Equal(Report.MixedLabels(both) + Environment.NewLine, refused.ToString(), "Print of two labels prints the refusal and no table");
+
+        var one = new StringWriter();
+        Report.Print(brief, one);
+        check.Equal("Arena report: 6 fights on 6 scenarios by 1 model, effort medium, experiment brief.", one.ToString().Split('\n')[0].TrimEnd('\r'), "the header names the experiment");
+        var baseOnly = new StringWriter();
+        Report.Print(plain, baseOnly);
+        check.Equal("Arena report: 6 fights on 6 scenarios by 1 model, effort medium, experiment base.", baseOnly.ToString().Split('\n')[0].TrimEnd('\r'), "also when it is base");
+
+        // The numbers themselves.
+        var pairs = brief.Zip(plain, (first, second) => (first, second)).ToList();
+        check.Equal(new Report.PairStats(6, 5, 4, 4, 1, 1, 1.5, 0.375), Report.PairStats.Of(pairs), "brief against base over the six fights");
+        check.Equal(new Report.PairStats(2, 1, 1, 1, 0, 1, -1.5, 1.0), Report.PairStats.Of(pairs.Where(p => p.first.Tier == "elite").ToList()), "over the two elites");
+        check.Equal(new Report.PairStats(0, 0, 0, 0, 0, 0, 0, 1.0), Report.PairStats.Of([]), "over nothing");
+
+        // report --by-label: a row per label, and the labels compared.
+        var output = new StringWriter();
+        Report.PrintByLabel(both, output);
+        var lines = output.ToString().Split('\n').Select(line => line.TrimEnd('\r')).ToList();
+        check.Equal("Arena report by experiment: 12 fights on 6 scenarios by 1 model under 2 experiments (base, brief).", lines[0], "the header by label");
+        var rows = lines.Select(line => Columns().Split(line.Trim())).ToList();
+        check.Sequence(["claude-x [base]", "6", "4"], rows.FirstOrDefault(cells => cells[0] == "claude-x [base]" && cells.Length > 10)?.Take(3) ?? [], "the base row: 6 fights, 4 won");
+        check.Sequence(["claude-x [brief]", "6", "5"], rows.FirstOrDefault(cells => cells[0] == "claude-x [brief]" && cells.Length > 10)?.Take(3) ?? [], "the brief row: 6 fights, 5 won");
+        PairTable(check, lines, "claude-x [brief] vs claude-x [base]", "by label");
+        check.That(lines.Any(line => line.StartsWith("Paired comparison between experiments:", StringComparison.Ordinal)), "the comparison is announced");
+        check.That(!lines.Any(line => line.StartsWith("Paired comparison: who had more HP", StringComparison.Ordinal)), "and the comparison between models is not printed in its place");
+
+        // One label only: nothing to compare, and it says so.
+        var alone = new StringWriter();
+        Report.PrintByLabel(brief, alone);
+        check.That(alone.ToString().Contains("nothing to compare: every model is here under one label and effort.", StringComparison.Ordinal), "by label with one label");
+
+        // A fight one side gave up on is no pair, and is counted as dropped.
+        FightResult[] gaveUp = [.. plain, .. brief.Select(r => r.ScenarioId == "boss-x6" ? r with { Outcome = Outcomes.Abandoned } : r)];
+        var dropped = new StringWriter();
+        Report.PrintByLabel(gaveUp, dropped);
+        check.That(dropped.ToString().Contains("Pairs dropped: claude-x [brief] vs claude-x [base] 1.", StringComparison.Ordinal), "a pair with an abandoned fight is dropped and counted");
+    }
+
+    // The table of a pair of variants: the pair's own row and one per tier, cell by cell.
+    private static void PairTable(Check check, List<string> lines, string pair, string where)
+    {
+        var at = lines.FindIndex(line => line.Trim().StartsWith(pair + "  ", StringComparison.Ordinal));
+        check.That(at > 0, $"{where}: the table has a row for {pair}");
+        if (at <= 0)
+            return;
+        check.Sequence(["pair", "tier", "fights", "won", "better", "same", "worse", "HP left difference", "sign test p"], Columns().Split(lines[at - 1].Trim()), $"{where}: the table's columns");
+        check.Sequence([pair, .. BriefAgainstBase[0]], Columns().Split(lines[at].Trim()), $"{where}: all six fights");
+        for (var tier = 1; tier < BriefAgainstBase.Length; tier++)
+            check.Sequence(BriefAgainstBase[tier], Columns().Split(lines[at + tier].Trim()), $"{where}: the {BriefAgainstBase[tier][0]} row");
+    }
+
+    private static void Compare(Check check)
+    {
+        var plain = SixFights("base", BaseHp);
+        var brief = SixFights("brief", BriefHp);
+
+        var output = new StringWriter();
+        check.Equal(0, CompareCommand.Print(plain, brief, output, "runs/a", "runs/b"), "compare's exit code");
+        var lines = output.ToString().Split('\n').Select(line => line.TrimEnd('\r')).ToList();
+        check.That(lines.Contains("  A: runs/a") && lines.Contains("     claude-x: experiment base, effort medium, 6 fights that count on 6 scenarios"), "it says what A is");
+        check.That(lines.Contains("  B: runs/b") && lines.Contains("     claude-x: experiment brief, effort medium, 6 fights that count on 6 scenarios"), "and what B is");
+        // B against A is brief against base: the same numbers as by label.
+        PairTable(check, lines, "claude-x: B vs A", "compare");
+        // Won in one and lost in the other: elite-x4 (lost, then won with 9), elite-x5 (won with 12, then lost), boss-x6 (lost, then won with 3).
+        check.That(lines.Contains("3 scenarios' outcomes flipped (won in one run, lost in the other; W and the HP left, L for a loss):"), "it counts the flips");
+        check.Sequence(
+        [
+            "  elite-x4  elite  claude-x  A L -> B W 9  vs Something (elite-x4)",
+            "  elite-x5  elite  claude-x  A W 12 -> B L  vs Something (elite-x5)",
+            "  boss-x6  boss  claude-x  A L -> B W 3  vs Something (boss-x6)",
+        ], lines.Where(line => line.Contains(" -> B ", StringComparison.Ordinal)), "the scenarios whose outcome flipped");
+        check.That(!lines.Any(line => line.StartsWith("Note:", StringComparison.Ordinal)), "same notes, same wiki, two variants: nothing to warn of");
+        check.That(!lines.Any(line => line.Contains("Scenarios left out", StringComparison.Ordinal)), "and nothing left out");
+
+        // The other way round every sign turns.
+        var turned = new StringWriter();
+        CompareCommand.Print(brief, plain, turned);
+        var all = turned.ToString().Split('\n').Select(line => Columns().Split(line.Trim())).FirstOrDefault(cells => cells[0] == "claude-x: B vs A");
+        check.Sequence(["claude-x: B vs A", "all", "6", "4 vs 5", "1", "1", "4", "-1.5 HP", "0.38"], all ?? [], "base against brief");
+
+        // What a pair needs: both fights played to the end. And what only one run has is counted.
+        FightResult[] shorter = [.. brief.Take(4), brief[4] with { Outcome = Outcomes.Timeout }];
+        var partial = new StringWriter();
+        CompareCommand.Print(plain, shorter, partial);
+        check.That(partial.ToString().Contains("claude-x: 1 only A has, 0 only B has, 1 that a side didn't play to the end", StringComparison.Ordinal), "what was left out of the pairs: " +
+            partial.ToString().Split('\n').FirstOrDefault(line => line.Contains("left out", StringComparison.Ordinal)));
+        var four = partial.ToString().Split('\n').Select(line => Columns().Split(line.Trim())).FirstOrDefault(cells => cells[0] == "claude-x: B vs A");
+        // weak +5, normal +4 and 0, elite-x4 +9: 18/4 = +4.5; 3 better, 1 the same; 3 against 0 is 2 x 1/8.
+        check.Sequence(["claude-x: B vs A", "all", "4", "4 vs 3", "3", "1", "0", "+4.5 HP", "0.25"], four ?? [], "the four pairs that are left");
+
+        // Two runs of the same variant show how much a fight varies, not what a switch does; other notes are a warning.
+        var again = new StringWriter();
+        CompareCommand.Print(plain, SixFights("base", BriefHp, prompt: "ba9876543210"), again);
+        check.That(again.ToString().Contains("Note: A and B hold claude-x as the same variant (experiment base, effort medium)", StringComparison.Ordinal), "the same variant twice is said to be");
+        check.That(again.ToString().Contains("Note: the two runs were played with different system prompts (A 0123456789ab; B ba9876543210)", StringComparison.Ordinal), "and so are different prompts");
+
+        // Refusals: no model in common, a model that isn't in both, a folder with two variants of a model.
+        var none = new StringWriter();
+        check.Equal(1, CompareCommand.Print(plain, brief.Select(r => r with { Model = "claude-y" }).ToList(), none), "no model in common");
+        check.That(none.ToString().StartsWith("The two runs share no model (A: claude-x; B: claude-y)", StringComparison.Ordinal), "and it says so");
+        check.Equal(1, CompareCommand.Print(plain, brief, new StringWriter(), model: "claude-y"), "--model names a model that isn't there");
+        check.Equal(0, CompareCommand.Print(plain, brief, new StringWriter(), model: "claude-x"), "--model names the one that is");
+        var two = new StringWriter();
+        check.Equal(1, CompareCommand.Print([.. plain, .. brief], brief, two, "runs/a", "runs/b"), "a folder with two variants of the model");
+        check.That(two.ToString().StartsWith("A (runs/a) holds claude-x in 2 variants (experiment base, effort medium; experiment brief, effort medium)", StringComparison.Ordinal),
+            "and it says which: " + two.ToString().Split('\n')[0]);
+    }
+
     // ---------- helpers ----------
 
     // The values after a flag that takes several, up to the next flag.
@@ -482,7 +1103,8 @@ public sealed partial class RunnerChecks : IArenaChecks
             return _link;
         }
 
-        private void Write(string file, string text)
+        /// <summary>Writes a file of the checkout, by its path from the checkout's root.</summary>
+        public void Write(string file, string text)
         {
             var path = System.IO.Path.Combine(Path, file.Replace('/', System.IO.Path.DirectorySeparatorChar));
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);

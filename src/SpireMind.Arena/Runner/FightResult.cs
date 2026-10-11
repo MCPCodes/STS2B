@@ -31,6 +31,128 @@ public static class Outcomes
     public const string Error = "error";
 }
 
+/// <summary>
+/// What a position run adds to its result line, as the object <c>position</c>: which position
+/// of which recorded fight the session took over, how the run went on from there (the recorded
+/// deal or one of its own), and what the session did on the position's turn.
+/// </summary>
+public sealed record PositionInfo
+{
+    public const string Recorded = "recorded", Reshuffled = "reshuffled";
+
+    /// <summary>The player turn the session took over at the start of, from 1.</summary>
+    public required int Turn { get; init; }
+
+    /// <summary>The run's number among the position's runs, from 1.</summary>
+    public required int Run { get; init; }
+
+    /// <summary><c>--reshuffle</c>: the run went on with its own deal of what the player cannot
+    /// know (<see cref="DealSeed"/>), not with the recorded fight's.</summary>
+    public bool Reshuffle { get; init; }
+
+    /// <summary>The seed the unseen cards and the random numbers to come were dealt from
+    /// (<see cref="PositionStart.DealSeed"/>); null for the recorded deal.</summary>
+    public int? DealSeed { get; init; }
+
+    /// <summary>12 hex digits that stand for the position's first snapshot
+    /// (<see cref="PositionStart.StateHash"/>).</summary>
+    public string StateHash { get; init; } = "";
+
+    /// <summary>The player's HP at the position.</summary>
+    public int HpAtStart { get; init; }
+
+    /// <summary>Recorded actions applied to reach the position, and recorded snapshots the
+    /// rebuilt fight was compared with on the way.</summary>
+    public int ReplayedActions { get; init; }
+    public int SnapshotsChecked { get; init; }
+
+    /// <summary>The run the recording is from: its folder, the model that played it, how its
+    /// fight ended, and what it did on this turn (the actions' labels, in order).</summary>
+    public string? SourceFolder { get; init; }
+    public string? SourceModel { get; init; }
+    public string? SourceOutcome { get; init; }
+    public int? SourceHpLeft { get; init; }
+    public IReadOnlyList<string> SourceLine { get; init; } = [];
+
+    /// <summary>What this run's session did on the position's turn: the labels of the actions
+    /// that ran, in order (<see cref="ActionLog"/>), and their ids.</summary>
+    public IReadOnlyList<string> Line { get; init; } = [];
+    public IReadOnlyList<string> LineIds { get; init; } = [];
+
+    /// <summary>The session ended that turn (or the fight ended in it). False when it stopped
+    /// in the middle of it, so <see cref="Line"/> is only the turn's beginning.</summary>
+    public bool LineComplete { get; init; }
+
+    /// <summary>"recorded" or "reshuffled".</summary>
+    public string Mode => Reshuffle ? Reshuffled : Recorded;
+
+    /// <summary>A turn's actions as one line for a table: "Defend, Defend, Cinder on Vantom".
+    /// The word "Play" is left off each card, and the closing "End turn" off the line.</summary>
+    public static string Words(IReadOnlyList<string> labels)
+    {
+        var parts = labels.Select(label => label.StartsWith("Play ", StringComparison.Ordinal) ? label[5..] : label).ToList();
+        if (parts.Count > 0 && parts[^1] == "End turn")
+            parts.RemoveAt(parts.Count - 1);
+        return parts.Count == 0 ? "(ended the turn at once)" : string.Join(", ", parts);
+    }
+
+    public JsonObject ToJson()
+    {
+        var json = new JsonObject
+        {
+            ["turn"] = Turn,
+            ["run"] = Run,
+            ["mode"] = Mode,
+        };
+        if (DealSeed is { } seed) json["deal_seed"] = seed;
+        json["state_hash"] = StateHash;
+        json["hp_at_start"] = HpAtStart;
+        json["replayed_actions"] = ReplayedActions;
+        json["snapshots_checked"] = SnapshotsChecked;
+        json["from"] = new JsonObject
+        {
+            ["results"] = SourceFolder,
+            ["model"] = SourceModel,
+            ["outcome"] = SourceOutcome,
+            ["hp_left"] = SourceHpLeft,
+            ["line"] = Array(SourceLine),
+        };
+        json["line"] = Array(Line);
+        json["line_ids"] = Array(LineIds);
+        json["line_complete"] = LineComplete;
+        return json;
+
+        static JsonArray Array(IReadOnlyList<string> items) => new(items.Select(item => (JsonNode)JsonValue.Create(item)!).ToArray());
+    }
+
+    /// <summary>Reads the object back; null when it has no turn.</summary>
+    public static PositionInfo? FromJson(JsonObject? json)
+    {
+        if (json is null || FightResult.Long(json["turn"]) is not { } turn)
+            return null;
+        var from = json["from"] as JsonObject;
+        return new PositionInfo
+        {
+            Turn = (int)turn,
+            Run = (int)(FightResult.Long(json["run"]) ?? 1),
+            Reshuffle = FightResult.Str(json["mode"]) == Reshuffled,
+            DealSeed = (int?)FightResult.Long(json["deal_seed"]),
+            StateHash = FightResult.Str(json["state_hash"]) ?? "",
+            HpAtStart = (int)(FightResult.Long(json["hp_at_start"]) ?? 0),
+            ReplayedActions = (int)(FightResult.Long(json["replayed_actions"]) ?? 0),
+            SnapshotsChecked = (int)(FightResult.Long(json["snapshots_checked"]) ?? 0),
+            SourceFolder = FightResult.Str(from?["results"]),
+            SourceModel = FightResult.Str(from?["model"]),
+            SourceOutcome = FightResult.Str(from?["outcome"]),
+            SourceHpLeft = (int?)FightResult.Long(from?["hp_left"]),
+            SourceLine = FightResult.Strings(from?["line"]),
+            Line = FightResult.Strings(json["line"]),
+            LineIds = FightResult.Strings(json["line_ids"]),
+            LineComplete = json["line_complete"] is JsonValue done && done.TryGetValue<bool>(out var complete) && complete,
+        };
+    }
+}
+
 /// <summary>Token counts of one fight, with Claude Code's own field names in the JSON.</summary>
 public sealed record TokenCounts(long Input, long CacheCreation, long CacheRead, long Output);
 
@@ -54,7 +176,21 @@ public sealed record FightResult
     /// <summary>The model ids Claude Code says it used (the keys of its <c>modelUsage</c>).</summary>
     public IReadOnlyList<string> ModelsUsed { get; init; } = [];
 
+    /// <summary>The effort the fight's sessions were started with: <c>--effort</c>, or what
+    /// <c>--effort-by-tier</c> names for the fight's tier.</summary>
     public string Effort { get; init; } = "";
+
+    /// <summary>The label of the run's experiment (<see cref="ExperimentLabel"/>): the switches
+    /// that were on, "base" for none and for every line from before there were any.</summary>
+    public string Experiment { get; init; } = ExperimentLabel.Base;
+
+    /// <summary>
+    /// Present on the line of a position run (<c>arena position</c>): the session took a
+    /// recorded fight over at the start of a turn instead of playing the scenario from its
+    /// first. Null for a whole fight. The two are never counted together: a whole fight's
+    /// tables and its "already played" rule leave position runs out, and the other way round.
+    /// </summary>
+    public PositionInfo? Position { get; init; }
 
     /// <summary>One of <see cref="Outcomes"/>.</summary>
     public required string Outcome { get; init; }
@@ -90,6 +226,17 @@ public sealed record FightResult
 
     /// <summary>Every other file the model asked Read for (see <see cref="StreamWatch.OtherReads"/>).</summary>
     public IReadOnlyList<string> OtherReads { get; init; } = [];
+
+    /// <summary>Under <c>--brief</c>: the wiki pages the fight's first message held, as the
+    /// prompt's index names them (<see cref="WikiBrief.Pages"/>). Null without the switch, and
+    /// for a fight that failed before its first session was started.</summary>
+    public IReadOnlyList<string>? BriefPages { get; init; }
+
+    /// <summary>The length of those pages' text together, in characters.</summary>
+    public int? BriefChars { get; init; }
+
+    /// <summary>The enemies of the fight the wiki had no page for, by name.</summary>
+    public IReadOnlyList<string> BriefMissing { get; init; } = [];
 
     /// <summary>From the start of the session to the end of the fight (or of the session, when
     /// the fight never ended). The time Claude Code takes to wind down afterwards isn't in it.</summary>
@@ -183,6 +330,24 @@ public sealed record FightResult
     /// <summary>HP left as the report scores it: 0 unless the fight was won.</summary>
     public int HpScore => Won ? HpLeft : 0;
 
+    /// <summary>
+    /// The <c>--effort</c> of the batch that played this fight, when the line can tell: its own
+    /// <see cref="Effort"/>, unless the label names an effort for the fight's tier
+    /// (<see cref="ExperimentLabel.TierEffort"/>), in which case the fight would have been the
+    /// same under any <c>--effort</c> and this is null.
+    /// </summary>
+    public string? BaseEffort => ExperimentLabel.TierEffort(Experiment, Tier) is null ? Effort : null;
+
+    /// <summary>What makes two lines the same fight: the scenario, the model, the effort it was
+    /// played at and the experiment's label. A batch skips a fight its folder already holds a
+    /// result for by this, so variants in one folder never skip or replace each other.</summary>
+    public (string Scenario, string Model, string Effort, string Experiment) Identity => (ScenarioId, Model, Effort, Experiment);
+
+    /// <summary>The position a position run played, as what makes two runs runs of the same
+    /// position: the scenario, the turn and the position's state hash. Null for a whole fight.</summary>
+    public (string Scenario, int Turn, string StateHash)? PositionKey =>
+        Position is { } position ? (ScenarioId, position.Turn, position.StateHash) : null;
+
     /// <summary>Output tokens of every model the session used, from <see cref="ModelUsage"/> when
     /// it is there (it also counts a helper model), else from <see cref="Tokens"/>.</summary>
     public long? OutputTokens
@@ -248,6 +413,7 @@ public sealed record FightResult
             ["model"] = Model,
             ["models_used"] = new JsonArray(ModelsUsed.Select(m => (JsonNode)JsonValue.Create(m)!).ToArray()),
             ["effort"] = Effort,
+            ["experiment"] = Experiment,
             ["outcome"] = Outcome,
             ["hp_left"] = HpLeft,
             ["max_hp"] = MaxHp,
@@ -256,6 +422,7 @@ public sealed record FightResult
             ["cards_played"] = CardsPlayed,
             ["refused_actions"] = RefusedActions,
         };
+        if (Position is not null) json["position"] = Position.ToJson();
         var calls = new JsonObject();
         foreach (var (name, count) in ToolCalls.OrderBy(c => c.Key, StringComparer.Ordinal))
             calls[name] = count;
@@ -265,6 +432,12 @@ public sealed record FightResult
         json["read_errors"] = ReadErrors;
         json["wiki_pages"] = new JsonArray(WikiPages.Select(p => (JsonNode)JsonValue.Create(p)!).ToArray());
         json["other_reads"] = new JsonArray(OtherReads.Select(p => (JsonNode)JsonValue.Create(p)!).ToArray());
+        if (BriefPages is not null)
+        {
+            json["brief_pages"] = new JsonArray(BriefPages.Select(p => (JsonNode)JsonValue.Create(p)!).ToArray());
+            json["brief_chars"] = BriefChars ?? 0;
+            json["brief_missing"] = new JsonArray(BriefMissing.Select(p => (JsonNode)JsonValue.Create(p)!).ToArray());
+        }
         json["wall_seconds"] = Math.Round(WallSeconds, 1);
         json["resumes"] = Resumes;
         json["cli_duration_ms"] = CliDurationMs;
@@ -327,6 +500,8 @@ public sealed record FightResult
             Model = model,
             ModelsUsed = Strings(json["models_used"]),
             Effort = Str(json["effort"]) ?? "",
+            Experiment = Str(json["experiment"]) is { Length: > 0 } label ? label : ExperimentLabel.Base,
+            Position = PositionInfo.FromJson(json["position"] as JsonObject),
             Outcome = outcome,
             HpLeft = (int)(Long(json["hp_left"]) ?? 0),
             MaxHp = (int)(Long(json["max_hp"]) ?? 0),
@@ -340,6 +515,9 @@ public sealed record FightResult
             ReadErrors = (int)(Long(json["read_errors"]) ?? 0),
             WikiPages = Strings(json["wiki_pages"]),
             OtherReads = Strings(json["other_reads"]),
+            BriefPages = json["brief_pages"] is JsonArray ? Strings(json["brief_pages"]) : null,
+            BriefChars = (int?)Long(json["brief_chars"]),
+            BriefMissing = Strings(json["brief_missing"]),
             WallSeconds = Number(json["wall_seconds"]) ?? 0,
             Resumes = (int)(Long(json["resumes"]) ?? 0),
             CliDurationMs = Long(json["cli_duration_ms"]),
@@ -418,6 +596,6 @@ public sealed record FightResult
         return null;
     }
 
-    private static string[] Strings(JsonNode? node) =>
+    internal static string[] Strings(JsonNode? node) =>
         node is JsonArray array ? array.Select(Str).OfType<string>().ToArray() : [];
 }

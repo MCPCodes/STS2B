@@ -21,6 +21,12 @@ namespace SpireMind.Arena;
 /// difference is given a cause it can be told by from what happened before it; one that fits
 /// none is listed as unexplained, and the check fails on any.
 /// </para>
+/// <para>
+/// The forecast experiment's promises are held to the same way (HonestyForecast.cs): before
+/// every "end_turn" of these same fights each enemy's forecast is worked out, whether or not a
+/// snapshot shows it, and every entry is compared with what the enemy then does, in the fight
+/// as it is played and on a copy of it in which the player only passes.
+/// </para>
 /// </summary>
 public static partial class Honesty
 {
@@ -44,6 +50,9 @@ public static partial class Honesty
         public List<string> TurnLimit { get; } = new();
 
         public int Won;
+
+        /// <summary>What the forecasts promised and kept (HonestyForecast.cs).</summary>
+        public ForecastCounts Forecast { get; } = new();
 
         public bool Passed => Unexplained.Count == 0 && Errors.Count == 0 && Refused == 0;
 
@@ -81,6 +90,7 @@ public static partial class Honesty
                 }
             }
         }
+        JudgeChances(report);
         return report;
     }
 
@@ -93,6 +103,8 @@ public static partial class Honesty
         var where = $"{scenario.Id}, {policy.Name}";
         report.Fights++;
         log?.Invoke($"== {where}: {scenario.Summary}");
+
+        var forecasts = new ForecastWatch(where, report);
 
         // An action that opens a card choice is run again from its start once the choice is
         // answered, so its promise waits here until the action is really through.
@@ -108,6 +120,7 @@ public static partial class Honesty
                 choice = snapshot.Actions.Any(a => a.Id == "end_turn") ? "end_turn" : snapshot.Actions[0].Id;
             }
             report.Decisions++;
+            if (waiting is null && snapshot.Screen == "combat" && choice == "end_turn") forecasts.BeforeEndTurn(fight, snapshot);
             waiting ??= Promise.Note(fight, snapshot, choice, where);
 
             events.Clear();
@@ -125,9 +138,12 @@ public static partial class Honesty
                 foreach (var e in events) log("    " + Describe(fight, e));
             }
             if (fight.HasPendingChoice) continue;
+            forecasts.AfterAction(events);
+            if (waiting is TurnPromise) forecasts.AfterEndTurn(fight, events);
             waiting?.Judge(fight, events, report);
             waiting = null;
         }
+        forecasts.Close();
         if (!fight.IsOver) report.Unexplained.Add($"{where}: the fight did not end in {MostDecisions} decisions");
         if (fight.TimedOut) report.TurnLimit.Add($"{where} ({scenario.Summary})");
         if (fight.Won) report.Won++;

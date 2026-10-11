@@ -35,6 +35,22 @@ public sealed partial class Fight
         return Math.Max(0m, amount);
     }
 
+    /// <summary>
+    /// The same chain without its last step: all additions, then all factors, no cap. The
+    /// forecast (Sim/Forecast.cs) compares it with <see cref="ModifyDamage"/> to see whether a
+    /// cap decides today's number, as the mod does with the game's own preview. No real hit uses it.
+    /// </summary>
+    internal decimal ModifyDamageUncapped(Creature? target, Creature? dealer, decimal amount, ValueProp props, CardInstance? cardSource)
+    {
+        var list = RentListeners();
+        foreach (var l in list)
+            if (StillListening(l)) amount += l.ModifyDamageAdditive(this, target, amount, props, dealer, cardSource);
+        foreach (var l in list)
+            if (StillListening(l)) amount *= l.ModifyDamageMultiplicative(this, target, amount, props, dealer, cardSource);
+        ReturnListeners(list);
+        return Math.Max(0m, amount);
+    }
+
     private decimal ModifyHpLost(Creature target, decimal amount, ValueProp props, Creature? dealer, CardInstance? cardSource, bool afterOsty)
     {
         var list = RentListeners();
