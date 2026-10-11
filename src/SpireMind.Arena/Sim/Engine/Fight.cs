@@ -31,12 +31,12 @@ public sealed partial class Fight
             ? registry.NewEncounter(config.Encounter ?? throw new ArgumentException("A fight needs an encounter or monsters."))
             : null;
         _info = new FightInfo(
-            config.Deck.ToArray(),
+            config.Run is { } run ? run.Deck.Select(c => (c.Def, c.IsUpgraded)).ToArray() : config.Deck.ToArray(),
             encounter?.Slots ?? config.Slots,
             encounter?.RoomType ?? config.RoomType,
             encounter?.ClassName ?? config.Encounter ?? "Custom",
             config.Floor, config.Seed, config.MaxTurns);
-        _s = new FightState { Rng = new RngSet(config.Seed) };
+        _s = new FightState { Rng = config.Rng ?? new RngSet(config.Seed) };
         StartCombat(config, encounter);
     }
 
@@ -190,18 +190,21 @@ public sealed partial class Fight
         _s.Relics.AddRange(config.ExtraRelics);
         for (var i = 0; i < _s.Potions.Length && i < config.Potions.Length; i++)
             _s.Potions[i] = config.Potions[i] is { } name ? registry.Potion(name) : null;
+        // In a run the relics, the belt, the gold and the deck are the run's instead (Fight.Run.cs).
+        if (config.Run is not null) TakeFromRun(config.Run);
 
         // 2 and 3. The line-up, created one by one; each HP roll avoids the values already taken.
         var lineUp = config.Monsters ?? encounter!.GenerateMonsters(_s.Rng.Encounter).Select(m => new PlacedMonster(m.Monster, m.Slot)).ToList();
         foreach (var placed in lineUp) CreateCreature(placed.Monster, placed.Slot, placed.Hp);
 
         // 4. The draw pile is the deck in deck order, shuffled once without sorting first (R7).
-        foreach (var entry in config.Deck)
+        foreach (var entry in config.Run is null ? config.Deck : [])
         {
             var card = NewCard(entry.Def, entry.Upgraded);
             card.Pile = PileType.Draw;
             _s.Draw.Add(card);
         }
+        if (config.Run is not null) DrawPileFromDeck();
         if (config.ShuffleDeck) _s.Rng.Shuffle.Shuffle(_s.Draw);
 
         foreach (var enemy in _s.Enemies.ToList())

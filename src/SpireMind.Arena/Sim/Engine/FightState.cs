@@ -51,11 +51,34 @@ internal sealed class FightConfig
     public List<Relic> ExtraRelics { get; init; } = new();
     public int MaxTurns { get; init; } = Tuning.MaxTurns;
 
+    // ---------- run mode (Sim/Run) ----------
+
+    /// <summary>What a run hands the fight: its deck cards, relic objects, belt and gold. When set, the
+    /// fight takes its own copies; <see cref="Deck"/>, <see cref="Potions"/>, <see cref="Relics"/> and
+    /// <see cref="ExtraRelics"/> are not read.</summary>
+    public RunHandOver? Run { get; init; }
+
+    /// <summary>The fight's random streams, when they are not to be made from <see cref="Seed"/>.
+    /// The fight owns the object from here on.</summary>
+    public RngSet? Rng { get; init; }
+
     public static FightConfig From(FightSetup s) => new()
     {
         Deck = s.Deck.Select(c => (Content.Registry.Card(c.ClassName), c.Upgraded)).ToList(), Hp = s.Hp, MaxHp = s.MaxHp, Potions = s.Potions.ToArray(), Encounter = s.Encounter, Floor = s.Floor, Seed = s.Seed,
     };
 }
+
+/// <summary>
+/// What a run hands a fight when it starts, and what the fight hands back when it is over. HP and
+/// max HP travel beside it (<see cref="FightConfig.Hp"/>, the player's creature).
+/// </summary>
+/// <param name="Deck">The deck cards in deck order (pile Deck).</param>
+/// <param name="Relics">The relic objects in pickup order, with whatever they have counted so far.</param>
+/// <param name="Belt">The belt slot by slot, null for an empty slot; its length is the number of slots.</param>
+/// <param name="Gold">The player's gold.</param>
+/// <param name="NextDeckCardId">The id the next card added to the deck gets, so that ids are never used twice in a run.</param>
+internal sealed record RunHandOver(
+    IReadOnlyList<CardInstance> Deck, IReadOnlyList<Relic> Relics, IReadOnlyList<PotionDef?> Belt, int Gold, int NextDeckCardId);
 
 /// <summary>What never changes during a fight; clones share it.</summary>
 internal sealed record FightInfo(IReadOnlyList<(CardDef Def, bool Upgraded)> Deck, IReadOnlyList<string> Slots, RoomType RoomType, string EncounterName, int Floor, int Seed, int MaxTurns);
@@ -80,6 +103,12 @@ internal sealed class FightState
 
     public List<Relic> Relics = new();
     public PotionDef?[] Potions = new PotionDef?[3];
+
+    /// <summary>Run mode: the fight's own copies of the run's deck cards, in deck order (pile Deck). Empty in a single fight.</summary>
+    public List<CardInstance> Deck = new();
+
+    /// <summary>Run mode: the player's gold, and the id the next card added to the deck gets.</summary>
+    public int Gold, NextDeckCardId = 1;
 
     public int Energy;
     public int BaseMaxEnergy = 3;
@@ -116,6 +145,7 @@ internal sealed class FightState
             NextCardId = NextCardId, NextCreatureId = NextCreatureId, NextPlayId = NextPlayId, NextAttackId = NextAttackId,
             EffectDepth = EffectDepth, CardsPlayed = CardsPlayed, DamageTaken = DamageTaken, VictoryHeal = VictoryHeal,
             Potions = (PotionDef?[])Potions.Clone(),
+            Gold = Gold, NextDeckCardId = NextDeckCardId,
         };
 
         // The roster holds every enemy, also the ones that left the list, so clone through it.
@@ -134,6 +164,7 @@ internal sealed class FightState
         CopyPile(Play, copy.Play, m);
 
         foreach (var r in Relics) copy.Relics.Add(r.CloneFor(m));
+        foreach (var c in Deck) copy.Deck.Add(c.CloneFor(m));
 
         m.Finish();
         return copy;

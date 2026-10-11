@@ -161,18 +161,19 @@ public static class Scenarios
     /// <summary>Hallway fights, elites and bosses all offer this many cards; the player takes at most one.</summary>
     internal const int CardsPerReward = 3;
 
-    internal const float RegularRareOdds = 0.03f;
-    internal const float RegularUncommonOdds = 0.37f;
-    internal const float EliteRareOdds = 0.10f;
-    internal const float EliteUncommonOdds = 0.40f;
+    // The odds themselves, and the rolls on them, are the run's (Sim/Run/RunOdds.cs): these are its numbers.
+    internal const float RegularRareOdds = CardRarityOdds.RegularRare;
+    internal const float RegularUncommonOdds = CardRarityOdds.RegularUncommon;
+    internal const float EliteRareOdds = CardRarityOdds.EliteRare;
+    internal const float EliteUncommonOdds = CardRarityOdds.EliteUncommon;
 
     /// <summary>The pity offset a run starts with, and returns to after every Rare card rolled.</summary>
-    internal const float BaseRarityOffset = -0.05f;
+    internal const float BaseRarityOffset = CardRarityOdds.BaseOffset;
 
     /// <summary>What the offset grows by after every card rolled that is not Rare.</summary>
-    internal const float RarityGrowth = 0.01f;
+    internal const float RarityGrowth = CardRarityOdds.Growth;
 
-    internal const float MaxRarityOffset = 0.4f;
+    internal const float MaxRarityOffset = CardRarityOdds.MaxOffset;
 
     /// <summary>A reward card that is not Rare comes upgraded with this chance times the act's index. Act 1 has index 0.</summary>
     internal const decimal UpgradeChancePerAct = 0.25m;
@@ -186,12 +187,12 @@ public static class Scenarios
     internal const int PotionSlots = 3;
 
     /// <summary>The drop chance a run starts with; it moves by <see cref="PotionOddsStep"/> after every roll, down after a drop.</summary>
-    internal const float BasePotionOdds = 0.4f;
+    internal const float BasePotionOdds = PotionOdds.Base;
 
-    internal const float PotionOddsStep = 0.1f;
+    internal const float PotionOddsStep = PotionOdds.Step;
 
     /// <summary>The elite bonus as the game's constant has it; the roll adds half of it.</summary>
-    internal const float PotionEliteBonus = 0.25f;
+    internal const float PotionEliteBonus = PotionOdds.EliteBonus;
 
     /// <summary>A dropped potion is Rare at or below this roll.</summary>
     internal const float PotionRareThreshold = 0.1f;
@@ -231,9 +232,9 @@ public static class Scenarios
     // Game: what an Unknown room turns out to be (run-generation.md 1.4)
     // =====================================================================================
 
-    internal const float UnknownMonsterOdds = 0.10f;
-    internal const float UnknownTreasureOdds = 0.02f;
-    internal const float UnknownShopOdds = 0.03f;
+    internal const float UnknownMonsterOdds = UnknownRoomOdds.BaseMonster;
+    internal const float UnknownTreasureOdds = UnknownRoomOdds.BaseTreasure;
+    internal const float UnknownShopOdds = UnknownRoomOdds.BaseShop;
 
     // =====================================================================================
     // DERIVED: the rooms of a path (run-generation.md 1.3). The game builds a whole map; these
@@ -691,18 +692,19 @@ public static class Scenarios
     /// </summary>
     internal static Room RollUnknown(bool afterShop, ref float monsterOdds, ref float treasureOdds, ref float shopOdds, GameRng rng)
     {
-        var roll = rng.NextFloat();
-        var room = Room.Event;
-        var sum = monsterOdds;
-        if (roll <= sum) room = Room.Monster;
-        else if (roll <= (sum += treasureOdds)) room = Room.Treasure;
-        else if (!afterShop && roll <= sum + shopOdds) room = Room.Shop;
-
-        monsterOdds = room == Room.Monster ? UnknownMonsterOdds : monsterOdds + UnknownMonsterOdds;
-        treasureOdds = room == Room.Treasure ? UnknownTreasureOdds : treasureOdds + UnknownTreasureOdds;
-        if (room == Room.Shop) shopOdds = UnknownShopOdds;
-        else if (!afterShop) shopOdds += UnknownShopOdds;
-        return room;
+        // The run's own odds object does the roll (Sim/Run/RunOdds.cs); a scenario only carries the three numbers.
+        var odds = new UnknownRoomOdds(monsterOdds, UnknownRoomOdds.BaseElite, treasureOdds, shopOdds);
+        var rolled = odds.Roll(rng, UnknownRoomOdds.Allowed(shopBarred: afterShop));
+        monsterOdds = odds.Monster;
+        treasureOdds = odds.Treasure;
+        shopOdds = odds.Shop;
+        return rolled switch
+        {
+            RolledRoom.Monster => Room.Monster,
+            RolledRoom.Treasure => Room.Treasure,
+            RolledRoom.Shop => Room.Shop,
+            _ => Room.Event,
+        };
     }
 
     /// <summary>Which room of the path the scenario is about; null when the path has none for the tier.</summary>
@@ -910,12 +912,9 @@ public static class Scenarios
     /// </summary>
     internal static CardRarity RollRarity(bool elite, ref float offset, GameRng rng)
     {
-        var roll = rng.NextFloat();
-        var rare = (elite ? EliteRareOdds : RegularRareOdds) + offset;
-        var rarity = roll < rare ? CardRarity.Rare
-            : roll < (elite ? EliteUncommonOdds : RegularUncommonOdds) + rare ? CardRarity.Uncommon
-            : CardRarity.Common;
-        offset = rarity == CardRarity.Rare ? BaseRarityOffset : Math.Min(offset + RarityGrowth, MaxRarityOffset);
+        var odds = new CardRarityOdds(offset);
+        var rarity = odds.Roll(rng, elite ? CardOddsType.Elite : CardOddsType.Regular);
+        offset = odds.Offset;
         return rarity;
     }
 
@@ -959,14 +958,10 @@ public static class Scenarios
     /// </summary>
     internal static bool RollPotionDrop(bool elite, ref float odds, GameRng rng)
     {
-        var needed = odds + (elite ? PotionEliteBonus : 0f) * 0.5f;
-        if (rng.NextFloat() < needed)
-        {
-            odds -= PotionOddsStep;
-            return true;
-        }
-        odds += PotionOddsStep;
-        return false;
+        var potionOdds = new PotionOdds(odds);
+        var dropped = potionOdds.Roll(rng, elite);
+        odds = potionOdds.Chance;
+        return dropped;
     }
 
     /// <summary>

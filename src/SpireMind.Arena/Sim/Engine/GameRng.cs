@@ -136,6 +136,25 @@ public sealed class RngSet
         Encounter = For(seed, "encounter");
     }
 
+    /// <summary>
+    /// The streams of a fight of a run, made by the run (RunStreams.LendToFight): its own long
+    /// streams as they stand, so this fight goes on where the last one stopped, and the
+    /// encounter's own stream as the game seeds it. The set owns the streams it is given.
+    /// </summary>
+    public RngSet(GameRng shuffle, GameRng monsterAi, GameRng niche, GameRng combatTargets, GameRng combatCardSelection,
+        GameRng combatCardGeneration, GameRng combatPotionGeneration, GameRng combatEnergyCosts, GameRng encounter)
+    {
+        Shuffle = shuffle;
+        MonsterAi = monsterAi;
+        Niche = niche;
+        CombatTargets = combatTargets;
+        CombatCardSelection = combatCardSelection;
+        CombatCardGeneration = combatCardGeneration;
+        CombatPotionGeneration = combatPotionGeneration;
+        CombatEnergyCosts = combatEnergyCosts;
+        Encounter = encounter;
+    }
+
     private RngSet(RngSet o)
     {
         Shuffle = o.Shuffle.Clone();

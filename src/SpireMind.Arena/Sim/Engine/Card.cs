@@ -242,6 +242,13 @@ public sealed class CardInstance
     /// a determinized clone leaves it there.</summary>
     internal bool KnownPosition { get; set; }
 
+    /// <summary>
+    /// Run mode: the id of the deck card this combat card was made from when the fight started
+    /// (the game's DeckVersion); see <see cref="Fight.DeckVersionOf"/>. 0 for a card that has
+    /// none: one made during the fight, a copy of another card, and every card of a single fight.
+    /// </summary>
+    public int DeckCardId { get; internal set; }
+
     /// <summary>The card's hook object, when its definition has one.</summary>
     public CardBehaviour? Behaviour { get; private set; }
 
@@ -361,6 +368,7 @@ public sealed class CardInstance
             Pile = o.Pile;
             ExhaustOnNextPlay = o.ExhaustOnNextPlay;
             KnownPosition = o.KnownPosition;
+            DeckCardId = o.DeckCardId;
         }
     }
 
@@ -374,6 +382,18 @@ public sealed class CardInstance
             copy.Behaviour = Behaviour.CloneFor(map);
             copy.Behaviour.Card = copy;
         }
+        return copy;
+    }
+
+    /// <summary>
+    /// Run mode: the combat card made from this deck card when a fight starts. The game clones
+    /// the deck card as it is (upgrade, numbers, hook state) and remembers it as the clone's deck
+    /// version; the clone is in no pile yet.
+    /// </summary>
+    internal CardInstance CombatCopy(int newId)
+    {
+        var copy = new CardInstance(this, newId, keepPile: false) { DeckCardId = Id };
+        if (Behaviour is not null) copy.Behaviour = Behaviour.CopyFor(copy);
         return copy;
     }
 
