@@ -9,7 +9,7 @@ using M = MegaCrit.Sts2.Core.Models.Monsters;
 namespace SpireMind.Game;
 
 /// <summary>
-/// "next" for an enemy in a combat snapshot: the moves it makes after the intent it is showing,
+/// "next_moves" for an enemy in a combat snapshot: the moves it makes after the intent it is showing,
 /// as far as they are certain, in the words <see cref="Describe.Intents"/> uses for the shown
 /// one. Read from the live move machine (docs/forecast.md): a move's follow-up is plain data,
 /// a random pick's chances follow from its weights and the move log, and a conditional branch
@@ -21,7 +21,7 @@ namespace SpireMind.Game;
 /// </summary>
 internal static class Forecast
 {
-    /// <summary>The note that goes with "next" in a snapshot, once per snapshot.</summary>
+    /// <summary>The note that goes with "next_moves" in a snapshot, once per snapshot.</summary>
     public const string Hint =
         "next_moves = this enemy's moves after its shown intent, in order and only as far as they are certain "
         + "(a last entry with % is a random pick at exactly those chances); the list ends where the move after "

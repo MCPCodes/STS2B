@@ -21,7 +21,7 @@ None of this has run in a live fight. It is built against v0.107.1 (0 warnings),
 
 The note to show with it, once per snapshot, is `Forecast.Hint`:
 
-> next = this enemy's moves after its shown intent, in order and only as far as they are certain (a last entry with % is a random pick at exactly those chances); the list ends where the move after depends on what happens in the fight, and no next means unknown, not nothing. A number already counts the Strength the enemy gains by then and otherwise assumes today's Weak, Vulnerable and other modifiers; ~ marks one that something already in play will change. What you do can replace the list: a stun, waking it, or an HP threshold or death named in its powers.
+> next_moves = this enemy's moves after its shown intent, in order and only as far as they are certain (a last entry with % is a random pick at exactly those chances); the list ends where the move after depends on what happens in the fight, and no next_moves means unknown, not nothing. A number already counts the Strength the enemy gains by then and otherwise assumes today's Weak, Vulnerable and other modifiers; ~ marks one that something already in play will change. What you do can replace the list: a stun, waking it, or an HP threshold or death named in its powers.
 
 It says that the enemy's own Strength gains are already counted, so the model does not add Territorial or a buff move a second time. It does not say that a summon replaces a list (the first draft did): a summon adds an enemy and changes nobody's moves, except where a living count decides a branch, and there the list has already stopped.
 
