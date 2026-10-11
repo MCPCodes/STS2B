@@ -84,6 +84,13 @@ Sources disagree on several rules. Items marked (unverified) should be confirmed
 - **Damage carry:** the deck with the best scaling engine gets the damage relics and Coordinate, Believe in You and Tag Team targets.
 - **Everyone still needs their own block.** Personal Block isn't shared unless a card says so.
 
+## Your turn with a teammate
+- **They act in the same window as you.** While you plan, a teammate can give you Block or Energy, buff you, debuff an enemy, hit your target or kill it. A plan made from one snapshot can be stale two cards later.
+- **Decide Block last, from a fresh snapshot.** A teammate's Lift, Rally or Block Potion changes how much you still need. Play your attacks and debuffs first, then look at your Block and incoming_damage again before you spend cards on defense.
+- **Keep sequences short while a teammate hasn't ended their turn** (team[].ended_turn is false). A few cards, then look again. Once everyone else has ended, the board only changes from your own plays and a whole-turn sequence is safe.
+- **When act_sequence stops with "A teammate acted: ...", re-plan.** It says what changed (your Block 0 -> 11, an enemy gone) and returns the fresh snapshot in next. Plan the rest of the turn from that snapshot, not from your old plan. An act sent on an older snapshot is refused the same way.
+- The game side is adding a field to the snapshot that lists what teammates did since you last looked. Read it when it shows up.
+
 ## How a good AI teammate behaves
 1. **Complement, don't copy.**
    - Before each card pick, check what the humans' decks lack (AoE, block, draw, debuffs, Artifact strip, a boss answer). Draft to fill that gap.
