@@ -302,8 +302,13 @@ internal sealed class RestSiteReader : IScreen
         {
             var boss = Describe.SafeText(() => act.BossEncounter?.Title);
             if (boss.Length > 0) state["boss"] = boss;
-            var second = Describe.SafeText(() => act.SecondBossEncounter?.Title);
-            if (second.Length > 0) state["second_boss"] = second;
+            // As on the map: Golden Compass and Spoils maps have no second boss node even when the
+            // act rolled a second boss, so only name one the map will actually lead to.
+            if (rs.Map?.SecondBossMapPoint is not null)
+            {
+                var second = Describe.SafeText(() => act.SecondBossEncounter?.Title);
+                if (second.Length > 0) state["second_boss"] = second;
+            }
         }
 
         state["player"] = player;
