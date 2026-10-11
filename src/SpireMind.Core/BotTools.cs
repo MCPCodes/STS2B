@@ -156,8 +156,9 @@ public sealed partial class BotTools
             "It stops early when a label is gone, the screen changes any other way, your turn ends, " +
             "an action is refused or changes nothing, the game doesn't settle, a chat message arrives or you are paused. " +
             "In a fight with teammates they play at the same time, so before each step it also checks what they changed: your Block, " +
-            "energy, HP or powers, a planned target's HP, Block or powers, which enemies are alive, incoming_damage. On such a change it " +
-            "stops with \"A teammate acted: ...\" and you plan the rest of the turn from next; keep sequences short while teammates " +
+            "energy, HP or powers, a planned target's HP, Block or powers, which enemies are alive, incoming_damage, and new state.team_since " +
+            "lines with team_changed. On such a change it stops with \"A teammate acted: ...\" (those lines, else the numbers) and you plan " +
+            "the rest of the turn from next; keep sequences short while teammates " +
             "haven't ended their turn, and Block last. End a sequence after " +
             "any card or potion that draws, discovers, creates or transforms cards, has a random result you need to see, opens a pick from a " +
             "pile or ends your turn (a card that asks for hand cards and then draws, like Burning Pact: after its picks), and plan the rest " +
@@ -386,8 +387,10 @@ public sealed partial class BotTools
             if (start is null)
                 return Rejected(why!, current);
         }
-        // In a fight with teammates, every step first looks for what they changed (TeammateChanges).
+        // In a fight with teammates, every step first looks for what they changed (TeammateChanges)
+        // and for what the game's record says they did that the model hasn't seen (TeamSeen).
         var coop = IsCoopFight(current);
+        var seen = coop ? new TeamSeen(start, current) : null;
         OwnStep? opener = null;
 
         var done = new JsonArray();
@@ -419,22 +422,29 @@ public sealed partial class BotTools
                 if (stopped is null && coop)
                 {
                     // What changed while the last step ran that its card doesn't explain, then
-                    // anything at all that changed since it settled.
+                    // anything at all that changed since it settled. Each snapshot is also read for
+                    // team_since lines the model hasn't seen that touched something, which name
+                    // what happened better than the numbers do, so they win when both show.
                     var own = OwnStep.Of(last, opener);
                     if (last.Id.StartsWith("play:", StringComparison.Ordinal))
                         opener = own;
                     var targets = Targets(ids.Skip(k));
                     var changes = TeammateChanges(last.Before, last.After, own, targets);
-                    if (changes is null)
+                    var news = seen!.Check(last.After);
+                    if (changes is null && news is null)
                     {
                         // The settle wait can take a while (a teammate's card resolving), so
                         // /stop, /pause and chat are looked at again after it.
                         current = await FreshAsync(last.After, ct);
                         stopped = Drift(current, start, pick) ?? HumanStop(stops);
-                        changes = stopped is null ? TeammateChanges(last.After, current, own: null, targets) : null;
+                        if (stopped is null)
+                        {
+                            changes = TeammateChanges(last.After, current, own: null, targets);
+                            news = seen.Check(current);
+                        }
                     }
-                    if (changes is not null)
-                        stopped = $"A teammate acted: {changes}. Plan the rest of your turn from next.";
+                    if ((news ?? changes) is { } acted)
+                        stopped = $"A teammate acted: {acted}. Plan the rest of your turn from next.";
                 }
                 if (stopped is null && pick && current.Screen != HandSelect)
                 {

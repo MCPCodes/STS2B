@@ -60,6 +60,13 @@ public class CoopActTests
         public List<string> Executed { get; } = [];
         public List<string> Potions { get; } = [];
 
+        /// <summary>state.team_since in a fight, left out while empty or <see cref="Solo"/>. The
+        /// game side clears lines on the bot's own action; this fake keeps them until a test does.</summary>
+        public List<string> TeamSince { get; } = [];
+
+        /// <summary>state.team_changed: a line touched the bot, its pet or an enemy.</summary>
+        public bool TeamChanged { get; set; }
+
         /// <summary>Runs with the last action's id on the second capture after it: with no settle
         /// time the first is the step's own settled snapshot, so this lands after the step settled,
         /// right before the next step looks at the game again.</summary>
@@ -118,6 +125,11 @@ public class CoopActTests
             {
                 ["i"] = i, ["name"] = c.Name, ["cost"] = c.Cost.ToString(), ["type"] = c.Type, ["text"] = c.Text, ["playable"] = true,
             }).ToArray());
+            if (!Solo && TeamSince.Count > 0)
+            {
+                state["team_since"] = new JsonArray(TeamSince.Select(t => (JsonNode)JsonValue.Create(t)!).ToArray());
+                if (TeamChanged) state["team_changed"] = true;
+            }
 
             if (Screen == "hand_select")
             {
@@ -554,6 +566,268 @@ public class CoopActTests
         Assert.Equal(["play:0>e0", "play:0"], game.Executed);
     }
 
+    // ---- act_sequence and the game's record of what the others did (team_since) ----
+
+    private const string Lift = "Mark played Lift on you: +11 Block";
+    private const string Bash = "Mark played Bash on Jaw Worm (e0): 8 damage, 2 Vulnerable";
+
+    [Fact]
+    public void A_new_line_that_touched_the_bot_stops_with_its_text_rather_than_the_numbers()
+    {
+        var game = new CoopFight(CoopFight.Strike, CoopFight.Defend, CoopFight.Defend);
+        game.OnExecute = id =>
+        {
+            if (id != "play:0>e0") return;
+            game.Block += 11;
+            game.TeamSince.Add(Lift);
+            game.TeamChanged = true;
+        };
+        var tools = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), "play:0>e0", "play:1", "play:2");
+
+        Assert.Equal(["play:0>e0"], game.Executed);
+        Assert.Equal($"A teammate acted: {Lift}. Plan the rest of your turn from next.", Stopped(outcome));
+        Assert.Equal(["play:1", "play:2"], NotRun(outcome));
+    }
+
+    [Fact]
+    public void A_new_line_about_an_enemy_the_plan_leaves_alone_stops_too()
+    {
+        // The numbers only watch the planned targets; the record's team_changed covers every enemy.
+        var game = new CoopFight(CoopFight.Defend, CoopFight.Strike);
+        game.Enemies.Add(new Enemy("Louse", 20));
+        game.OnExecute = id =>
+        {
+            if (id != "play:0") return;
+            game.Hit(0, 8);
+            game.Enemies[0].Powers["Vulnerable"] = 2;
+            game.TeamSince.Add(Bash);
+            game.TeamChanged = true;
+        };
+        var tools = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), "play:0", "play:1>e1");
+
+        Assert.Equal(["play:0"], game.Executed);
+        Assert.Equal($"A teammate acted: {Bash}. Plan the rest of your turn from next.", Stopped(outcome));
+    }
+
+    [Fact]
+    public void Lines_the_model_planned_with_do_not_stop_the_sequence()
+    {
+        // The game side clears them with the first step; this fake keeps them, as an ignored
+        // hand-over would, and they are still old news.
+        var game = new CoopFight(CoopFight.Strike, CoopFight.Defend, CoopFight.Defend) { Block = 11 };
+        game.TeamSince.Add(Lift);
+        game.TeamChanged = true;
+        var tools = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), "play:0>e0", "play:1", "play:2");
+
+        Assert.Null(Stopped(outcome));
+        Assert.Equal(3, game.Executed.Count);
+    }
+
+    [Fact]
+    public void A_new_line_without_team_changed_does_not_stop_the_sequence()
+    {
+        // Mark blocking for himself is not the bot's business.
+        var game = new CoopFight(CoopFight.Strike, CoopFight.Defend);
+        game.OnExecute = id =>
+        {
+            if (id != "play:0>e0") return;
+            game.MateBlock = 5;
+            game.TeamSince.Add("Mark played Defend: Mark +5 Block");
+        };
+        var tools = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), "play:0>e0", "play:1");
+
+        Assert.Null(Stopped(outcome));
+        Assert.Equal(["play:0>e0", "play:0"], game.Executed);
+    }
+
+    [Fact]
+    public void The_left_out_line_is_never_news()
+    {
+        // Nine lines the model planned with, shown as the newest seven; one more pushes the oldest
+        // of those out and raises the count.
+        var earlier = Enumerable.Range(1, 9).Select(n => $"Mark played Defend: Mark +{n} Block").ToList();
+        var game = new CoopFight(CoopFight.Strike, CoopFight.Defend, CoopFight.Defend);
+        game.TeamSince.AddRange(["(2 earlier lines left out)", .. earlier.Skip(2)]);
+        game.OnExecute = id =>
+        {
+            if (id != "play:0>e0") return;
+            game.TeamSince.Clear();
+            game.TeamSince.AddRange(["(3 earlier lines left out)", .. earlier.Skip(3), Lift]);
+            game.TeamChanged = true;
+        };
+        var tools = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), "play:0>e0", "play:1", "play:2");
+
+        Assert.Equal(["play:0>e0"], game.Executed);
+        Assert.Equal($"A teammate acted: {Lift}. Plan the rest of your turn from next.", Stopped(outcome));
+    }
+
+    [Fact]
+    public void A_new_line_like_one_that_slid_out_of_view_is_still_news()
+    {
+        // The Defend line the model saw slides out of the window, and Mark plays another Defend
+        // that reads the same: the left-out count says the old one is gone from view.
+        const string defend = "Mark played Defend: Mark +5 Block";
+        var others = Enumerable.Range(1, 6).Select(n => $"Mark played Shrug It Off {n}: Mark +8 Block").ToList();
+        var game = new CoopFight(CoopFight.Strike, CoopFight.Defend, CoopFight.Defend);
+        game.TeamSince.AddRange(["(2 earlier lines left out)", defend, .. others]);
+        game.OnExecute = id =>
+        {
+            if (id != "play:0>e0") return;
+            game.TeamSince.Clear();
+            game.TeamSince.AddRange(["(4 earlier lines left out)", .. others.Skip(1), defend, Lift]);
+            game.TeamChanged = true;
+        };
+        var tools = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), "play:0>e0", "play:1", "play:2");
+
+        Assert.Equal(["play:0>e0"], game.Executed);
+        Assert.Equal($"A teammate acted: {defend}; {Lift}. Plan the rest of your turn from next.", Stopped(outcome));
+    }
+
+    [Fact]
+    public void A_new_line_does_not_stop_while_a_line_the_model_planned_with_may_have_set_team_changed()
+    {
+        // The first step left the Lift in place (the game side kept it), so team_changed may be
+        // the Lift's: Mark ending his turn and taking it back are no news for the bot.
+        var game = new CoopFight(CoopFight.Strike, CoopFight.Defend, CoopFight.Defend) { Block = 11 };
+        game.TeamSince.Add(Lift);
+        game.TeamChanged = true;
+        game.OnExecute = id =>
+        {
+            if (game.Executed.Count == 1) game.TeamSince.Add("Mark ended their turn");
+            if (game.Executed.Count == 2) game.TeamSince.Add("Mark took back their end of turn");
+        };
+        var tools = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), "play:0>e0", "play:1", "play:2");
+
+        Assert.Null(Stopped(outcome));
+        Assert.Equal(3, game.Executed.Count);
+    }
+
+    [Fact]
+    public void A_line_after_the_first_step_cleared_the_planned_ones_stops_though_they_had_team_changed()
+    {
+        // The first step cleared the Lift, so team_changed after it is about what came since.
+        var game = new CoopFight(CoopFight.Strike, CoopFight.Defend, CoopFight.Defend) { Block = 11 };
+        game.TeamSince.Add(Lift);
+        game.TeamChanged = true;
+        game.OnExecute = id =>
+        {
+            if (id != "play:0>e0") return;
+            game.TeamSince.Clear();
+            game.TeamSince.Add(Bash);
+        };
+        var tools = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), "play:0>e0", "play:1", "play:2");
+
+        Assert.Equal(["play:0>e0"], game.Executed);
+        Assert.Equal($"A teammate acted: {Bash}. Plan the rest of your turn from next.", Stopped(outcome));
+    }
+
+    [Fact]
+    public void Lines_a_sequence_on_an_older_snapshot_ran_past_are_not_news_later()
+    {
+        // The current snapshot's Defend line touched nothing, so the sequence runs from the older
+        // one, and the first step keeps it (it came less than 700 ms after the board changed).
+        const string defend = "Mark played Defend: Mark +5 Block";
+        var game = new CoopFight(CoopFight.Defend, CoopFight.Defend);
+        var tools = Build(game);
+        var version = Version(tools);
+        game.MateBlock = 5;
+        game.TeamSince.Add(defend);
+        game.OnExecute = id =>
+        {
+            if (game.Executed.Count != 1) return;
+            game.TeamSince.Add(Bash);
+            game.TeamChanged = true;
+        };
+
+        var outcome = Sequence(tools, version, "play:0", "play:1");
+
+        Assert.Equal(["play:0"], game.Executed);
+        Assert.Equal($"A teammate acted: {Bash}. Plan the rest of your turn from next.", Stopped(outcome));
+    }
+
+    [Fact]
+    public void A_line_judged_after_one_step_is_not_judged_again()
+    {
+        // After the first step a line comes that touched nothing, so the sequence goes on. After
+        // the second, one that did: only that one is news.
+        var game = new CoopFight(CoopFight.Defend, CoopFight.Defend, CoopFight.Strike);
+        game.OnExecute = id =>
+        {
+            if (game.Executed.Count == 1)
+            {
+                game.MateBlock = 5;
+                game.TeamSince.Add("Mark played Defend: Mark +5 Block");
+            }
+            if (game.Executed.Count == 2)
+            {
+                game.Hit(0, 8);
+                game.Enemies[0].Powers["Vulnerable"] = 2;
+                game.TeamSince.Add(Bash);
+                game.TeamChanged = true;
+            }
+        };
+        var tools = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), "play:0", "play:1", "play:2>e0");
+
+        Assert.Equal(["play:0", "play:0"], game.Executed);
+        Assert.Equal($"A teammate acted: {Bash}. Plan the rest of your turn from next.", Stopped(outcome));
+        Assert.Equal(["play:2>e0"], NotRun(outcome));
+    }
+
+    [Fact]
+    public void A_line_that_touched_something_after_a_step_settled_stops_the_sequence()
+    {
+        // Seen in the capture taken before the next step; no number the plan watches moved.
+        const string weak = "Mark played Neutralize on Jaw Worm (e0): 1 Weak";
+        var game = new CoopFight(CoopFight.Defend, CoopFight.Strike);
+        game.Enemies.Add(new Enemy("Louse", 20));
+        game.BetweenSteps = id =>
+        {
+            if (id != "play:0") return;
+            game.TeamSince.Add(weak);
+            game.TeamChanged = true;
+        };
+        var tools = Build(game, settle: TimeSpan.Zero);
+
+        var outcome = Sequence(tools, Version(tools), "play:0", "play:1>e1");
+
+        Assert.Equal(["play:0"], game.Executed);
+        Assert.Equal($"A teammate acted: {weak}. Plan the rest of your turn from next.", Stopped(outcome));
+    }
+
+    [Fact]
+    public void Numbers_with_no_new_line_still_stop_with_the_numbers()
+    {
+        // The Lift was planned with; 6 more Block came with no line yet.
+        var game = new CoopFight(CoopFight.Strike, CoopFight.Defend, CoopFight.Defend) { Block = 11 };
+        game.TeamSince.Add(Lift);
+        game.TeamChanged = true;
+        game.OnExecute = id => { if (id == "play:0>e0") game.Block += 6; };
+        var tools = Build(game);
+
+        var outcome = Sequence(tools, Version(tools), "play:0>e0", "play:1", "play:2");
+
+        Assert.Equal(["play:0>e0"], game.Executed);
+        Assert.Equal("A teammate acted: your Block 11 -> 17. Plan the rest of your turn from next.", Stopped(outcome));
+    }
+
     // ---- act ----
 
     [Fact]
@@ -586,6 +860,69 @@ public class CoopActTests
         Assert.Equal("A teammate acted since that snapshot: your Block 0 -> 11. Nothing was done; plan from the current snapshot.",
             outcome.Payload["error"]!.GetValue<string>());
         Assert.Equal(11, outcome.Payload["current"]!["state"]!["me"]!["block"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public void An_act_on_an_older_snapshot_is_refused_with_a_new_line_that_touched_something()
+    {
+        // Mark hit an enemy the Defend has nothing to do with: no number the act rests on moved,
+        // but the record says a teammate touched the board since the model's snapshot.
+        var game = new CoopFight(CoopFight.Strike, CoopFight.Defend);
+        var tools = Build(game);
+        var version = Version(tools);
+        game.Hit(0, 8);
+        game.Enemies[0].Powers["Vulnerable"] = 2;
+        game.TeamSince.Add(Bash);
+        game.TeamChanged = true;
+
+        var outcome = Act(tools, version, "play:1");
+        var sequence = Sequence(tools, version, "play:1", "play:0>e0");
+
+        var why = $"A teammate acted since that snapshot: {Bash}. Nothing was done; plan from the current snapshot.";
+        Assert.True(outcome.IsError);
+        Assert.Equal(why, outcome.Payload["error"]!.GetValue<string>());
+        Assert.Equal(why, sequence.Payload["error"]!.GetValue<string>());
+        Assert.Empty(game.Executed);
+    }
+
+    [Fact]
+    public void An_act_on_an_older_snapshot_runs_past_lines_it_had_or_that_touched_nothing()
+    {
+        // The line was in the model's snapshot already.
+        var game = new CoopFight(CoopFight.Strike, CoopFight.Defend) { Block = 11 };
+        game.TeamSince.Add(Lift);
+        game.TeamChanged = true;
+        var tools = Build(game);
+        var version = Version(tools);
+        game.MateBlock = 7;
+        Assert.False(Act(tools, version, "play:1").IsError);
+
+        // A new line, but team_changed isn't set: Mark blocked for himself.
+        game = new CoopFight(CoopFight.Strike, CoopFight.Defend);
+        tools = Build(game);
+        version = Version(tools);
+        game.MateBlock = 5;
+        game.TeamSince.Add("Mark played Defend: Mark +5 Block");
+        Assert.False(Act(tools, version, "play:1").IsError);
+        Assert.Equal(["play:1"], game.Executed);
+    }
+
+    [Fact]
+    public void An_act_on_an_older_snapshot_runs_past_a_new_line_while_its_own_lines_set_team_changed()
+    {
+        // The Lift was in the model's snapshot and nothing cleared it, so team_changed in the
+        // current one may be the Lift's alone: Mark ending his turn touched nothing.
+        var game = new CoopFight(CoopFight.Strike, CoopFight.Defend) { Block = 11 };
+        game.TeamSince.Add(Lift);
+        game.TeamChanged = true;
+        var tools = Build(game);
+        var version = Version(tools);
+        game.TeamSince.Add("Mark ended their turn");
+
+        var outcome = Act(tools, version, "play:1");
+
+        Assert.False(outcome.IsError);
+        Assert.Equal(["play:1"], game.Executed);
     }
 
     [Fact]
