@@ -497,13 +497,7 @@ internal sealed class RestSiteReader : IScreen
         };
 
         // What the next boss is decides between resting and which card to upgrade.
-        if (rs.Act is { } act)
-        {
-            var boss = Describe.SafeText(() => act.BossEncounter?.Title);
-            if (boss.Length > 0) state["boss"] = boss;
-            var second = Describe.SafeText(() => act.SecondBossEncounter?.Title);
-            if (second.Length > 0) state["second_boss"] = second;
-        }
+        Describe.AddBosses(state, rs);
 
         state["player"] = player;
         state["potions"] = PotionActions.Describe(ctx, false);

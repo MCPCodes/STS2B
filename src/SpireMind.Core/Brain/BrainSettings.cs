@@ -33,6 +33,23 @@ public sealed record BrainSettings
     public const string ApiKeyEnvVar = "ANTHROPIC_API_KEY";
     public const string DefaultModel = "claude-opus-5-5";
     public const string DefaultEffort = "medium";
+
+    /// <summary>The effort of elite and boss rooms when config.json doesn't set one, raised to
+    /// <see cref="Effort"/> when that is higher (see <see cref="EffortFor"/>).</summary>
+    public const string DefaultFightEffort = "high";
+
+    /// <summary>The value of <see cref="EliteEffort"/> or <see cref="BossEffort"/> (and of a JSON
+    /// null in config.json) that means "the normal effort".</summary>
+    public const string SameEffort = "same";
+
+    /// <summary>Clears a fight effort back to <see cref="DefaultFightEffort"/> (/effort boss default).</summary>
+    public const string DefaultWord = "default";
+
+    /// <summary>The room types (the game's RoomType names, run.room in a snapshot) with an effort of their own.</summary>
+    public const string EliteRoom = "Elite";
+
+    /// <inheritdoc cref="EliteRoom"/>
+    public const string BossRoom = "Boss";
     public const decimal DefaultMonthlyBudgetUsd = 200m;
 
     /// <summary>The range config.json's max_tokens accepts: below the minimum a reply has no room
@@ -63,6 +80,8 @@ public sealed record BrainSettings
     private readonly decimal _budget = DefaultMonthlyBudgetUsd;
     private readonly int? _maxTokens;
     private readonly string? _sharedConfigDir;
+    private readonly string? _eliteEffort;
+    private readonly string? _bossEffort;
 
     /// <summary>The folder holding config.json, api_key, spend.json and transcripts.</summary>
     public string ConfigDir { get; init; } = DefaultConfigDir;
@@ -101,6 +120,24 @@ public sealed record BrainSettings
         init => _effort = TryParseEffort(value, out var effort)
             ? effort
             : throw new ArgumentException($"Effort must be one of {string.Join(", ", Efforts)}.", nameof(Effort));
+    }
+
+    /// <summary>The effort while the bot is in an elite room (elite_effort in config.json): one of
+    /// <see cref="Efforts"/>, used as it is; <see cref="SameEffort"/> for <see cref="Effort"/>; or
+    /// null (the key left out) for <see cref="DefaultFightEffort"/>, or <see cref="Effort"/> when
+    /// that is higher. Other values throw <see cref="ArgumentException"/>; check with
+    /// <see cref="TryParseFightEffort"/> first. See <see cref="EffortFor"/>.</summary>
+    public string? EliteEffort
+    {
+        get => _eliteEffort;
+        init => _eliteEffort = CheckFightEffort(value, nameof(EliteEffort));
+    }
+
+    /// <summary>Like <see cref="EliteEffort"/>, for boss rooms (boss_effort in config.json).</summary>
+    public string? BossEffort
+    {
+        get => _bossEffort;
+        init => _bossEffort = CheckFightEffort(value, nameof(BossEffort));
     }
 
     /// <summary>The mod's own monthly cap in US dollars, compared against spend.json. Zero
@@ -218,8 +255,11 @@ public sealed record BrainSettings
     /// config.json.bak so a hand edit with a typo isn't lost. Throws <see cref="IOException"/>
     /// or <see cref="UnauthorizedAccessException"/> when the file can't be written.
     ///
-    /// An instance writes only model, effort and autostart (all the chat commands change) into
-    /// its own config.json, keeping every other key there, and never writes the shared file.
+    /// An instance writes only what the chat commands change (model, effort, elite_effort,
+    /// boss_effort and autostart) into its own config.json, keeping every other key there, and
+    /// never writes the shared file. A fight effort back at its default is left out of this
+    /// copy's file, or written as "default" when the shared file sets one, so the shared value
+    /// can't come back on the next load.
     /// </summary>
     public void Save()
     {
@@ -230,6 +270,8 @@ public sealed record BrainSettings
         {
             json["model"] = Model;
             json["effort"] = Effort;
+            SetFightEffort(json, "elite_effort", EliteEffort);
+            SetFightEffort(json, "boss_effort", BossEffort);
             json["autostart"] = Autostart;
             ConfigFiles.WriteJson(path, json);
             return;
@@ -238,6 +280,8 @@ public sealed record BrainSettings
         SetOrRemove(json, "repo", Repo);
         json["model"] = Model;
         json["effort"] = Effort;
+        SetOrRemove(json, "elite_effort", EliteEffort);
+        SetOrRemove(json, "boss_effort", BossEffort);
         json["monthly_budget_usd"] = MonthlyBudgetUsd;
         if (MaxTokens is { } maxTokens) json["max_tokens"] = maxTokens;
         else json.Remove("max_tokens");
@@ -294,6 +338,49 @@ public sealed record BrainSettings
         return false;
     }
 
+    /// <summary>True when <paramref name="text"/> (any case, trimmed) is a value
+    /// <see cref="EliteEffort"/> and <see cref="BossEffort"/> take: a level, <see cref="SameEffort"/>,
+    /// or <see cref="DefaultWord"/> (and null), which gives null.</summary>
+    public static bool TryParseFightEffort(string? text, out string? effort)
+    {
+        var word = text?.Trim().ToLowerInvariant() ?? DefaultWord;
+        effort = null;
+        if (word == DefaultWord)
+            return true;
+        if (word == SameEffort || Efforts.Contains(word))
+        {
+            effort = word;
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// The effort for a request made in <paramref name="room"/> (a RoomType name, or null):
+    /// the elite or boss effort in those rooms (<see cref="EliteEffort"/>, <see cref="BossEffort"/>),
+    /// <see cref="Effort"/> everywhere else. A fight effort the human chose is used as it is, lower
+    /// than the normal effort too; the default one is <see cref="DefaultFightEffort"/> but never
+    /// lower than <see cref="Effort"/>.
+    /// </summary>
+    public string EffortFor(string? room) =>
+        string.Equals(room, EliteRoom, StringComparison.OrdinalIgnoreCase) ? FightEffort(EliteEffort)
+        : string.Equals(room, BossRoom, StringComparison.OrdinalIgnoreCase) ? FightEffort(BossEffort)
+        : Effort;
+
+    private string FightEffort(string? fight) => fight switch
+    {
+        null => Rank(Effort) >= Rank(DefaultFightEffort) ? Effort : DefaultFightEffort,
+        SameEffort => Effort,
+        _ => fight,
+    };
+
+    private static int Rank(string effort) => Efforts.ToList().IndexOf(effort);
+
+    private static string? CheckFightEffort(string? value, string name) =>
+        TryParseFightEffort(value, out var effort)
+            ? effort
+            : throw new ArgumentException($"{name} must be one of {string.Join(", ", Efforts)}, {SameEffort} or {DefaultWord}.", name);
+
     /// <summary>The settings for logs and /budget, with the key shown only as where it came from.</summary>
     public override string ToString()
     {
@@ -309,6 +396,7 @@ public sealed record BrainSettings
         if (IsInstance)
             sb.Append(CultureInfo.InvariantCulture, $"SharedConfigDir = {SharedConfigDir}, ");
         sb.Append(CultureInfo.InvariantCulture, $"Model = {Model}, Effort = {Effort}, ");
+        sb.Append(CultureInfo.InvariantCulture, $"EliteEffort = {EliteEffort ?? "default"}, BossEffort = {BossEffort ?? "default"}, ");
         sb.Append(CultureInfo.InvariantCulture, $"MonthlyBudgetUsd = {MonthlyBudgetUsd}, MaxTokens = {MaxTokens?.ToString(CultureInfo.InvariantCulture) ?? "by effort"}, Autostart = {Autostart}, ");
         sb.Append(CultureInfo.InvariantCulture, $"Repo = {Repo ?? "(none)"}, ClaudePath = {ClaudePath ?? "(none)"}, ApiKey = {key} }}");
         return sb.ToString();
@@ -364,6 +452,22 @@ public sealed record BrainSettings
                         else
                             warnings.Add($"effort '{effortText}' isn't one of {string.Join(", ", Efforts)}; using {DefaultEffort}.");
                     }
+                    break;
+
+                case "elite_effort":
+                case "boss_effort":
+                    // JSON null means the normal effort, like "same"; a left-out key means the default.
+                    string? fight;
+                    if (node is null)
+                        fight = SameEffort;
+                    else if (node is JsonValue f && f.TryGetValue<string>(out var fightText) && TryParseFightEffort(fightText, out var parsed))
+                        fight = parsed;
+                    else
+                    {
+                        warnings.Add($"{name} must be one of {string.Join(", ", Efforts)} or {SameEffort}; using {DefaultFightEffort}.");
+                        fight = null;
+                    }
+                    s = name == "elite_effort" ? s with { EliteEffort = fight } : s with { BossEffort = fight };
                     break;
 
                 case "monthly_budget_usd":
@@ -458,6 +562,18 @@ public sealed record BrainSettings
     /// ASCII without spaces or quotes. Says nothing about whether the API accepts it.</summary>
     internal static bool LooksLikeKey(string key) =>
         key.Length > 0 && key.All(c => c > ' ' && c < 127 && c is not '"' and not '\'');
+
+    // An instance's elite_effort or boss_effort. Null (the default) is a left-out key, unless the
+    // shared config.json sets that key, which would then win on the next load.
+    private void SetFightEffort(JsonObject json, string name, string? value)
+    {
+        if (value is not null)
+            json[name] = value;
+        else if (ReadConfig(SharedConfigPath, SharedConfigPath, []) is { } shared && shared.ContainsKey(name))
+            json[name] = DefaultWord;
+        else
+            json.Remove(name);
+    }
 
     private static void SetOrRemove(JsonObject json, string name, string? value)
     {

@@ -8,7 +8,8 @@ namespace SpireMind.Game;
 /// and the subscription fallback and owns /start, /stop, /budget, /model and /effort. It also
 /// hooks game exit, so a Claude Code child never outlives the game. In co-op the
 /// <see cref="InstanceRole"/> decides who plays: a bot copy starts its brain by itself, and the
-/// human copy's brain stays off while bot copies exist or the run is co-op.
+/// human copy's brain stays off in a co-op run or lobby (solo play is as before, also while bot
+/// copies are still running).
 ///
 /// Uses only Core, System and Godot types, so it compiles without the game. Everything here
 /// is wrapped: a failure only loses the brain, never the bridge or the chat.
@@ -42,13 +43,17 @@ internal static class BrainWiring
     /// <param name="role">This copy in co-op (<see cref="InstanceRole.Detect"/>): its own config
     /// folder and the shared one, its run journal, and whether it is a bot copy, whose brain
     /// starts by itself.</param>
-    /// <param name="botsExist">True while the co-op relay sees bot copies. The human copy's
-    /// brain stays off then. Called under the controller's lock, so it must return at once.</param>
+    /// <param name="inCoop">True in a co-op run or lobby, where the human copy's brain stays off.
+    /// Called under the controller's lock and on the brain's task, so it must return at once
+    /// and not touch the game.</param>
+    /// <param name="botsExist">True while the co-op relay sees bot copies; picks the line that
+    /// says why the brain stays off. Called like <paramref name="inCoop"/>.</param>
     /// <param name="log">The mod's log. Called from the brains' tasks too, so it must be thread-safe.</param>
     /// <param name="logError">The mod's error log, for problems with the setup and the files.</param>
     /// <returns>The controller, or null when it couldn't be built.</returns>
     public static BrainController? Start(ChatHub chat, BotTools tools, DecisionWaiter waiter, Func<bool> multiplayer, int port,
-        Func<bool> otherClient, string? modDir, InstanceRole role, Func<bool> botsExist, Action<string> log, Action<string> logError)
+        Func<bool> otherClient, string? modDir, InstanceRole role, Func<bool> inCoop, Func<bool> botsExist,
+        Action<string> log, Action<string> logError)
     {
         // Brain tasks log from the thread pool. Once the game is quitting, their lines are
         // dropped, since the engine they print through may already be gone.
@@ -62,8 +67,21 @@ internal static class BrainWiring
             var initial = LoadSettings();
             var spend = new SpendTracker(role.SharedConfigDir, line => warn($"brain: {line}"), role.InstanceId);
             var transcript = new Transcript(initial.ConfigDir, warn);
-            // A bot copy keeps its own run journal; the shared notes are locked across copies.
-            var notesOptions = new NotesOptions { JournalFile = role.JournalFile, LockFile = role.NotesLockPath };
+            // One line per fight, in this copy's own folder like the transcripts.
+            var fights = new FightLog(initial.ConfigDir, warn);
+            // A bot copy keeps its own run journal; the shared notes are locked across copies, and
+            // a bot copy reads a wiki page before it replaces one (another copy may have written it).
+            var notesOptions = new NotesOptions
+            {
+                JournalFile = role.JournalFile,
+                LockFile = role.NotesLockPath,
+                ReadPagesBeforeRewrite = role.IsBot,
+            };
+            // In co-op only bot copies play: the human copy's brain stays off in a co-op run or
+            // lobby. Both reads are lock-free flags, so it returns at once. The controller stops a
+            // brain that plays at its next poll; the API brain also checks it before every
+            // request and act, so it can't play a moment of a co-op run first.
+            Func<string?> blocked = () => role.BrainBlockedReason(inCoop(), botsExist());
             var paths = new PathLog(modDir, info, warn);
             var clients = new ClientCache(line => info($"brain: {line}"));
 
@@ -86,7 +104,9 @@ internal static class BrainWiring
                         transcript: transcript,
                         recentChat: () => RecentChat(chat),
                         announce: line => chat.Announce(line),
-                        log: info);
+                        log: info,
+                        blocked: blocked,
+                        fights: fights);
                 },
                 createSubscription: settings =>
                 {
@@ -112,9 +132,7 @@ internal static class BrainWiring
                 log: info,
                 otherClient: otherClient)
             {
-                // In co-op only bot copies play: the human copy's brain stays off while bots
-                // exist or the run is co-op. Both reads are lock-free flags, so it returns at once.
-                Blocked = () => role.BrainBlockedReason(multiplayer(), botsExist()),
+                Blocked = blocked,
                 ForceAutostart = role.IsBot,
             };
 

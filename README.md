@@ -71,10 +71,12 @@ Then, in game, open the chat (T) and type:
 - `/stop`: the bot stops: no more API calls, and Claude Code quits if it was playing.
 - `/budget`: what the API has cost this month and this run, the model, and what is playing.
 - `/model`: shows the model; `/model opus`, `sonnet`, `haiku` or `fable` switches it.
-- `/effort`: shows the thinking effort; `/effort low`, `medium`, `high`, `xhigh` or `max` sets it.
+- `/effort`: shows the thinking effort, and the effort in elite and boss rooms; `/effort low`, `medium`, `high`, `xhigh` or `max` sets the normal one. Elite and boss rooms use high by default (or the normal effort when that is higher), since it wins more of the hard fights; `/effort elite medium` or `/effort boss max` sets a fight's own, `same` makes it follow the normal effort and `default` puts it back.
 - `/pause` holds the bot so you can play a bit by hand, and `/resume` hands control back.
 
 Without a key, or once the API credit, the Console spend limit or the mod's own monthly cap (`monthly_budget_usd` in `~/.config/spiremind/config.json`, $200 by default) runs out, it plays on your Claude subscription instead, as long as Claude Code is installed and signed in (run `claude` once in Terminal and log in). The chat says when it switches, and the next run tries the API again.
+
+On the API, each copy keeps a transcript of every exchange in `~/.config/spiremind/transcripts/`, with Claude's own short summary of its thinking for each move, and one line per fight in `~/.config/spiremind/fights.jsonl`: HP before and after, turns, potions used and kept, effort and cost. Lessons the bot writes for the wiki or `strategy/learned.md` wait in `strategy/pending/` for you to check, and don't reach its later prompts until you move them onto the page yourself.
 
 ## Talking to the bot in game
 
@@ -105,10 +107,10 @@ See `docs/chat.md` for the design and `docs/chat-and-persona.md` for what the ga
 
 Mark hosts a local co-op lobby in his own copy of the game, and each bot is a second copy on the same Mac that joins it. You talk to every bot from your own window: your lines and the commands reach them, and their lines come back into your chat log and as speech bubbles over their players. `docs/chat.md` (Co-op) has the details.
 
-- A bot copy is started with the game flags `--force-steam off --clientId 1000 --fastmp join --sts2bot=1` and the environment variable `SPIREMIND_PORT=17773` (1001 and 17774, 1002 and 17775 for more bots, up to three). `--sts2bot=1` makes it a bot copy: it starts playing by itself once the run is in progress. Your copy keeps port 17772 and never plays your hand while bots exist.
+- A bot copy is started with the game flags `--force-steam off --clientId 1000 --fastmp join --sts2bot=1` and the environment variable `SPIREMIND_PORT=17773` (1001 and 17774, 1002 and 17775 for more bots, up to three). `--sts2bot=1` makes it a bot copy: it starts playing by itself once the run is in progress. Your copy keeps port 17772 and never plays your hand in a co-op lobby or run; outside co-op it plays as in solo, even with a bot copy still running.
 - In your window, `/bots` lists the bots, `/bot add [Ironclad|Silent|Defect|Regent|Necrobinder|Random]` starts one (once the game side's launcher is in), and `/party [on|off]` sets whether bots hear each other so they can plan builds together. `/start`, `/stop`, `/pause`, `/resume`, `/budget`, `/model` and `/effort` go to every bot, each answer labelled with the bot's character; put a name first to send to one bot (`/model Silent sonnet`).
 - `SPIREMIND_BOT_PORTS` (such as `17773,17774`) sets the ports your copy looks for bots on; the default is 17773 to 17775. Only localhost is ever contacted.
-- `SPIREMIND_CONFIG_DIR` picks a copy's config folder. Unset, your copy uses `~/.config/spiremind` and a bot copy `~/.config/spiremind/bot-<port>`, with its own config.json, transcripts and autostart. Every copy uses the shared `~/.config/spiremind/api_key` unless its folder has its own, and all of them count against one monthly cap in the shared spend.json.
+- `SPIREMIND_CONFIG_DIR` picks a copy's config folder. Unset, your copy uses `~/.config/spiremind` and a bot copy `~/.config/spiremind/bot-<port>`, with its own config.json, transcripts, fights.jsonl and autostart. Every copy uses the shared `~/.config/spiremind/api_key` unless its folder has its own, and all of them count against one monthly cap in the shared spend.json.
 - Each bot keeps its own run journal in `runs/bot-<port>/`; `strategy/learned.md` and the wiki stay shared, and a write that would wipe another bot's newer change is refused.
 - Without the game: `scripts/dev-host.sh 17773 --bot --character Silent --echo` runs a fake bot copy, and `scripts/dev-host.sh --relay --bot-ports 17773` a fake human copy you can type into.
 

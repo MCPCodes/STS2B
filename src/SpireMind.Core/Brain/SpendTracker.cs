@@ -23,9 +23,11 @@ namespace SpireMind.Core.Brain;
 /// locks/spend.json.lock), so two copies adding at once never lose a cost. Before a request,
 /// <see cref="TryBegin"/> records an estimate of its cost under this copy's
 /// <see cref="InstanceId"/> in the file's <c>in_flight</c> map, and counts the other copies'
-/// estimates against the cap, so several copies can't each start a request that together
-/// would go over it. If the lock can't be had within <see cref="LockTimeout"/>, counting goes
-/// on without it (logged once).
+/// estimates, and while there are any its own too, against the cap, so several copies can't
+/// each start a request that together would go over it. A copy's first request, and a fresh
+/// conversation's, is estimated at <see cref="FreshEstimateUsd"/> at least, since that one
+/// writes the cache and costs the most. If the lock can't be had within
+/// <see cref="LockTimeout"/>, counting goes on without it (logged once).
 /// </summary>
 public sealed class SpendTracker
 {
@@ -39,6 +41,11 @@ public sealed class SpendTracker
 
     /// <summary>The smallest estimate <see cref="TryBegin"/> records for a request.</summary>
     public const decimal MinEstimateUsd = 0.05m;
+
+    /// <summary>The smallest estimate for a copy's first request since it started, and for the
+    /// first request of a fresh conversation: a whole prompt written to the cache plus a long
+    /// reply, the most a request usually costs.</summary>
+    public const decimal FreshEstimateUsd = 0.50m;
 
     /// <summary>How long <see cref="Add"/>, <see cref="TryBegin"/> and <see cref="Cancel"/> wait
     /// for another copy to release the lock.</summary>
@@ -54,6 +61,8 @@ public sealed class SpendTracker
     private string? _lastError;
     private InFlight? _mine; // this copy's request in flight, between TryBegin and Add or Cancel
     private decimal _lastCost; // the last request's cost, the estimate for the next one
+    private decimal _largestCost; // the most one request cost since this tracker was made
+    private bool _hasCost; // a request's cost was added since this tracker was made
     private bool _lockWarned;
 
     private readonly record struct MonthSpend(decimal Usd, int Calls);
@@ -121,6 +130,8 @@ public sealed class SpendTracker
                 _runTotal += costUsd;
                 _runCalls++;
                 _lastCost = costUsd;
+                _largestCost = Math.Max(_largestCost, costUsd);
+                _hasCost = true;
                 _mine = null;
                 Save(utc);
             });
@@ -129,16 +140,18 @@ public sealed class SpendTracker
     }
 
     /// <summary>
-    /// Call before each API request. False when this month's total plus the in-flight estimates
-    /// of the other copies (those newer than <see cref="InFlightLimit"/>) has reached
-    /// <paramref name="capUsd"/>: the request must not be sent. Otherwise records this copy's
-    /// estimate (its last request's cost, at least <see cref="MinEstimateUsd"/>) in spend.json
-    /// and returns true; <see cref="Add"/> or <see cref="Cancel"/> must follow.
-    /// <paramref name="monthTotal"/> is this month's total either way. A copy alone sees no other
-    /// estimates, so it is refused exactly when <see cref="OverCap"/> is true. Runs under the
-    /// lock every copy takes.
+    /// Call before each API request. False when this month's total has reached
+    /// <paramref name="capUsd"/>, or, while other copies have requests in flight (estimates newer
+    /// than <see cref="InFlightLimit"/>), when the total plus their estimates and this request's
+    /// would reach it: the request must not be sent. Otherwise records this request's estimate in
+    /// spend.json and returns true; <see cref="Add"/> or <see cref="Cancel"/> must follow. The
+    /// estimate is the last request's cost, at least <see cref="MinEstimateUsd"/>; for this copy's
+    /// first request and for <paramref name="freshConversation"/> it is the largest cost so far,
+    /// at least <see cref="FreshEstimateUsd"/>. <paramref name="monthTotal"/> is this month's total
+    /// either way. A copy alone sees no other estimates, so it is refused exactly when
+    /// <see cref="OverCap"/> is true. Runs under the lock every copy takes.
     /// </summary>
-    public bool TryBegin(decimal capUsd, DateTime now, out decimal monthTotal)
+    public bool TryBegin(decimal capUsd, DateTime now, out decimal monthTotal, bool freshConversation = false)
     {
         var month = MonthKey(now);
         var utc = Utc(now);
@@ -150,8 +163,15 @@ public sealed class SpendTracker
             {
                 MergeFromDisk();
                 total = _months.GetValueOrDefault(month).Usd;
-                var others = _others.Values.Where(e => Live(e, utc)).Sum(e => e.Usd);
-                if (total + others >= capUsd)
+                var live = _others.Values.Where(e => Live(e, utc)).ToArray();
+                var estimate = freshConversation || !_hasCost
+                    ? Math.Max(_largestCost, FreshEstimateUsd)
+                    : Math.Max(_lastCost, MinEstimateUsd);
+                // Alone, a copy may start a request below the cap as before; with others in
+                // flight its own estimate counts too, so N copies can't each pass on the same
+                // headroom.
+                var needed = total + live.Sum(e => e.Usd) + (live.Length > 0 ? estimate : 0m);
+                if (needed >= capUsd)
                 {
                     if (_mine is not null)
                     {
@@ -160,7 +180,7 @@ public sealed class SpendTracker
                     }
                     return;
                 }
-                _mine = new InFlight(Math.Max(_lastCost, MinEstimateUsd), utc);
+                _mine = new InFlight(estimate, utc);
                 allowed = true;
                 Save(utc);
             });

@@ -305,6 +305,31 @@ internal static class Describe
         ["ascension"] = run.AscensionLevel,
     };
 
+    /// <summary>
+    /// "boss" and "second_boss": the act's boss encounter titles, so a build choice knows what it
+    /// builds for. The boss nodes show each encounter's art from the start of the act. Golden
+    /// Compass and Spoils maps have no second boss node even when the act rolled a second boss,
+    /// so the second is only named when the map will actually lead to it. A boss already beaten
+    /// (standing on its node, at its rewards or on the map after it) isn't named again.
+    /// </summary>
+    public static void AddBosses(JsonObject state, RunState run)
+    {
+        if (run.Act is not { } act) return;
+        var map = run.Map;
+        var secondPoint = map?.SecondBossMapPoint;
+        if (secondPoint is not null && run.CurrentMapCoord == secondPoint.coord) return;
+        if (!(map?.BossMapPoint is { } bossPoint && run.CurrentMapCoord == bossPoint.coord))
+        {
+            var boss = SafeText(() => act.BossEncounter?.Title);
+            if (boss.Length > 0) state["boss"] = boss;
+        }
+        if (secondPoint is not null)
+        {
+            var second = SafeText(() => act.SecondBossEncounter?.Title);
+            if (second.Length > 0) state["second_boss"] = second;
+        }
+    }
+
     /// <summary>Co-op teammates as short lines ("Silent 41/70 hp") for off-combat choices their HP bears on.</summary>
     public static JsonArray TeamHp(IEnumerable<Player> teammates)
     {

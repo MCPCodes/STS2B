@@ -100,6 +100,10 @@ public sealed class ClaudeClient : IClaudeApi, IDisposable
     /// <summary>Sent as the anthropic-beta header when not empty (compaction, context editing).</summary>
     public IReadOnlyList<string> Betas { get; init; } = [];
 
+    /// <summary>A request key that isn't sent in the body: an array of betas this request needs,
+    /// added to the anthropic-beta header after <see cref="Betas"/>.</summary>
+    public const string BetasField = "anthropic-beta";
+
     /// <summary>
     /// Sends one Messages API request (the JSON body: model, max_tokens, system, messages,
     /// tools...) and returns the response. The request object is only read, never changed.
@@ -107,13 +111,27 @@ public sealed class ClaudeClient : IClaudeApi, IDisposable
     public async Task<ClaudeResponse> SendAsync(JsonObject request, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(request);
-        var body = request.ToJsonString();
+        var betas = Betas.ToList();
+        string body;
+        if (request[BetasField] is JsonArray wanted)
+        {
+            foreach (var beta in wanted)
+                if (beta is JsonValue v && v.TryGetValue<string>(out var name) && !betas.Contains(name))
+                    betas.Add(name);
+            var copy = (JsonObject)request.DeepClone();
+            copy.Remove(BetasField);
+            body = copy.ToJsonString();
+        }
+        else
+        {
+            body = request.ToJsonString();
+        }
         var timeout = TimeoutFor(request);
 
         for (var attempt = 1; ; attempt++)
         {
             ct.ThrowIfCancellationRequested();
-            var (response, failure) = await AttemptAsync(body, attempt, timeout, ct);
+            var (response, failure) = await AttemptAsync(body, betas, attempt, timeout, ct);
             if (response is not null)
                 return response;
 
@@ -136,7 +154,7 @@ public sealed class ClaudeClient : IClaudeApi, IDisposable
     private sealed record Failure(ClaudeErrorKind Kind, int? Status, string? ErrorType, string Message,
         string? RequestId, bool Retryable, TimeSpan? RetryAfter = null, Exception? Inner = null);
 
-    private async Task<(ClaudeResponse? Response, Failure? Failure)> AttemptAsync(string body, int attempt, TimeSpan timeout, CancellationToken ct)
+    private async Task<(ClaudeResponse? Response, Failure? Failure)> AttemptAsync(string body, IReadOnlyList<string> betas, int attempt, TimeSpan timeout, CancellationToken ct)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(timeout);
@@ -150,8 +168,8 @@ public sealed class ClaudeClient : IClaudeApi, IDisposable
         // in the constructor.
         message.Headers.TryAddWithoutValidation("x-api-key", _apiKey);
         message.Headers.TryAddWithoutValidation("anthropic-version", ApiVersion);
-        if (Betas.Count > 0)
-            message.Headers.TryAddWithoutValidation("anthropic-beta", string.Join(",", Betas));
+        if (betas.Count > 0)
+            message.Headers.TryAddWithoutValidation("anthropic-beta", string.Join(",", betas));
 
         try
         {

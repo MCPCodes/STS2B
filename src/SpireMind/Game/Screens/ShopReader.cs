@@ -533,15 +533,14 @@ internal sealed class ShopReader : IScreen
         if (shop.Items.FirstOrDefault(i => i.Kind == ItemKind.Removal) is { } removal)
             stock["removal"] = removal.Json;
 
-        var state = new JsonObject
-        {
-            ["run"] = Describe.RunInfo(rs),
-            ["gold"] = me.Gold,
-            ["inventory_open"] = shop.Open,
-            ["player"] = player,
-            ["potions"] = PotionActions.Describe(ctx, false),
-            ["stock"] = shop.StockKnown ? stock : (JsonNode)"unknown until the inventory is opened",
-        };
+        var state = new JsonObject { ["run"] = Describe.RunInfo(rs) };
+        // Which boss the deck has to beat bears on what to buy or remove.
+        Describe.AddBosses(state, rs);
+        state["gold"] = me.Gold;
+        state["inventory_open"] = shop.Open;
+        state["player"] = player;
+        state["potions"] = PotionActions.Describe(ctx, false);
+        state["stock"] = shop.StockKnown ? stock : (JsonNode)"unknown until the inventory is opened";
         if (!me.HasOpenPotionSlots && shop.Items.Any(i => i.Kind == ItemKind.Potion))
             state["potion_slots_full"] = true;
         if (_failedNote is { } failed)

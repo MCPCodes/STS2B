@@ -31,13 +31,13 @@ public sealed record InstanceRole
     /// <summary>The human copy's bridge port; bots use 17773 to 17775.</summary>
     public const int HumanPort = 17772;
 
-    /// <summary>Why the human copy's brain stays off while bot copies are around.</summary>
+    /// <summary>Why the human copy's brain stays off in a co-op run with bot copies around.</summary>
     public const string HumanCoopLine =
         "In co-op the bot copies play, so this copy's brain stays off. /start, /stop and the other commands go to the bots.";
 
-    /// <summary>Why the human copy's brain stays off in a co-op run with no bot copy.</summary>
+    /// <summary>Why the human copy's brain stays off in a co-op run or lobby with no bot copy.</summary>
     public const string HumanCoopNoBotsLine =
-        "This is a co-op run, and only bot copies play in one, so this copy's brain stays off. /bot add starts one.";
+        "This is co-op, where only bot copies play, so this copy's brain stays off. /bot add starts one.";
 
     public required InstanceKind Kind { get; init; }
 
@@ -130,18 +130,17 @@ public sealed record InstanceRole
 
     /// <summary>
     /// Why no brain may play in this copy right now, or null when one may. A bot copy may always
-    /// play. The human copy may not while bot copies are around or during a co-op run, since
-    /// there the bots play and two brains would act for the same player.
+    /// play. The human copy may not in a co-op run or lobby, since there the bots play and two
+    /// brains would act for the same player. Outside co-op it plays as in solo play, also while
+    /// bot copies are still running.
     /// </summary>
     /// <param name="inCoopRun">The game is in a co-op run (or lobby).</param>
-    /// <param name="botsExist">This copy has found a bot copy on this machine.</param>
+    /// <param name="botsExist">This copy has found a bot copy on this machine; picks the line.</param>
     public string? BrainBlockedReason(bool inCoopRun, bool botsExist)
     {
-        if (IsBot)
+        if (IsBot || !inCoopRun)
             return null;
-        if (botsExist)
-            return HumanCoopLine;
-        return inCoopRun ? HumanCoopNoBotsLine : null;
+        return botsExist ? HumanCoopLine : HumanCoopNoBotsLine;
     }
 
     /// <summary>The role in one line for the log.</summary>

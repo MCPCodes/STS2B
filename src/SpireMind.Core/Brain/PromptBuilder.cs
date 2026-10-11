@@ -42,9 +42,13 @@ public static partial class PromptBuilder
         "`strategy/wiki/README.md` isn't readable here; the prompt gives its conventions.\n" +
         "- Your only files are `runs/current.md`, `strategy/learned.md` and the wiki's pages, `strategy/wiki/<slug>.md` or " +
         "`strategy/wiki/<folder>/<slug>.md` in lowercase words joined by hyphens: read one with `notes_read`, add a line " +
-        "with `notes_append` (each floor's log line, a dated lesson at the end of a page) and replace one with `notes_write` " +
-        "(the whole file, for the Build plan, Orders, the post-mortem, a new or corrected page; on a page with Facts it refuses " +
-        "any change above `## Lessons`). There is no other file access.\n" +
+        "with `notes_append` (each floor's log line, a lesson for a page's `## Lessons` or `strategy/learned.md`) and replace one " +
+        "with `notes_write` (the whole file, for the Build plan, Orders, the post-mortem, a new or corrected page; on a page with " +
+        "Facts it refuses any change above `## Lessons`). There is no other file access.\n" +
+        "- Lessons are held for review: a lesson you add to a page or to `strategy/learned.md` is saved in a pending file, not " +
+        "on the page, so you won't see it in `notes_read` or in later prompts. Put a lesson under a page's `## Lessons`, never in its " +
+        $"summary or another section. Write each as one line: `{NotesTools.LessonForm}`, " +
+        "the source being the fight's id (date, act and floor, as in `2026-10-11 A1 F7`) or the floor.\n" +
         "- `runs/README.md` isn't readable here. The header line it describes goes in exactly this form: " +
         "`# Ironclad, started YYYY-MM-DD, Neow: <what you picked>`, with your character and the date the journal starts, " +
         "which is today's date from the conversation's first message. Archiving is automatic: when you " +
@@ -54,7 +58,7 @@ public static partial class PromptBuilder
         "Keep the Build plan, Orders and floor log in `runs/current.md` current so nothing is lost.\n" +
         "- When `act_sequence` is in your tools, it can play a whole turn from one snapshot; see its description.\n" +
         "- Waiting costs nothing here: `wait_for_decision` waits as long as it takes, through enemy turns, teammates and pauses. " +
-        "Never end your turn while a run is in progress; call `wait_for_decision` instead.";
+        "While a run is in progress, every reply must end with a tool call; when there is nothing to do yet, call `wait_for_decision`.";
 
     /// <summary>
     /// Build the system text from <paramref name="folder"/> (the repo, or a fallback folder with

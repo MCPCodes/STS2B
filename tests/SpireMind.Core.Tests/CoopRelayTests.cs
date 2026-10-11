@@ -73,11 +73,11 @@ public sealed class CoopRelayTests : IDisposable
     };
 
     private (CoopRelay Relay, ChatHub Mark, ConcurrentQueue<string> Log) StartRelay(CoopRelayOptions options,
-        ICoopBots? coopBots = null, Func<DateTime>? clock = null)
+        ICoopBots? coopBots = null, Func<DateTime>? clock = null, Func<bool>? inCoop = null)
     {
         var mark = new ChatHub { BotName = "Ironclad" };
         var log = new ConcurrentQueue<string>();
-        var relay = new CoopRelay(mark, options, coopBots, log.Enqueue, clock);
+        var relay = new CoopRelay(mark, options, coopBots, log.Enqueue, clock, inCoop);
         _cleanup.Add(relay);
         relay.Start();
         return (relay, mark, log);
@@ -313,6 +313,95 @@ public sealed class CoopRelayTests : IDisposable
     }
 
     [Fact]
+    public async Task Outside_co_op_a_linked_bot_gets_only_what_names_it()
+    {
+        // Solo play after a co-op session, with the bot copy still running.
+        var silent = StartBot("Silent", 1000);
+        var inCoop = false;
+        var (relay, mark, _) = StartRelay(Options(BridgeTests.FreePort(), silent.Port), inCoop: () => Volatile.Read(ref inCoop));
+        var started = 0;
+        mark.AddCommand("start", "", "starts the brain", (_, _) => { started++; return "Started here."; });
+        await Until(() => relay.BotsExist, "the bot to link");
+        Assert.False(relay.InCoop);
+
+        // His own commands, lines and /help work as in solo play.
+        Assert.Equal("Started here.", mark.PostFromHuman("Mark", "/start").Reply);
+        Assert.Equal(1, started);
+        Assert.Equal("Ironclad paused. Type /resume to hand back control.", mark.PostFromHuman("Mark", "/pause").Reply);
+        Assert.True(mark.Paused);
+        mark.PostFromHuman("Mark", "/resume");
+        Assert.StartsWith("Commands: ", mark.PostFromHuman("Mark", "/help").Reply);
+        Assert.Equal(PostOutcome.Queued, mark.PostFromHuman("Mark", "Ironclad, what now?").Outcome);
+        Assert.True(mark.HasUnread);
+
+        // A command or line that names the linked bot first still reaches it.
+        Assert.Equal("", mark.PostFromHuman("Mark", "/model Silent sonnet").Reply ?? "");
+        await Until(() => Has(mark, "Silent: Silent now uses sonnet."), "Silent's reply");
+        mark.PostFromHuman("Mark", "Silent, ready for the next one?");
+        await Until(() => Has(silent.Chat, "Silent, ready for the next one?"), "the named line");
+        await Settle();
+        Assert.False(Has(silent.Chat, "Ironclad, what now?"));
+        Assert.False(silent.Chat.Paused);
+        Assert.True(mark.HasUnread);
+
+        // In co-op everything goes to the bots again.
+        Volatile.Write(ref inCoop, true);
+        Assert.Equal("", mark.PostFromHuman("Mark", "/pause").Reply ?? "");
+        await Until(() => silent.Chat.Paused, "the forwarded pause");
+        mark.PostFromHuman("Mark", "nice fight");
+        await Until(() => Has(silent.Chat, "nice fight"), "the co-op line");
+        Assert.False(mark.HasUnread);
+        Assert.Equal(1, started);
+    }
+
+    [Fact]
+    public async Task A_redirect_is_never_followed()
+    {
+        // Something on a probed port that answers every request with a redirect to a real bot.
+        var silent = StartBot("Silent", 1000);
+        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        _cleanup.Add(new Closer(listener.Stop));
+        var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+        var hits = 0;
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                System.Net.Sockets.TcpClient client;
+                try { client = await listener.AcceptTcpClientAsync(); }
+                catch (Exception) { return; }
+                Interlocked.Increment(ref hits);
+                using (client)
+                {
+                    var stream = client.GetStream();
+                    var buffer = new byte[4096];
+                    try { _ = await stream.ReadAsync(buffer); }
+                    catch (Exception) { continue; }
+                    var reply = $"HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:{silent.Port}/coop/info\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    try { await stream.WriteAsync(System.Text.Encoding.ASCII.GetBytes(reply)); }
+                    catch (Exception) { /* gone */ }
+                }
+            }
+        });
+
+        var (relay, _, log) = StartRelay(Options(BridgeTests.FreePort(), port));
+        await Until(() => Volatile.Read(ref hits) >= 2, "a few probes");
+        await Settle();
+
+        Assert.Empty(relay.Peers);
+        Assert.False(relay.BotsExist);
+        Assert.Single(log, l => l.Contains($"port {port} answered /coop/info with HTTP 307"));
+        Assert.False(CoopRelay.NewLoopbackHandler(Options(0)).AllowAutoRedirect);
+        Assert.False(CoopRelay.NewLoopbackHandler(Options(0)).UseProxy);
+    }
+
+    private sealed class Closer(Action close) : IDisposable
+    {
+        public void Dispose() => close();
+    }
+
+    [Fact]
     public async Task Bots_the_game_started_count_before_they_answer_and_are_linked_when_they_do()
     {
         var port = BridgeTests.FreePort();
@@ -538,6 +627,23 @@ public sealed class CoopRelayTests : IDisposable
         await Until(() => mark.PostFromHuman("Mark", "/bot add").Reply == "Starting a bot copy...", "a start with no character");
         await Until(() => coopBots.Starts.Count == 3, "the third start call");
         Assert.Equal(["Silent", "Random", null], coopBots.Starts);
+    }
+
+    [Fact]
+    public async Task A_start_that_never_ends_gives_bot_add_back()
+    {
+        var coopBots = new FakeCoopBots();
+        var (_, mark, log) = StartRelay(Options(BridgeTests.FreePort()) with { StartTimeout = TimeSpan.FromMilliseconds(200) }, coopBots);
+
+        Assert.Equal("Starting a bot copy as Silent...", mark.PostFromHuman("Mark", "/bot add Silent").Reply);
+        Assert.Equal("A bot copy is already starting.", mark.PostFromHuman("Mark", "/bot add Defect").Reply);
+        await Until(() => Has(mark, "The bot copy didn't come up within 1 second. /bots shows what is running; /bot add tries again."),
+            "the timeout line");
+        Assert.Contains(log, l => l.Contains("didn't finish within"));
+
+        await Until(() => mark.PostFromHuman("Mark", "/bot add Defect").Reply == "Starting a bot copy as Defect...", "the next start");
+        await Until(() => coopBots.Starts.Count == 2, "the second start call");
+        Assert.Equal(["Silent", "Defect"], coopBots.Starts);
     }
 
     [Fact]

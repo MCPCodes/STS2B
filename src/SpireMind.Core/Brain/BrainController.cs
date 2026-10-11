@@ -24,7 +24,7 @@ public enum BrainKind { None, Api, Subscription }
 /// the run ended is started again when a run is in progress.</item>
 /// <item>Brains announce their own stops; the controller only adds the lines about switching.</item>
 /// <item>In co-op only the bot copies play. While <see cref="Blocked"/> gives a reason (the
-/// human copy with bots around, or in a co-op run), nothing starts here and a brain that plays
+/// human copy in a co-op run or lobby), nothing starts here and a brain that plays
 /// is stopped, with the reason said once. A bot copy has <see cref="ForceAutostart"/>, so its
 /// brain starts by itself without /start.</item>
 /// </list>
@@ -46,8 +46,8 @@ public sealed partial class BrainController
     /// <summary>The reply to /start while another MCP client (Claude Code's /play) is calling the game tools.</summary>
     public const string OtherClientLine = "Claude Code is playing through the mod right now. Stop it there, then type /start again.";
 
-    /// <summary>Added to the /effort reply for xhigh and max while the API brain is the one that uses it.</summary>
-    public const string HighEffortCaution = " Replies are capped at 16,000 tokens including thinking, so a hard turn may be cut off at this level.";
+    /// <summary>Added to the /effort reply (/effort elite and boss too) for xhigh and max while the API brain is the one that uses it.</summary>
+    public const string HighEffortCaution = " Turns at this level think much longer, so each one costs more and can take minutes.";
 
     private const string NoKeyReason = "there's no API key";
     private const string BudgetReason = "this month's API budget is used up";
@@ -270,7 +270,7 @@ public sealed partial class BrainController
         _chat.AddCommand("stop", "", "stops the bot until you /start it again", StopCommand);
         _chat.AddCommand("budget", "", "shows the API spend and what's playing", BudgetCommand);
         _chat.AddCommand("model", $"[{string.Join("|", BrainSettings.ModelAliases.Keys)}]", "shows or switches the model", ModelCommand);
-        _chat.AddCommand("effort", $"[{string.Join("|", BrainSettings.Efforts)}]", "shows or sets the thinking effort", EffortCommand);
+        _chat.AddCommand("effort", EffortUsage, "shows or sets the thinking effort", EffortCommand);
     }
 
     private string StartCommand(string from, string args)
@@ -354,7 +354,7 @@ public sealed partial class BrainController
         // A bot copy counts into the same spend.json as every other copy, under one cap.
         var thisMonth = settings.IsInstance ? "this month across every copy" : "this month";
         return $"API spend: {Money(month)} of {Budget(settings.MonthlyBudgetUsd)} {thisMonth}, {Money(run)} this run in {requests}. " +
-               $"{ModelName(settings.Model)}, {settings.Effort} effort.\n{playing}";
+               $"{ModelName(settings.Model)}, {settings.Effort} effort{FightEffortNote(settings)}.\n{playing}";
     }
 
     private string ModelCommand(string from, string args)
@@ -385,10 +385,12 @@ public sealed partial class BrainController
 
     private string EffortCommand(string from, string args)
     {
+        if (FightEffortCommand(from, args) is { } fight)
+            return fight;
         var current = Settings;
         var options = $"Options: {string.Join(", ", BrainSettings.Efforts)}.";
         if (args.Length == 0)
-            return $"The effort is {current.Effort}. {options}";
+            return EffortSummary(current);
         if (!BrainSettings.TryParseEffort(args, out var effort))
             return $"\"{args}\" isn't an effort level. {options}";
         if (effort == current.Effort)
@@ -406,7 +408,7 @@ public sealed partial class BrainController
         // Claude Code isn't told an effort, so only the API brain uses it.
         return subscription
             ? $"Effort set to {effort}. Only the API brain uses it, so Claude Code playing now isn't affected.{saved}"
-            : $"Effort set to {effort}. It applies from the next request.{(effort is "xhigh" or "max" ? HighEffortCaution : "")}{saved}";
+            : $"Effort set to {effort}. {NormalEffortApplies(settings)}{(effort is "xhigh" or "max" ? HighEffortCaution : "")}{saved}";
     }
 
     // Starts the brain the settings call for unless one plays, and says what happened: the

@@ -430,13 +430,12 @@ internal sealed class RewardsReader : IScreen
         var list = new JsonArray();
         foreach (var r in rewards) list.Add(r.Json);
 
-        var state = new JsonObject
-        {
-            ["run"] = Describe.RunInfo(rs),
-            ["player"] = player,
-            ["potions"] = PotionActions.Describe(ctx, false),
-            ["rewards"] = list,
-        };
+        var state = new JsonObject { ["run"] = Describe.RunInfo(rs) };
+        // Which boss the deck has to beat bears on which rewards to take.
+        Describe.AddBosses(state, rs);
+        state["player"] = player;
+        state["potions"] = PotionActions.Describe(ctx, false);
+        state["rewards"] = list;
         if (leavesAct) state["proceed_ends_act"] = true;
         return state;
     }

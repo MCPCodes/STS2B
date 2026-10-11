@@ -85,13 +85,49 @@ public class CoopSpendTests : IDisposable
         // 0.90 spent plus a's 0.30 in flight reaches the cap.
         Assert.False(b.TryBegin(1.00m, Oct, out month));
         Assert.Equal(0.90m, month);
-        Assert.True(b.TryBegin(1.25m, Oct, out _));
+        // With a's request in flight, b's own estimate (its last cost, 0.60) counts too.
+        Assert.False(b.TryBegin(1.80m, Oct, out _));
+        Assert.True(b.TryBegin(1.81m, Oct, out _));
         b.Cancel();
 
-        // a's request cost less than estimated; now b fits again.
+        // a's request cost less than estimated; with nothing else in flight b fits again.
         a.Add(0.05m, Oct);
         Assert.True(b.TryBegin(1.00m, Oct, out month));
         Assert.Equal(0.95m, month);
+    }
+
+    [Fact]
+    public void Fresh_copies_near_the_cap_cant_all_start_a_request()
+    {
+        // The finding's case: $9.80 of $10 spent, three bot copies starting at once.
+        File.WriteAllText(SpendPath, """{ "months": { "2026-10": { "usd": 9.80, "calls": 100 } } }""");
+        var a = new SpendTracker(_dir, null, "bot-17773");
+        var b = new SpendTracker(_dir, null, "bot-17774");
+        var c = new SpendTracker(_dir, null, "bot-17775");
+
+        Assert.True(a.TryBegin(10m, Oct, out _));
+        Assert.Equal(SpendTracker.FreshEstimateUsd, InFlight()!["bot-17773"]!["usd"]!.GetValue<decimal>());
+        Assert.False(b.TryBegin(10m, Oct, out var month));
+        Assert.Equal(9.80m, month);
+        Assert.False(c.TryBegin(10m, Oct, out _));
+
+        // Once a's request is billed, the next copy may go, as one copy alone would.
+        a.Add(0.15m, Oct);
+        Assert.True(b.TryBegin(10m, Oct, out _));
+    }
+
+    [Fact]
+    public void A_fresh_conversation_is_estimated_high()
+    {
+        var a = new SpendTracker(_dir, null, "bot-17773");
+        a.Add(0.80m, Oct);
+        a.Add(0.02m, Oct);
+
+        Assert.True(a.TryBegin(10m, Oct, out _));
+        Assert.Equal(SpendTracker.MinEstimateUsd, InFlight()!["bot-17773"]!["usd"]!.GetValue<decimal>());
+        // The largest cost so far, at least the fresh estimate.
+        Assert.True(a.TryBegin(10m, Oct, out _, freshConversation: true));
+        Assert.Equal(0.80m, InFlight()!["bot-17773"]!["usd"]!.GetValue<decimal>());
     }
 
     [Fact]
@@ -99,8 +135,9 @@ public class CoopSpendTests : IDisposable
     {
         var a = new SpendTracker(_dir, null, "bot-17773");
 
+        // A copy's first request writes the cache, so it is estimated high.
         Assert.True(a.TryBegin(10m, Oct, out _));
-        Assert.Equal(SpendTracker.MinEstimateUsd, InFlight()!["bot-17773"]!["usd"]!.GetValue<decimal>());
+        Assert.Equal(SpendTracker.FreshEstimateUsd, InFlight()!["bot-17773"]!["usd"]!.GetValue<decimal>());
         a.Add(0.42m, Oct);
 
         Assert.True(a.TryBegin(10m, Oct, out _));
@@ -166,7 +203,7 @@ public class CoopSpendTests : IDisposable
         var b = new SpendTracker(_dir, null, "bot-17774");
         b.Add(0.96m, Oct);
 
-        // Still live just before the limit: 0.96 + 0.05 reaches 1.00.
+        // Still live just before the limit: 0.96 plus its fresh estimate reaches 1.00.
         Assert.False(b.TryBegin(1m, later - TimeSpan.FromSeconds(1), out _));
         Assert.True(b.TryBegin(1m, later, out _));
         Assert.Equal(["bot-17774"], InFlight()!.Select(e => e.Key));
@@ -230,8 +267,9 @@ public class CoopSpendTests : IDisposable
             """);
         var spend = new SpendTracker(_dir, null, "main");
 
-        Assert.False(spend.TryBegin(1.2m, Oct, out _));
-        Assert.True(spend.TryBegin(1.21m, Oct, out _));
+        // 1 spent, 0.2 in flight for bot-17774, and this copy's first request at the fresh estimate.
+        Assert.False(spend.TryBegin(1.7m, Oct, out _));
+        Assert.True(spend.TryBegin(1.71m, Oct, out _));
         spend.Add(0.01m, Oct);
 
         var entry = InFlight()!["bot-17774"]!;

@@ -23,9 +23,11 @@ public class NotesGuardTests : IDisposable
 
     private string LockFile => Path.Combine(_root, "config", "locks", "notes.lock");
 
-    private NotesTools Notes(string journal = NotesTools.Journal, bool locked = true) =>
+    // Most of these tests change learned.md and pages through the tools, so lessons go straight
+    // to the files here; the tests at the end hold them for review, as the game does.
+    private NotesTools Notes(string journal = NotesTools.Journal, bool locked = true, bool bot = false, bool hold = false) =>
         new(_root, () => new DateTime(2026, 10, 10, 12, 0, 0, DateTimeKind.Utc),
-            new NotesOptions { JournalFile = journal, LockFile = locked ? LockFile : null });
+            new NotesOptions { JournalFile = journal, LockFile = locked ? LockFile : null, ReadPagesBeforeRewrite = bot, HoldLessons = hold });
 
     private void WriteFile(string relative, string text)
     {
@@ -90,6 +92,45 @@ public class NotesGuardTests : IDisposable
         AssertOk(Call(a, "notes_write", Page, "# Jaw Worm\nA brute.\n\n## Lessons\n- block early\n"));
         // Its own writes count as seen too.
         AssertOk(Call(a, "notes_write", Learned, "- old\n- new\n- newer\n"));
+    }
+
+    [Fact]
+    public void A_bot_copy_must_read_a_page_before_replacing_it()
+    {
+        // Another bot copy's page, there before this copy built its prompt (which lists it
+        // without its text), and learned.md, whose text the prompt carries.
+        WriteFile(Learned, "- old\n");
+        WriteFile(Page, "# Jaw Worm\nA brute.\n\n## Lessons\n- (Silent) block turn 1\n");
+        var ironclad = Notes("runs/bot-17773/current.md", bot: true);
+        ironclad.ResetSeen(); // a new run's prompt
+
+        var blind = Call(ironclad, "notes_write", Page, "# Jaw Worm\nA brute.\n\n## Lessons\n- (Ironclad) hit hard\n");
+        Assert.True(blind.IsError);
+        Assert.True(blind.Payload["not_read"]!.GetValue<bool>());
+        Assert.StartsWith($"{Page} already exists and you haven't read it in this conversation",
+            blind.Payload["error"]!.GetValue<string>());
+        Assert.Contains("(Silent) block turn 1", ReadFile(Page));
+        AssertOk(Call(ironclad, "notes_write", Learned, "- old\n- new\n"));
+
+        // After a read it may, and a fresh prompt forgets the read.
+        AssertOk(Call(ironclad, "notes_read", Page));
+        AssertOk(Call(ironclad, "notes_write", Page, "# Jaw Worm\nA brute.\n\n## Lessons\n- (Silent) block turn 1\n- (Ironclad) hit hard\n"));
+        AssertOk(Call(ironclad, "notes_write", Page, "# Jaw Worm\nA brute.\n\n## Lessons\n- (Silent) block turn 1\n- (Ironclad) hit hard early\n"));
+        ironclad.ResetSeen();
+        Assert.True(Call(ironclad, "notes_write", Page, "# Jaw Worm\nBlind.\n").Payload["not_read"]!.GetValue<bool>());
+
+        // A new page and an append need no read.
+        AssertOk(Call(ironclad, "notes_append", Page, "- (Ironclad) appended"));
+        AssertOk(Call(ironclad, "notes_write", "strategy/wiki/enemies/cultist.md", "# Cultist\nNew.\n"));
+    }
+
+    [Fact]
+    public void The_human_copy_takes_the_pages_in_its_prompt_as_seen_as_in_solo_play()
+    {
+        WriteFile(Page, "# Jaw Worm\nA brute.\n\n## Lessons\n");
+        var solo = Notes();
+        solo.ResetSeen();
+        AssertOk(Call(solo, "notes_write", Page, "# Jaw Worm\nA brute.\n\n## Lessons\n- block early\n"));
     }
 
     [Fact]

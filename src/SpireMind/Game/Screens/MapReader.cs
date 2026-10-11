@@ -270,19 +270,11 @@ internal sealed class MapReader : IScreen
         else if (ctx.IsMultiplayer && Describe.TeamHp(ctx.Teammates) is { Count: > 0 } team)
             state["team"] = team;
 
+        Describe.AddBosses(state, rs);
+
         var act = rs.Act;
         if (act is not null)
         {
-            // The boss nodes show each encounter's art from the start of the act. Golden Compass and
-            // Spoils maps have no second boss node even when the act rolled a second boss.
-            var boss = Describe.SafeText(() => act.BossEncounter?.Title);
-            if (boss.Length > 0) state["boss"] = boss;
-            if (rs.Map.SecondBossMapPoint is not null)
-            {
-                var second = Describe.SafeText(() => act.SecondBossEncounter?.Title);
-                if (second.Length > 0) state["second_boss"] = second;
-            }
-
             // Only useful before we reach it; afterwards the event itself is on screen. The start
             // node shows the Ancient's icon only when it is Ancient-typed (act 1 without Neow
             // retypes it to Monster).

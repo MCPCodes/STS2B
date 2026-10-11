@@ -701,22 +701,29 @@ internal sealed class CombatReader : IScreen
         return json;
     }
 
-    private static JsonArray Enemies(Board b)
+    private static JsonArray Enemies(Board b) => EnemiesJson(b.Cs, b.Enemies);
+
+    /// <summary>
+    /// The enemies of <paramref name="roster"/> (from <see cref="EnemyRoster"/>) still in the
+    /// fight, each with its roster index as "i" (the j of e&lt;j&gt;) and its intents. Shared with
+    /// the mid-combat card choice screens so they name enemies as the combat snapshots do.
+    /// </summary>
+    internal static JsonArray EnemiesJson(ICombatState cs, IReadOnlyList<Creature> roster)
     {
         var arr = new JsonArray();
-        var living = b.Enemies.Where(e => InFight(b.Cs, e)).ToList();
+        var living = roster.Where(e => InFight(cs, e)).ToList();
         // "primary" only says something when some living enemies are and some aren't.
         var mixed = living.Any(e => e.IsPrimaryEnemy) && living.Any(e => !e.IsPrimaryEnemy);
 
-        for (var j = 0; j < b.Enemies.Count; j++)
+        for (var j = 0; j < roster.Count; j++)
         {
-            var enemy = b.Enemies[j];
-            var reviving = Reviving(b.Cs, enemy);
-            if (!reviving && !InFight(b.Cs, enemy)) continue;
+            var enemy = roster[j];
+            var reviving = Reviving(cs, enemy);
+            if (!reviving && !InFight(cs, enemy)) continue;
             var json = Describe.Lead("i", j, Describe.Creature(enemy));
             // Down at 0 HP but kept in the fight: it comes back, and its intent says when and how.
             if (reviving) json["reviving"] = true;
-            json["intents"] = Intents(enemy, b.Cs);
+            json["intents"] = Intents(enemy, cs);
             if (mixed && enemy.IsPrimaryEnemy) json["primary"] = true;
             if (!enemy.IsHittable) json["untargetable"] = true;
             arr.Add(json);
@@ -738,16 +745,18 @@ internal sealed class CombatReader : IScreen
         }
     }
 
+    private static int? IncomingDamage(Board b) => IncomingDamage(b.Cs, b.Enemies);
+
     /// <summary>Sum of attack intents as the game computes them against the local player.</summary>
-    private static int? IncomingDamage(Board b)
+    internal static int? IncomingDamage(ICombatState cs, IReadOnlyList<Creature> roster)
     {
         try
         {
-            var targets = b.Cs.Players.Select(p => p.Creature).ToList();
+            var targets = cs.Players.Select(p => p.Creature).ToList();
             var total = 0;
-            foreach (var enemy in b.Enemies)
+            foreach (var enemy in roster)
             {
-                if (!Acting(b.Cs, enemy) || enemy.Monster?.NextMove is not { } move || move.Id == "STUNNED") continue;
+                if (!Acting(cs, enemy) || enemy.Monster?.NextMove is not { } move || move.Id == "STUNNED") continue;
                 foreach (var intent in move.Intents)
                 {
                     // "is AttackIntent", not IntentType.Attack: death blows report their own type.

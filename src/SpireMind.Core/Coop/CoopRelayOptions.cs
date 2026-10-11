@@ -28,6 +28,13 @@ public sealed record CoopRelayOptions
     public TimeSpan PollTimeout { get; init; } = TimeSpan.FromSeconds(2);
     public TimeSpan PostTimeout { get; init; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>What <see cref="StartTimeout"/> is unless set.</summary>
+    public static readonly TimeSpan DefaultStartTimeout = TimeSpan.FromMinutes(3);
+
+    /// <summary>How long /bot add waits for the game side to start a bot copy before it says the
+    /// copy didn't come up and takes /bot add again.</summary>
+    public TimeSpan StartTimeout { get; init; } = DefaultStartTimeout;
+
     /// <summary>Failed polls in a row before a bot copy counts as gone.</summary>
     public int DownAfterFailures { get; init; } = 3;
 
@@ -40,7 +47,7 @@ public sealed record CoopRelayOptions
     /// <summary>Whether bots hear each other's lines at first; /party changes it.</summary>
     public bool PartyChat { get; init; } = true;
 
-    /// <summary>For tests. Null uses a handler of the relay's own with no proxy.</summary>
+    /// <summary>For tests. Null uses <see cref="CoopRelay.NewLoopbackHandler"/>: no proxy, no redirects.</summary>
     public HttpMessageHandler? Handler { get; init; }
 
     /// <summary>
