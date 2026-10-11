@@ -54,6 +54,20 @@
 ### 4. Ethereal / velocity (splash)
 - Pagestorm (draw when you draw Ethereal), Call of the Void, Spirit of Ash (4 (5) Block per Ethereal played), Banshee's Cry (9 cost, -2 per Ethereal played: 33 AoE), Defile (13 (17) Ethereal attack), Defy, Fear, Parse (Ethereal draw 3), Veilpiercer, Sculpting Strike.
 
+## Packages to count
+Count these in `player.deck` before every pick (general.md 12). Upgraded copies count too.
+- **Souls**: Capture Spirit, Grave Warden, Reave, Severance, Dirge, Seance, Funerary Mask. Each Soul is a 0-cost Skill: draw 2, Exhaust.
+  - Payoffs: Haunt (enemy loses 7 (9) per Soul played), Soul Storm (+4 (6) per exhausted Soul), Devour Life (Summon per Soul played), Death March (+4 (6) per card drawn this turn: a Soul played first adds 8 (12)).
+  - Move up: payoffs once 2+ generators are in (aim for 2 Capture Spirit). Big Hat is weak without Soul producers.
+- **Osty**: Summon (Bodyguard, Pull Aggro, Afterlife, Spur, Sic 'Em, Reanimate, Dirge, Devour Life, Bound Phylactery or Phylactery Unbound) and Osty attacks (Unleash or Protector, Fetch, Flatten, Rattle, Right Hand Hand, Poke, Snap, High Five, Squeeze).
+  - Payoffs: Unleash adds Osty's current HP (Protector his max HP), so every Summon grows it. Calcify (+4 (6) to Osty attacks), Squeeze (other Osty attacks +5), Rattle (extra hit per Osty attack this turn), Sic 'Em (Summon when Osty hits) and Bone Flute (2 Block when Osty attacks) grow with your count of Osty attacks. Necro Mastery: enemies lose HP whenever Osty does.
+  - Loses value: Bone Shards and Sacrifice (the sacrifice-Osty plan) in an Osty-growth deck. Strength cards likely add nothing to Osty attacks (unverified).
+- **Doom**: Negative Pulse, Blight Strike, Scourge, Deathbringer, Countdown, Reaper Form, Plague Carrier (unverified).
+  - Payoffs: No Escape (scales with existing Doom), Time's Up (damage equal to Doom), End of Days (29 (37) to all, executes at once), Oblivion (3 (4) Doom per card played this turn: 0-cost Souls feed it), Shroud (Block per Doom application), Undying Sigil, Book Repair Knife.
+  - Move up: appliers pay only once you hold a closer (Reaper Form, No Escape, Time's Up, End of Days, or a Doom relic). With one, each applier and Shroud move up. No Doom rares by about floor 10: pivot to Souls.
+  - Loses value: multi-enemy rooms without AoE, and healing bosses (Knowledge Demon).
+- **Ethereal** (splash): Defile, Parse, Demesne, Big Hat; read get_deck for others. Payoffs: Spirit of Ash (4 (5) Block per Ethereal played), Banshee's Cry (9 cost, 2 less per Ethereal played), Pagestorm (draw when you draw Ethereal), Veilpiercer, Pull from Below, Eidolon. Payoffs only with several Ethereal cards.
+
 ## Energy and draw
 - **Borrowed Time:** text changed repeatedly. Main v0.103.2 per the patch notes: 1 cost, +4 (6) Energy, cards cost +1 this turn. Earlier: 0 cost with self-Doom. Read the in-game text.
 - **Neurosurge** (0 cost: +3 (4) Energy, draw 2, then 3 Doom on YOURSELF each turn). Use late in a fight, or in decks that end fights fast.

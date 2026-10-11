@@ -54,6 +54,20 @@
 ### 4. Minion / Crash Landing (support package)
 - CHARGE!! (one of the strongest early damage picks), GUARDS!!!, Crash Landing (21 (26) AoE, but fills your hand with Debris), Minion Sacrifice, Lunar Blast, Terraforming (Vigor), Vitruvian Minion.
 
+## Packages to count
+Count these in `player.deck` before every pick (general.md 12). Upgraded copies count too.
+- **Star income**: Venerate, Glow, Gather Light, Hidden Cache, Solar Strike, Shining Strike, Genesis, Royal Gamble, Convergence, The Sealed Throne, Big Bang, Lunar Pastry, Divine Right or Divine Destiny.
+  - Spenders live on it: Particle Wall (2), Reflect (3), Astral Pulse (3), Devastate (4), The Smith (4), Comet (5), Seven Stars (7), Stardust (X). Secure income before payoffs (Traps): 6+ Stars of income or banking by the end of Act 2. Royal Gamble only if you can reach 5.
+- **Star spending**: Child of the Stars (2 (3) Block per Star spent), Black Hole (AoE per Star gained or spent), Galactic Dust (10 Block per 10 Stars spent), Mini Regent. They grow with every income card and spender: take them once both are in.
+- **Strength**: Mini Regent (+1 the first time you spend Stars each turn), Arsenal (Strength per created card). Strength adds to every hit: Astral Pulse (2 hits), Seven Stars (7 hits on every enemy), the Blade with Sword Sage (Replay 1). With either piece, these move up.
+- **Forge**: Wrought in War, Spoils of Battle, Refine Blade, Bulwark, Furnace, Conqueror, Beat into Shape, The Smith, Big Bang, Fencing Manual. Every Forge raises Sovereign Blade's damage for the fight.
+  - Payoffs: Seeking Edge (the Blade hits ALL), Parry (the Blade gives 10 (14) Block), Sword Sage (the Blade gains Replay 1), Summon Forth (fetches the Blade).
+  - Move up: Blade payoffs need a Forge card first (the starter has none). Run Forge on a Star base: pure Forge is slow at higher Ascension.
+- **Created cards**: Bundle of Joy, Spectrum Shift, Orange Dough, Debris from Collision Course and Crash Landing, Minion cards from CHARGE!!, GUARDS!!! and BEGONE!. Quasar and Manifest Authority sit in this lane.
+  - Payoffs: Pillar of Creation (Block per created card), Arsenal (Strength per created card), Supermassive, Regalite (Block when you create a card).
+  - Move up: payoffs only after 2+ creators (Traps: Arsenal before creators). High variance: go here only when the support appears naturally.
+- **Minion**: CHARGE!!, GUARDS!!!, BEGONE!, Crash Landing, Minion Sacrifice, Lunar Blast, Terraforming. Payoff: Vitruvian Minion (doubles Minion card damage and Block). Crash Landing needs a way to clear its Debris.
+
 ## Draft priorities
 - **Early:** Reflect, Astral Pulse, CHARGE!!, Collision Course (0 cost: 10 (14) damage, adds Debris), Glitterstream (11 Block now + 5 next turn), Bulwark, Gather Light, Know Thy Place (0 cost: Weak + Vulnerable; strips Artifact), Glow, Photon Cut, Hidden Cache.
 - **Premium:** Big Bang, Spectrum Shift, Royal Gamble (if you can reach 5 Stars), Convergence, Bundle of Joy, Child of the Stars, Pillar of Creation, Genesis, Void Form, Comet, Meteor Shower, The Sealed Throne, Seven Stars, Parry and Sword Sage (with a Blade).
