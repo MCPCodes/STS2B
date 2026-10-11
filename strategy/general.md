@@ -197,7 +197,11 @@ Adding short, triggered strategy rules like these took one agent from 3/10 to 6/
    - Then the highest damage dealer. Then the rest.
    - Don't overkill. Split damage when one more hit isn't needed.
    - In 3+ enemy fights, AoE beats focus fire.
-8. **Long fights (elites, bosses):** a turn-1 or turn-2 scaling Power is usually right if incoming damage is manageable.
+8. **Setup cards (Powers and other cards that pay later): judge them by this turn's danger.**
+   - No incoming damage, or damage already covered by Block you were going to play anyway: set up. A scaling Power (Demon Form, Noxious Fumes, Defragment...) on a quiet turn costs you no HP.
+   - A dangerous turn: block first, and play setup only if it pays back this turn. Unmovable before your only Block card doubles that card, so with 3 energy, Unmovable then Defend gives 10 Block where Defend alone gives 5. Inflame before a multi-hit counts the same way.
+   - Otherwise weigh it with numbers: the HP you take now by not blocking against what the card adds over the turns left. Demon Form's Strength starts next turn and grows by 2 a turn, so over the next 3 turns one hit a turn gains 2 + 4 + 6 = 12 damage, and a 2-hit attack a turn gains 24.
+   - In elite and boss fights, use the enemy's damage over its next 3 turns (play.md step 2) to find the quiet turn, and save setup for it when it comes within a turn or two.
    - Short hallway fights: frontload.
 9. **End-of-turn check:**
    - No Beckon or Wither left in hand if avoidable. Frantic Escape has been played to keep Sandpit alive.
