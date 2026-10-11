@@ -41,24 +41,25 @@ internal static class InstancePoll
     }
 
     /// <summary>
-    /// The local player's NetId, or null outside the lobby and a run. Character select comes
-    /// first: the screen is created with the main menu, so it counts only on top of the submenu
-    /// stack with a lobby, and a run being set up there already counts as in progress. In a run,
-    /// LocalContext's NetId is set at launch; the run's net service has it before that. Any
-    /// failure (a run loading or tearing down) reads as null. Co-op is a net service of type
-    /// Host or Client there, singleplayer and replays aren't.
+    /// The local player's NetId, or null outside a lobby and a run, and whether that is a co-op
+    /// session. Where this copy stands comes from <see cref="Coop.CoopBots.Look"/>, the read the
+    /// co-op code, names and bubbles use, so every lobby counts here too: character select,
+    /// custom and daily runs, and a saved co-op run being continued. In a run, LocalContext's
+    /// NetId is set at launch; the run's net service has it before that. Any failure (a run
+    /// loading or tearing down) reads as null. Co-op is a net service of type Host or Client;
+    /// singleplayer and replays aren't.
     /// </summary>
     private static (ulong? NetId, bool InCoop) Read()
     {
         try
         {
-            if (NGame.Instance?.MainMenu?.SubmenuStack?.Peek() is NCharacterSelectScreen { Lobby: { } lobby })
-                return (lobby.NetService?.NetId, IsCoop(lobby.NetService?.Type));
-
-            var rm = RunManager.Instance;
-            if (rm is { IsInProgress: true, NetService: { } net })
-                return (LocalContext.NetId ?? net.NetId, IsCoop(net.Type));
-            return (null, false);
+            var sight = Coop.CoopBots.Look();
+            return sight.Place switch
+            {
+                Coop.CoopBots.Place.Run when sight.Net is { } net => ((ulong?)(LocalContext.NetId ?? net.NetId), IsCoop(net.Type)),
+                Coop.CoopBots.Place.Lobby or Coop.CoopBots.Place.LoadedLobby when sight.Net is { } net => ((ulong?)net.NetId, IsCoop(net.Type)),
+                _ => ((ulong?)null, false),
+            };
         }
         catch
         {
