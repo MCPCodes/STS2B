@@ -117,15 +117,38 @@ public sealed class RandomBranch : MonsterState
     /// <param name="maxInARow">For <see cref="MoveRepeat.MaxInARow"/>: how many times in a row it may be chosen.</param>
     /// <param name="cooldown">Forbidden while it is among the last this many chosen moves.</param>
     public RandomBranch Add(MonsterState state, float weight = 1f, MoveRepeat repeat = MoveRepeat.Forever, int maxInARow = 0, int cooldown = 0) =>
-        Add(state, () => weight, repeat, maxInARow, cooldown);
+        AddOption(state, () => weight, repeat, maxInARow, cooldown);
 
     public RandomBranch Add(MonsterState state, Func<float> weight, MoveRepeat repeat = MoveRepeat.Forever, int maxInARow = 0, int cooldown = 0)
+    {
+        HasComputedWeights = true;
+        return AddOption(state, weight, repeat, maxInARow, cooldown);
+    }
+
+    private RandomBranch AddOption(MonsterState state, Func<float> weight, MoveRepeat repeat, int maxInARow, int cooldown)
     {
         if (repeat == MoveRepeat.MaxInARow && maxInARow < 1)
             throw new ArgumentException("MaxInARow needs maxInARow of 1 or more.", nameof(maxInARow));
         _options.Add(new Option(state.Id, weight, repeat, maxInARow, cooldown));
         return this;
     }
+
+    // ---------- reading the branch without rolling (Sim/Forecast.cs and its checks) ----------
+
+    /// <summary>Some weight was given as a function: it may read the fight, so its value now need not be its value at the roll.</summary>
+    internal bool HasComputedWeights { get; private set; }
+
+    internal int OptionCount => _options.Count;
+
+    /// <summary>One option as plain data, in the listed order: its state, repeat rule, limit in a row, cooldown, and its weight when allowed.</summary>
+    internal (string StateId, MoveRepeat Repeat, int MaxTimes, int Cooldown, float Weight) OptionAt(int index)
+    {
+        var o = _options[index];
+        return (o.StateId, o.Repeat, o.MaxTimes, o.Cooldown, o.Weight());
+    }
+
+    /// <summary>The weight the roll itself would give an option against <paramref name="log"/>. Draws nothing.</summary>
+    internal float RollWeight(int index, IReadOnlyList<string> log) => Weight(_options[index], log);
 
     internal override string? NextStateId(Fight f, Monster owner)
     {
@@ -300,6 +323,11 @@ public abstract class Monster : Listener
 
     public bool HasPerformedAMove => _performedFirstMove;
 
+    /// <summary>How often a move from outside the machine's own course has replaced the intended
+    /// one: a stun, a revive, a jump to another of its moves. The honesty check reads it to tell
+    /// why a forecast did not hold; no rule does.</summary>
+    internal int ForcedMoves { get; private set; }
+
     // ---------- helpers for move bodies ----------
 
     /// <summary>A monster attack on the player: powered, <paramref name="hits"/> separate hits.</summary>
@@ -378,6 +406,7 @@ public abstract class Monster : Listener
         if (!CanTransitionAway && !forceTransition) return;
         if (!_states.TryGetValue(stateId, out var state) || !state.IsMove)
             throw new InvalidOperationException($"{ClassName}: no move called {stateId}.");
+        ForcedMoves++;
         SetCurrent(state);
     }
 
@@ -387,6 +416,7 @@ public abstract class Monster : Listener
         if (!CanTransitionAway && !forceTransition) return;
         _forced = move;
         _forcedState = MakeForcedState(move);
+        ForcedMoves++;
         SetCurrent(_forcedState);
     }
 
@@ -420,6 +450,34 @@ public abstract class Monster : Listener
 
     /// <summary>For scripted checks: makes <paramref name="stateId"/> the next move without the rules that normally guard it.</summary>
     public void ForceNextMove(string stateId) => SetMoveImmediate(stateId, forceTransition: true);
+
+    // ---------- reading the machine without moving it (Sim/Forecast.cs and its checks) ----------
+    //
+    // What the real mod reads off the game's live objects: the move that is showing, whether it
+    // was performed since it was entered, what follows a move, and the state behind an id.
+    // Nothing here changes the machine or draws a number.
+
+    /// <summary>The move that is showing was performed since it was entered: from the monster's
+    /// action until the next roll its intent is last turn's (the game's _performedAtLeastOnce).</summary>
+    internal bool ShownMovePerformed => _currentPerformed;
+
+    /// <summary>The id of the state that follows <paramref name="move"/>, as the next roll will look
+    /// it up: a forced move (a stun, a revive) names it itself, any other by its follow-up. Null
+    /// when there is none.</summary>
+    internal string? FollowUpIdOf(MoveState move) =>
+        _forced is not null && ReferenceEquals(move, _forcedState) ? _forced.FollowUpId : move.FollowUp?.Id;
+
+    /// <summary>The machine's state under an id, or null.</summary>
+    internal MonsterState? StateById(string id) => _states.GetValueOrDefault(id);
+
+    /// <summary>The states of this monster's machine, built afresh for nothing: for checks that go
+    /// through a monster's moves and branches without starting a fight.</summary>
+    internal IReadOnlyCollection<MonsterState> BuildStates()
+    {
+        var builder = new MachineBuilder();
+        BuildMachine(builder);
+        return builder.States.Values;
+    }
 
     internal Monster CloneFor(CloneMap map)
     {

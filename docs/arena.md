@@ -18,7 +18,12 @@ scripts/arena.sh baseline                       # the scripted policies on 30 fi
 scripts/arena.sh baseline --scenarios 100 --seed 7
 scripts/arena.sh run --models claude-haiku-5-5,claude-sonnet-5-5,claude-opus-5-5
 scripts/arena.sh run --models claude-opus-5-5 --scenarios 12 --seed 2 --effort high --parallel 1
+scripts/arena.sh run --models claude-opus-5-5 --scenarios 40 --seed 7 --brief   # an experiment: one idea switched on
+scripts/arena.sh position ~/.config/spiremind/arena/pilot-seed7 boss-878005 claude-opus-5-5 --turn 4 --check   # one turn of a recorded fight, rebuilt and checked
+scripts/arena.sh position ~/.config/spiremind/arena/pilot-seed7 boss-878005 claude-opus-5-5 --turn 4           # 5 new sessions play on from there
 scripts/arena.sh report ~/.config/spiremind/arena/2026-10-10-141500
+scripts/arena.sh report ~/.config/spiremind/arena/opus-seed7 --by-label         # a folder with several experiments
+scripts/arena.sh compare ~/.config/spiremind/arena/opus-base ~/.config/spiremind/arena/opus-brief
 scripts/arena.sh selfcheck                      # the simulator and the tool path still hold; a minute or two, costs nothing
 scripts/arena.sh honesty                        # what the snapshots promise against what happens, on 300 fights
 scripts/arena.sh content                        # what the simulator holds of the game, what it leaves out, every card text
@@ -35,7 +40,7 @@ Use it to look at the fights before spending anything: a fight every policy wins
 
 ### run
 
-`run --models a,b,c [--scenarios N=8] [--seed S=1] [--parallel K=3] [--effort medium] [--timeout-minutes 30] [--grace-seconds 20] [--stop-at-weekly 0.90] [--out DIR] [--claude PATH] [--repo DIR]`
+`run --models a,b,c [--scenarios N=8] [--seed S=1] [--parallel K=3] [--effort medium] [--timeout-minutes 30] [--grace-seconds 20] [--stop-at-weekly 0.90] [--out DIR] [--claude PATH] [--repo DIR] [--brief] [--effort-by-tier TIER=LEVEL,...] [--forecast]`
 
 Each model plays each of the N fights once, each fight in its own Claude Code session on the subscription. It prints a line when a fight starts and when it ends, how full the subscription's usage windows are, and the report at the end.
 
@@ -43,10 +48,11 @@ Each model plays each of the N fights once, each fight in its own Claude Code se
 - **Order.** Fights start scenario by scenario: none of scenario 2 starts before every fight of scenario 1 has started. With K no larger than the number of models, a model never plays two fights at once. So a batch that is cut short still has (almost) the same scenarios for every model.
 - **Output folder** (`--out`, default `~/.config/spiremind/arena/<date-time>`):
   - `results.jsonl`: one JSON line per fight, appended the moment it ends.
-  - `run.json`: the batch's settings, the scenarios, the prompt's files, length and hash (never its text), the checkout (`repo`), the Read rule its sessions were given (`read_rule`) and the wiki as the batch found it (`wiki_pages`, `wiki_hash`).
-  - `transcripts/<scenario>__<model>.jsonl`: the raw stream-json output of the fight's sessions, for reading how a model played. Where a session was started again there is a line of type `arena` saying so.
+  - `run.json`: the batch's settings, the scenarios, the prompt's files, length and hash (never its text), the checkout (`repo`), the Read rule its sessions were given (`read_rule`) and the wiki as the batch found it (`wiki_pages`, `wiki_hash`). It also holds the batch's experiment: its label (`experiment`, `base` for none) and each switch as it was given (`switches`). The file is written anew by every batch, so in a folder that several batches share it describes the last one.
+  - `transcripts/<scenario>__<model>.jsonl`: the raw stream-json output of the fight's sessions, for reading how a model played. Where a session was started again there is a line of type `arena` saying so. A batch with a switch on puts its label behind the name (`elite-880367__claude-opus-5-5__brief.jsonl`, with every character that isn't a letter, a digit, `-`, `_` or `.` turned into `_`), so it never replaces the plain batch's transcript in the same folder.
 - **The checkout** (`--repo`, default the one the arena was built in) is where the prompt is built from and where the sessions read the wiki: one path goes into the prompt, the sessions' Read rule and `run.json`, by its real path with links followed. A batch started from a frozen copy of the repo therefore reads that copy's wiki, not the live one. Real runs add lessons to the live wiki, so a batch that should give every model the same pages is best run from a copy nothing else touches; the batch says at its end whether the wiki changed under it, and each result carries the wiki's hash.
-- **Carrying on.** Run the same command with the same `--out` and it plays only what is missing: a fight that was won, lost or abandoned is the model's own result and is skipped. A fight that ended in an `error` or a `timeout` says nothing about how the model plays, so it is played again.
+- **Carrying on.** Run the same command with the same `--out` and it plays only what is missing: a fight that was won, lost or abandoned is the model's own result and is skipped. A fight that ended in an `error` or a `timeout` says nothing about how the model plays, so it is played again. A fight is the same fight only when the scenario, the model, the effort it is played at and the experiment's label are all the same, so a batch at another `--effort` or with other switches plays every fight of its own and leaves the others' lines alone.
+- **Experiments.** The last three options are switches for trying an idea: each is off unless given, and with none given a batch is what it was before there were any. [Experiments](#experiments) says what each does and how to compare the results.
 - **The time limit** (`--timeout-minutes`, default 30) is for the whole fight, all its sessions together. A fight that isn't over by then is stopped and recorded as a `timeout`. How long a fight takes depends on how busy the service is as much as on the model, so a timeout is no evidence about play: it is in no win rate and no mean, has its own column in the report, and the next run with the same `--out` plays the fight again.
 - **Usage.** Claude Code reports how full the subscription's 5 hour and 7 day windows are (`rate_limit_event` lines, whenever a window's rounded percentage moves). The batch prints both as soon as the first fight reports them and again at the end with the difference, and every result line holds what its fight saw last. The numbers are the whole account's: anything else using the subscription meanwhile is in them too.
 - **Stopping.** Ctrl+C (or SIGTERM) kills the running sessions, keeps what finished, prints the report and exits with 130. One failed fight never stops the batch. Four things Claude Code itself reports do, each with exit code 1, the results kept and the same command carrying on later:
@@ -58,27 +64,41 @@ Each model plays each of the N fights once, each fight in its own Claude Code se
   Nothing a model writes can trigger any of these. Only Claude Code's own lines are read for it, so a model saying "hand limit reached" is just talking about its hand. The status `allowed_warning` doesn't stop a batch either: Claude Code 2.1.296 sets it when a window fills faster than it empties (90% of the 5 hour window used in its first 72%; 25, 50 or 75% of the week used in its first 15, 35 or 60%), and requests are still served. The batch prints a note the first time it sees it, and `cli.rate_limit_status` records it.
 - **Before anything starts**, `claude auth status` must say Claude Code is signed in with `claude.ai`. Signed in any other way, the batch refuses to start, since it would not run on the subscription.
 
+### position
+
+`position RESULTS_DIR SCENARIO MODEL --turn N [--runs K=5] [--models a,b] [--effort medium] [--out DIR] [--label L] [--reshuffle] [--check] [--repo DIR] [--claude PATH] [--parallel K=3] [--timeout-minutes 30] [--grace-seconds 20] [--stop-at-weekly 0.90] [--brief] [--forecast]`
+
+A position test: the fight MODEL played on SCENARIO in the run RESULTS_DIR is rebuilt up to the start of its player turn N and checked against the recording, and new sessions then take the fight over there and play it to the end, K times each. [Position tests](#position-tests) has all of it. `--check` rebuilds, checks and prints the position, and starts nothing; it costs nothing. Everything else (the checks before the first session, the stops, carrying on with the same `--out`) is `run`'s. Exit code 1 when the rebuilt fight doesn't match the recording, 2 when the recording or the turn doesn't exist.
+
 ### report
 
-`report DIR|results.jsonl` prints the report again from the file, for a finished or interrupted run. It replays the scripted policies on the same scenario ids, so it needs a build that can still generate them.
+`report DIR|results.jsonl [--by-label]` prints the report again from the file, for a finished or interrupted run. It replays the scripted policies on the same scenario ids, so it needs a build that can still generate them. Position runs in the file are printed after the fights, in a part of their own ([The position report](#the-position-report)); a file that holds only position runs prints only that, and replays nothing.
+
+A file that holds fights of more than one experiment is not pooled into one table: two labels are two treatments of the model, and one win rate over both would describe neither. The plain report says which labels the file holds and exits with code 1. `--by-label` prints the tables with one row per model and label (`claude-opus-5-5 [brief]`) and compares each model's rows fight by fight; see [Comparing](#comparing).
+
+### compare
+
+`compare DIR_A DIR_B [--model M]` pairs the fights of two runs on the scenarios both played, for every model both hold or only for M, and prints B against A: the table of [Comparing](#comparing), then every scenario that was won in one run and lost in the other. Each folder must hold a model once, under one label and one effort; a folder with several variants of a model is compared inside itself with `report --by-label`. It starts nothing and replays nothing, so it takes a moment and costs nothing. Exit code 1 when a folder has no results, the two share no model, or a folder holds a model in more than one variant.
+
+Position runs are compared apart from whole fights and paired by position, not by scenario: see [Old prompt against new](#old-prompt-against-new). A folder of whole fights against a folder of position runs has nothing to pair and exits with 1.
 
 ### selfcheck
 
 `selfcheck [--scenarios N=30] [--seed S=1] [--checks A,B]` ends with `PASSED` or `FAILED` (exit code 0 or 1). Run it after a change to the simulator or to `SpireMind.Core`, before a batch.
 
 1. **The content** (`Completeness`): every card of the Ironclad's pool, every status card, every Overgrowth encounter and every potion of the Ironclad's pool is either in the registry or left out by name with a reason; nothing is registered twice.
-2. **The scripted checks** (`IArenaChecks`, 17 classes, about 150,000 assertions): the engine's rules and every card, power, monster, encounter and potion against numbers worked out by hand from the game's code; the scenario generator against the game's odds; the scripted players; and the runner's own promises (`RunnerChecks`: the flags a session is started with, what the prompt's appendix says about the wiki, that prompt and Read rule name the same checkout, what the init line must list, how Read calls are counted). `--checks Cards1Checks,PotionsChecks` runs only the named classes and nothing else, in a few seconds.
+2. **The scripted checks** (`IArenaChecks`, 18 classes, about 157,000 assertions): the engine's rules and every card, power, monster, encounter and potion against numbers worked out by hand from the game's code; the scenario generator against the game's odds; the scripted players; and the runner's own promises (`RunnerChecks`: the flags a session is started with, what the prompt's appendix says about the wiki, that prompt and Read rule name the same checkout, what the init line must list, how Read calls are counted; and for the experiments: the label, that every switch is off by default, the pages `--brief` gives and that the prompt is otherwise unchanged, what each session of a fight is started with, when a fight counts as played, and the numbers of `report --by-label` and `compare` on fights whose HP was chosen by hand; and for position tests: how a transcript is read, that a recorded fight is rebuilt to any of its turns and every difference from the recording is caught, that a game put at a position plays on exactly as the recorded fight did, what a reshuffle changes and what it leaves, what a run's line holds, and the numbers of the position report and of `compare`). `ForecastChecks` holds the forecast switch to the mod's own forecast (its note, its arithmetic, its tables and the powers that mark a number, read from the mod's source file), and puts every power the simulator has on the player and on an enemy to see that no number the forecast prints plain comes out different. `--checks Cards1Checks,PotionsChecks` runs only the named classes and nothing else, in a few seconds.
 3. **The arena as a whole** (`SelfCheck`): every policy finishes every generated fight with no action turned down, each fight replays identically, ids rebuild their scenario through `Scenarios.FromId`, the combat snapshot has the game's keys, bad action ids are refused with a reason and change nothing, the snapshot is busy right after an action, a finished fight shows the end decision (`arena_over`, one action `done` that runs and changes nothing), and eight threads calling at once break nothing. The honesty check (below) runs on the same fights. It prints the policies' wins by tier.
 4. **The tool path** (`ToolPathCheck`): two fights are played over HTTP through a fight's own bridge, as a model plays them: the MCP handshake, `tools/list`, then `wait_for_decision`, `get_state`, `get_deck`, `get_persona`, `act` and whole turns as `act_sequence`. The first is one of the generated fights with Greedy choosing. The second is built by hand so that it is sure to open a hand selection and to use a potion: three Armaments in the deck and a Fire Potion in the belt, with a player that throws the potion and plays Armaments first. A turn's plan carries the picks for a hand selection its card opens (`select:<i>` by the card's index in the plan's snapshot, then `confirm`) and goes on after it, as the play prompt allows, so the second fight must answer at least one hand selection inside the `act_sequence` that opened it; the line it prints also counts upgraded cards played under their new name after their pick. A second game without a bridge gets the same actions, and every snapshot the tools return must equal that game's. It also checks what the tools must refuse (a stale version, an illegal id, an `act` without a version, `end_turn` before the last id) and that a sequence stops when its next card's target is dead and when the fight ends under it.
 5. **The end of the fight**, since a model that is told to wait there waits for ever. The fight's last action is played three more times, each on a new game one action short of the end: by `act`, by an `act_sequence` that ends on it, and by an `act_sequence` with an `end_turn` behind it. Each must hand back the end snapshot at once (well under the tools' 3 s settle time), with no `warning`, no "still busy" and no word about `wait_for_decision`; the third must stop with `The screen changed to arena_over.` A `wait_for_decision` after the end must come straight back with the same snapshot, `act end_turn` must be refused against it, and `act done` must succeed and leave the snapshot at the same version. The line it prints says how long each took.
 
 ### honesty
 
-`honesty [--scenarios N=300] [--seed S=1]` plays the generated fights with every scripted policy and checks at every action that the snapshot kept what it promised: before `end_turn` each enemy's intents and `incoming_damage`, before a card its cost and the numbers of its text (its `vs` text for the enemy it is aimed at), before a potion the numbers of its text. Then it compares: every hit as the damage chain left it, the hits per enemy, the Block gained, the energy paid, the status cards added. It prints how many promises were kept and every kind of difference with its cause and an example, and ends with `PASSED` when no difference is left without a cause. [What the snapshot does not promise](#what-the-snapshot-does-not-promise) lists the causes.
+`honesty [--scenarios N=300] [--seed S=1]` plays the generated fights with every scripted policy and checks at every action that the snapshot kept what it promised: before `end_turn` each enemy's intents and `incoming_damage`, before a card its cost and the numbers of its text (its `vs` text for the enemy it is aimed at), before a potion the numbers of its text. Then it compares: every hit as the damage chain left it, the hits per enemy, the Block gained, the energy paid, the status cards added. It prints how many promises were kept and every kind of difference with its cause and an example, and ends with `PASSED` when no difference is left without a cause. [What the snapshot does not promise](#what-the-snapshot-does-not-promise) lists the causes. It also works out the forecast of every enemy before every `end_turn`, whether or not `--forecast` is on, and holds each forecast move against what the enemy then does; `Sim/README.md` section 14 says how.
 
 ### content and snapshot
 
-`content` prints what the registry holds against the game's lists, every name left out with its reason, and every card and potion text as a model reads it. `snapshot SCENARIO-ID` prints a scenario's first snapshot.
+`content` prints what the registry holds against the game's lists, every name left out with its reason, and every card and potion text as a model reads it. `snapshot SCENARIO-ID` prints a scenario's first snapshot; with `--forecast` it prints it as a fight started with that switch shows it (see [Experiments](#experiments)).
 
 ## The simulator
 
@@ -219,13 +239,320 @@ Nothing was tuned to get these: the monsters' HP and damage and the cards' value
 
 A change to the content or to the generator changes what a scenario id rebuilds, so results from before and after don't compare.
 
+## Experiments
+
+An experiment is a batch with one idea switched on, played on the same fights as a batch without it, so that the two can be compared fight by fight. Every idea is a switch of `run` that is off unless it is given. With no switch a batch is what it was before there were any: the same prompt and prompt hash, the same snapshots, the same fights, and result lines that differ in one new field, `experiment`, which says `base`.
+
+That was checked on 2026-10-11 against a build of the commit the switches were added on top of (b4afe53, whose arena has none). The three scripted policies played 100 scenarios (seeds 1 and 7) on both builds: 7,426 snapshots, every deck and every result, byte for byte the same. And the fake CLI played the same 20 fights through both runners from one checkout: the same prompt hash, the same 20 session prompts, the same 303 tool results, and result lines that differ only in `"experiment": "base"`.
+
+The standard command lines: the same 40 fights (seed 7) for one model, once plain and once with each switch, each batch into its own folder, then each against the plain one.
+
+```bash
+A=~/.config/spiremind/arena
+scripts/arena.sh run --models claude-opus-5-5 --scenarios 40 --seed 7 --out $A/opus-base
+scripts/arena.sh run --models claude-opus-5-5 --scenarios 40 --seed 7 --brief --out $A/opus-brief
+scripts/arena.sh run --models claude-opus-5-5 --scenarios 40 --seed 7 --effort-by-tier elite=high,boss=high --out $A/opus-tier
+scripts/arena.sh run --models claude-opus-5-5 --scenarios 40 --seed 7 --forecast --out $A/opus-forecast
+scripts/arena.sh run --models claude-opus-5-5 --scenarios 40 --seed 7 --out $A/opus-base2   # the plain batch a second time
+
+scripts/arena.sh compare $A/opus-base $A/opus-brief        # B against A, fight by fight
+scripts/arena.sh compare $A/opus-base $A/opus-tier
+scripts/arena.sh compare $A/opus-base $A/opus-forecast
+scripts/arena.sh compare $A/opus-base $A/opus-base2        # two plain batches: the noise an idea has to beat
+```
+
+Or all variants into one folder, and the report by label:
+
+```bash
+scripts/arena.sh run --models claude-opus-5-5 --scenarios 40 --seed 7 --out $A/opus-seed7
+scripts/arena.sh run --models claude-opus-5-5 --scenarios 40 --seed 7 --brief --out $A/opus-seed7
+scripts/arena.sh run --models claude-opus-5-5 --scenarios 40 --seed 7 --forecast --out $A/opus-seed7
+scripts/arena.sh report $A/opus-seed7 --by-label
+```
+
+Each batch plays its own 40 fights. A batch with another label never skips or replaces a line or a transcript of the others in the same folder, and the same command again plays only what is missing.
+
+### The switches
+
+| Switch | What it changes | In the label |
+| --- | --- | --- |
+| `--brief` | The first message of every fight ends with the wiki pages of the fight's enemies | `brief` |
+| `--effort-by-tier TIER=LEVEL[,TIER=LEVEL...]` | Fights of a named tier are started at their own effort | `elite=high`, one part per tier |
+| `--forecast` | Every enemy a snapshot lists with its intents also says what it does after them (`next_moves`), with one note on how to read it (`next_moves_note`) | `forecast` |
+
+**`--brief`** puts the enemies' pages in front of the model instead of hoping it opens them. The user prompt of a fight's first session ends with a section headed `What the wiki says about this fight`. It holds, for each different enemy the fight starts with, the full text of its page under `<checkout>/strategy/wiki/enemies/`, wrapped as the prompt wraps the strategy notes (`<file path="strategy/wiki/enemies/vantom.md">` ... `</file>`), and for an enemy the wiki has no page for the one line `The wiki has no page for <Name>.` Nothing else is in the section, and nothing else of the message changes. A resumed session gets the plain resume prompt: the pages are in its conversation already. The system prompt's appendix gets one more line, which says that those pages are already in the first message and need not be opened again; everything else of the system prompt is as it is without the switch.
+
+- *Which pages.* A page is found by the enemy's name, not by a guessed file name: line 1 of every page is `# <Name>`, and the lookup is built from the files as they are when the fight starts (capitals don't count). The enemies are the ones the fight's first snapshot names in `state.enemies`, each different one once, in the order they stand. An enemy that only joins later (the Wrigglers that come out of a Phrog Parasite) is not among them; the act's own page and the cards' pages are not given either.
+- *Where this would come from in the real game.* From the brain. A fight's first snapshot names its enemies, and the brain can read every wiki page (its notes tools do), so it can add the pages to the first snapshot of a fight before the model sees it. The switch gives a model nothing it could not open itself with its first calls.
+- *What is recorded.* Each result line has `brief_pages`, `brief_chars` and `brief_missing`, the fight's transcript starts with a line of type `arena` that lists the pages, and the batch says before it starts how many of its fights' enemies have a page and names the ones without (`brief_missing` in `run.json`). `wiki_pages` stays what the model opened itself with `Read`, so the two can be told apart: the report counts the fights in which a model opened a page it had been given.
+- *The prompt hash* is the plain run's (see `prompt_hash` in [The result line](#the-result-line)), so a brief batch and a plain one can be checked for having had the same notes.
+
+**`--effort-by-tier`** starts the fights of a tier at their own effort: `--effort-by-tier elite=high,boss=high` plays elite and boss fights at high and the others at `--effort`. The tiers are `weak`, `normal`, `elite` and `boss`, the levels those of `--effort`; a tier named twice, an unknown tier or level is refused with what is wrong. Each result line's `effort` is the effort its fight's sessions were really started with, and the report treats the batch as one player whose fights differ in effort by tier. In the real game this would be the brain setting the effort of its own requests: a fight's first snapshot says what kind of room it is (`run.room`: Monster, Elite or Boss) and the act's first three hallway fights are its weak ones, so the brain knows the tier before the model's first request of the fight. The model is shown nothing it doesn't see anyway. What the arena does not measure is what a change of effort costs inside a running conversation (the in-game brain on the API starts its conversation over when the effort changes): every arena fight is a session of its own.
+
+**`--forecast`** shows the model each enemy's coming moves, not only the one it is about to make. It is a switch of the simulator: the runner parses it, hands it to every fight and every position run (`ArenaGame.Experiments`, a record with the one flag) and names it in the label. With it off nothing of it runs and every snapshot is the fight's own, byte for byte.
+
+```json
+"enemies": [
+  {"i": 0, "name": "Byrdonis", "hp": 81, "max_hp": 81, "powers": [{"name": "Territorial", "amount": 1}],
+   "intents": ["attack 17"],
+   "next_moves": ["attack 4x3", "attack 19", "attack 6x3"]}
+],
+"next_moves_note": "next_moves = this enemy's moves after its shown intent, in order and only as far as they are certain (...)",
+```
+
+- *What it gives the model.* `next_moves` is 1 to 3 strings: the enemy's moves after the intent it shows, in order, in the words of `intents`, a move's intents joined by ` + `. Only certain moves are listed. Where the next step is a random pick, the last entry gives its chances (`"50% debuff | 50% attack 11"`, whole percents, the game's order of options) and nothing follows it. A number already holds the Strength the enemy gains by then: from its own moves, from Territorial, from temporary Strength running out. A number with `~` (`"attack ~11"`) is today's number for a hit that something already in play will change: Weak or Shrink on the enemy or Vulnerable on the player runs out first, a coming move puts Vulnerable on the player or may, the player has Colossus. No `next_moves` means unknown, and there is never an empty list. `next_moves_note` is one note on how to read all this. Nothing else of a snapshot changes, and the fight goes the same way.
+- *Where the keys are.* Exactly where the mod's reader puts them. The list follows an enemy's `intents` wherever a snapshot lists the enemies: in `combat` and `hand_select` snapshots, and in the small picture of the fight a `card_select` snapshot has under `combat`. The note follows `enemies` in `combat` and `hand_select` snapshots, whenever some enemy has a list; a `card_select` snapshot has the lists and no note. (The keys are not `next` and `next_note`, as they were for a few hours on 2026-10-11: a tool result of `act` and `act_sequence` has a `next` of its own, the snapshot after the action.)
+- *What it does not foresee.* Anything that forces a move on an enemy from outside its own cycle, and a death: the Ceremonial Beast's stun at its Plow threshold, an Eye with Teeth coming back from 0 HP. That includes what the player's powers already in play do with no new action (Thorns, Flame Barrier, Inferno, Stampede, Hellraiser). The note says so. Measured over 300 scenarios and three policies with the player only ending turns: 17 of 18,367 forecast moves did not come, each after such a forced move, and all 18,520 numbers without `~` came word for word.
+- *Where this would come from in the real game.* From the mod, which has it since commit 76e01a2 (2026-10-11). `src/SpireMind/Game/Forecast.cs` works the same list out from the game's live objects, reading only: the move that shows, each move's follow-up, a random branch's options with their weights, repeat rules and cooldowns, the move log, the powers. `CombatReader.EnemiesJson` puts it into the snapshot and `CombatReader.BoardState` the note. `docs/forecast.md` describes it. The arithmetic here is the mod file's, line for line, the note is its sentence, word for word, and the keys and their places are the reader's; `selfcheck` reads those source files and fails when anything differs, also in the lists of powers that mark a number. One thing is still open: nothing of the mod's forecast has run in a live fight. So this switch measures what the forecast is worth to a model before the bot has played with it.
+- *Where the arena differs from the mod.* The mod's reader lists an enemy that is down and coming back (`"reviving": true`) and gives it a list; the arena's snapshot leaves a 0 HP Eye with Teeth out for that turn, with the switch or without.
+- *What holds it to its word.* `honesty` works every enemy's forecast out before every `end_turn`, switch or no switch, and holds each entry against what the enemy then does, once on a copy in which the player only ends turns and once as played. `selfcheck` puts every power the simulator has on the player and on an enemy and fails when a number the forecast printed plain comes out different. `src/SpireMind.Arena/Sim/README.md`, section 14, has the rules and the numbers.
+
+`snapshot SCENARIO-ID --forecast` prints a scenario's first snapshot with the switch on, and `position ... --check --forecast` a position's.
+
+The suggested-line helper that an earlier draft had as a fourth switch (`--advisor`) was ruled out by the review of Opus's play (`docs/opus-review.md`, "Do not do") and is not in the arena.
+
+### The label
+
+A batch's label is built from the switches that are on, joined by `+`, always in the same order: `brief`, `forecast`, then one `tier=level` per tier that `--effort-by-tier` names, in the tiers' own order. A position test can put a name of its own in front (`position --label old`: `old`, `new+forecast`). `--brief --effort-by-tier boss=high,elite=high` is `brief+elite=high+boss=high` however it was typed, and a batch with no switch is `base`. The label is in every result line (`experiment`), in `run.json`, in the batch's first lines and in the report's title. It names what was asked for: `--effort high --effort-by-tier elite=high` is `elite=high`, though every elite fight would have been played at high anyway.
+
+What makes two result lines the same fight is the scenario, the model, the effort the fight was played at, and the label. That is the rule a batch skips by, so:
+
+- the same command again plays only what is missing, as ever;
+- a batch with other switches, or at another `--effort`, plays all of its own fights into the same folder, and neither skips nor replaces the other's lines or transcripts;
+- under `--effort-by-tier elite=high`, an elite fight is the same fight whatever `--effort` the batch has, so a second batch that differs only in `--effort` plays the other tiers and takes the elite fights as played. The report counts such a fight for both.
+
+### Comparing
+
+Two variants are compared on the fights both played to the end, fight by fight, which cancels how hard each fight is. `report DIR --by-label` does it for every two rows of a model inside one folder, the later-listed against the earlier (`base` is listed first, so everything is compared with it first). `compare DIR_A DIR_B` does it across two folders, B against A. Both print the same table:
+
+```
+pair                     tier    fights       won  better  same  worse  HP left difference  sign test p
+claude-opus-5-5: B vs A  all         40  36 vs 34      15    17      8             +1.0 HP         0.21
+                         weak         8    8 vs 8       2     4      2             -1.0 HP         1.00
+                         normal      16  16 vs 16       8     6      2             +2.0 HP         0.11
+                         elite        8    7 vs 6       2     5      1             +0.5 HP         1.00
+                         boss         8    5 vs 4       3     2      3             +1.3 HP         1.00
+```
+
+| Column | Meaning |
+| --- | --- |
+| pair | The first against the second: `B vs A` in `compare`, `claude-opus-5-5 [brief] vs claude-opus-5-5 [base]` by label |
+| tier | `all`, then one row per tier, which is the wins by tier |
+| fights | Scenarios both sides played to the end (won or lost) |
+| won | The first's wins against the second's on those fights |
+| better, same, worse | In how many of them the first had more HP left, the same, less. A fight that wasn't won is 0 HP |
+| HP left difference | The mean of first minus second: positive means the first kept more HP |
+| sign test p | The two-sided sign test on better against worse, ties left out: how likely a split at least that lopsided is when neither is better |
+
+A pair is dropped when either side didn't play its fight to the end (abandoned, a timeout, an error), and the line under the table counts those; `compare` also counts the scenarios only one folder has. Under its table `compare` lists every scenario whose outcome flipped, with the fight's enemies:
+
+```
+4 scenarios' outcomes flipped (won in one run, lost in the other; W and the HP left, L for a loss):
+  boss-878005  boss  claude-opus-5-5  A W 11 -> B L  vs Kin Follower + Kin Follower + Kin Priest (TheKinBoss)
+```
+
+Both say when the comparison is not of the switch alone: when the two sides were played with different system prompts (`prompt_hash`), when they read different wikis (`wiki_hash`), and, in `compare`, when A and B are the same variant, which shows how much the same fights differ from one run to the next.
+
+### An honest experiment
+
+- **Only what the real mod could give.** A switch may put in front of the model only information the mod has in the real game at that moment. `--brief` gives pages the model could open itself; a switch that showed the order of the draw pile, or which move an enemy's random pick will land on, would measure something the bot can never have. Each switch says in its code where its information would come from in the real game.
+- **One switch at a time, against the same fights.** Use the same `--scenarios` and `--seed`, the same model and, unless effort is the idea, the same `--effort`. Switches can be combined, but then only the combination was measured.
+- **The same notes and the same wiki.** Real runs add lessons to `strategy/learned.md` and to the wiki, and a batch reads both. Run the batches of one comparison from one frozen copy of the checkout (`--repo`), or check that their `prompt_hash` and `wiki_hash` agree; the comparison says so when they don't.
+- **Know the noise first.** A model doesn't play a fight the same way twice. Two plain batches on the same fights, compared with `compare`, show how many fights flip and how far HP moves with nothing changed. An idea has to beat that, and forty fights seldom show a difference of a point or two of HP: read the sign test's p and the wins by tier, not the mean alone.
+- **What costs more should win more.** `--brief` adds a few thousand characters to every fight's first message and may save the `Read` calls; a higher effort on elites and bosses costs time and usage. The per-model table (`min/fight`, `$/fight`, `out tokens`) is by label under `--by-label`, so the price stands next to the gain.
+
+## Position tests
+
+A position test asks what a model does at one decision. A whole fight cannot ask that twice: the decision only comes up again if everything before it goes the same way. So the arena takes a fight that was recorded, rebuilds it up to the start of one of its turns, and hands that turn to new sessions. Each session gets the play prompt and tools of today, sees the snapshot of that turn's start as its first snapshot, and plays the fight to the end. `docs/opus-review.md` names the positions this was built for (section 9) and what each should show (section 7).
+
+```bash
+P=~/.config/spiremind/arena/pilot-seed7
+scripts/arena.sh position $P boss-878005 claude-opus-5-5 --turn 4 --check      # rebuild and check only; costs nothing
+scripts/arena.sh position $P boss-878005 claude-opus-5-5 --turn 4 --label new --out ~/.config/spiremind/arena/positions-new
+scripts/arena.sh position $P boss-878005 claude-opus-5-5 --turn 4 --label new --out ~/.config/spiremind/arena/positions-new-r --reshuffle
+scripts/arena.sh report ~/.config/spiremind/arena/positions-new
+```
+
+The three names are the run the recording is in (its folder or `results.jsonl`), the scenario, and the model whose fight is rebuilt. `--turn` is the player turn, as the snapshots count it (`state.turn`, from 1). `--models` names who plays the position (default: the recorded model), `--runs` how often each (default 5, at most 50).
+
+### How a position is rebuilt and checked
+
+1. **The recording.** `RESULTS_DIR/transcripts/<scenario>__<model>.jsonl`, the transcript of a whole fight played without a switch, and that fight's line of `results.jsonl`. Every tool call is read with its result. What ran is taken from the result, never from what the model sent: `done` is one id for `act` and a list of ids with labels for `act_sequence` (which finds a later card again by its label, so the ids that ran are not always the ids sent); a refused call ran nothing.
+2. **The rebuild.** The scenario's fight is built from its id. The recorded actions are applied in the order they ran, up to the first action the recorded session ran on turn N.
+3. **The check.** After every tool result that carries a snapshot (`act`, `act_sequence`, `wait_for_decision`, `get_state`, refused calls too), the rebuilt fight's snapshot is compared with the recorded one, whole: `screen`, `awaiting_decision`, `state` and `actions`, value by value. A snapshot taken while the game was busy holds turn, round, HP and Block, and those are compared. Inside an `act_sequence` the recording has no snapshot between actions; there every action must be on offer and carry the recorded label (card and target).
+4. **The position must have been seen.** The recording has to hold at least one full snapshot of the start of turn N, and the rebuilt fight must equal it. A turn the recorded fight never reached, or one whose start the recording holds no snapshot of, is no position: the command says so and exits with 2.
+5. **A difference stops everything.** The command prints `THE REBUILT FIGHT DOES NOT MATCH THE RECORDING. Nothing was started.`, the transcript line, each differing value (`state.enemies[0].hp: recorded 43, rebuilt 42`) and both sides' HP, hand and enemies, and exits with 1. No session is started and no folder is made.
+
+Two differences are let through, counted and printed as notes. Both are changes to what a snapshot says, made after the pilot was recorded, not to the fight:
+
+- **The player's name.** The pilot's snapshots name the player `Ironclad`; snapshots now say `The Ironclad`, as the game does. Only that pair, and only under a `me.name` key.
+- **The small picture of the fight on a card choice screen** (`card_select`, `state.combat`). Its layout changed: hand cards became objects with their text, the enemies' entries gained their index, two counts were added. There a key that only one side has, and two values of different kinds, are a difference of layout. Two numbers or texts that differ, and lists of different lengths, are a mismatch there as anywhere. The choice itself (its cards, prompt and actions) and every combat snapshot around it are compared whole.
+
+Checked on what is on disk (2026-10-11): all 200 recordings of `pilot-seed7` (120), `opus-high-seed7` (40) and `opus-wiki-seed7` (40) rebuild to the start of their last turn with no other difference.
+
+What the command prints before it spends anything (`--check` stops after this and the position's first snapshot):
+
+```
+Position: boss-170286 T4, the start of turn 4 of claude-opus-5-5's fight in /Users/mark/.config/spiremind/arena/pilot-seed7 (lost).
+  floor 17 boss: 62/80 HP, 15 cards (added Pommel Strike, Cinder, Thunderclap, Rupture, Stone Armor), potions Radiant Tincture, Power Potion, vs Vantom (VantomBoss)
+Rebuilt from the scenario by applying 18 recorded actions. 7 recorded snapshots compared with the rebuilt fight, all equal (1 of the position itself); 16 action labels compared, all equal.
+At the position: combat, turn 4, HP 38, Block 0, energy 4, hand [Strike, Defend, Defend, Cinder, Pommel Strike], enemies: Vantom 156/173 [buff]. State hash 941e6a189b22.
+The recorded session then played: Pommel Strike on Vantom, Bash on Vantom, Strike on Vantom.
+```
+
+The state hash is 12 hex digits of the SHA-256 of the position's first snapshot. Scenario, turn and state hash together are the position: the same turn of another recording of the scenario is another state, and its runs are never pooled or paired with these.
+
+### How a run is played
+
+Each run is a new session on a new game. A new fight of the scenario gets the recorded actions applied again and must show the position's snapshot exactly; only then is it put behind a bridge, so a session sees nothing of the way there. From there a run is a fight like any other ([How one fight is run](#how-one-fight-is-run)): the same system prompt, tools, flags, resumes, time limit and stops. Three things differ:
+
+- **The first message** is the usual one with one sentence added to its first paragraph: `This fight is already under way: you take it over at the start of turn 4, and the turns before it cannot be changed. Your first snapshot shows where the fight stands.` Nothing about the earlier turns is told. The system prompt is unchanged, so `prompt_hash` means what it means for a whole fight.
+- **The turn's line is kept.** Every action the game accepted while the fight stood on turn N goes into the result line by its label (`Play Defend`, `Play Cinder on Vantom`, `Use Skill Potion`, `Take Flame Barrier`, `End turn`) and by its id, in the order it ran, whether the session played card by card or with one `act_sequence`.
+- **The result line** has the object `position` ([The result line](#the-result-line)), and the transcript is saved as `<scenario>__<model>__turn<N>-recorded<k>.jsonl` (`-reshuffled<k>` under `--reshuffle`, and `__<label>` behind it for a label other than `base`). Its first line is of type `arena` and says which position and deal the run had.
+
+`turns`, `cards_played` and `damage_taken` in the line count from the fight's first turn, the recorded part included. A run in which no session made one call to the fight's tools wasn't played and is an error, as for a whole fight.
+
+Run the same command with the same `--out` and it plays only what is missing: a run is the same run when the position, the deal (recorded or reshuffled), the model, the effort, the label and the run's number are the same. A position run never stands in for the scenario's whole fight, nor the other way round: `run` and `position` can share a folder.
+
+### The recorded deal, or a reshuffle
+
+A fight's random streams are fixed by its scenario's seed. Without more, every run of a position draws the same cards in the same order and meets the same enemy rolls as the recorded fight.
+
+- **Recorded deal** (the default). The runs differ only in what the model does. This is the mode for the question "which line does it take here": five runs show five choices on the very deal the recorded session had. The outcome says less: it is one deal, and a line can win or lose on it by the draw. With the fake CLI, a player that plays the same way as the recorded one ends every run exactly as the recorded fight ended, card for card.
+- **`--reshuffle`.** Each run gets its own deal of what the player cannot know: the order of the draw pile (a card whose place the player knows stays put) and every random number still to come (enemy rolls, random targets, later shuffles). It is the simulator's own copy for players that search (`Fight.CloneDeterminized`). What the player sees does not change: the hand, the piles' contents, HP, powers and the intents that show, so the first snapshot is the same to the letter, and that is checked for every run before anything starts. The deal's seed follows from the scenario, the turn and the run's number alone. Run 3 is therefore the same deal for every model, prompt and label, and two batches can be compared deal by deal.
+
+The report and `compare` say which deal the runs had (`deal` column, and one line that starts `Deal: recorded.` or `Deal: reshuffled.`). The review's "points of win chance" were measured on reshuffled copies with the scripted Lookahead player finishing the fight; here the model itself finishes it.
+
+### The eight positions of the review
+
+As `--check` printed them on 2026-10-11 from Opus's pilot fights (`pilot-seed7`, medium effort):
+
+| Position | HP there | State hash | What the recorded session played on that turn | What it is for (review section 7) |
+| --- | --- | --- | --- | --- |
+| boss-878005 T4 | 15 | `bd5d552b633a` | Bash, Strike and Spite, all on the Kin Priest | Item 1: count two turns before an all-in |
+| boss-548112 T3 | 70 | `cb2bfc263650` | Skill Potion, took Evil Eye, Bash, Molten Fist, Evil Eye | Item 2: the card taken inside a fight |
+| boss-170286 T4 | 38 | `941e6a189b22` | Pommel Strike, Bash, Strike (Cinder left in hand with two Defends) | Item 3: random exhaust |
+| boss-541818 T5 | 23 | `9a5fcb08bac2` | Anger, Strike, Cinder | Item 3: random exhaust |
+| boss-504297 T2 | 69 | `eae6d6b094b1` | Skill Potion, took Flame Barrier, Flame Barrier, Twin Strike, Strike, True Grit | Item 4: when to open a card potion |
+| normal-273726 T1 | 58 | `7928902ad12d` | Iron Wave, Strike, Sword Boomerang (Flex Potion kept) | Item 4: Flex Potion on the turn with the most hits |
+| elite-780979 T2 | 49 | `5efc402034ff` | Breakthrough, Snecko Oil, Strike, Strike, Stomp+ | Item 4: Snecko Oil with energy left |
+| boss-243639 T3 | 47 | `179c16893ddd` | Shackling Potion, Tremble, Infernal Blade, Perfected Strike, Stone Armor | Item 4: Shackling on the biggest of the next turns |
+
+(The review's own list has boss-541818 on turn 1, its Barricade; turn 5 is its Cinder turn. `--turn 1` works like any other turn.)
+
+Today's prompt, five runs each on the recorded deal (40 sessions):
+
+```bash
+P=~/.config/spiremind/arena/pilot-seed7
+NEW=~/.config/spiremind/arena/positions-new
+scripts/arena.sh position $P boss-878005   claude-opus-5-5 --turn 4 --label new --out $NEW
+scripts/arena.sh position $P boss-548112   claude-opus-5-5 --turn 3 --label new --out $NEW
+scripts/arena.sh position $P boss-170286   claude-opus-5-5 --turn 4 --label new --out $NEW
+scripts/arena.sh position $P boss-541818   claude-opus-5-5 --turn 5 --label new --out $NEW
+scripts/arena.sh position $P boss-504297   claude-opus-5-5 --turn 2 --label new --out $NEW
+scripts/arena.sh position $P normal-273726 claude-opus-5-5 --turn 1 --label new --out $NEW
+scripts/arena.sh position $P elite-780979  claude-opus-5-5 --turn 2 --label new --out $NEW
+scripts/arena.sh position $P boss-243639   claude-opus-5-5 --turn 3 --label new --out $NEW
+scripts/arena.sh report $NEW
+```
+
+All eight at once, checked first without spending anything, and the same under the pilot's prompt:
+
+```bash
+P=~/.config/spiremind/arena/pilot-seed7
+POSITIONS="boss-878005:4 boss-548112:3 boss-170286:4 boss-541818:5 boss-504297:2 normal-273726:1 elite-780979:2 boss-243639:3"
+# the frozen copy of the checkout the pilot was played from
+OLD_REPO=/private/tmp/claude-501/-Users-mark-Projects-STS2B/468d2c16-6f8a-4b84-8206-5f7877671d52/scratchpad/arena-pilot
+
+for at in $(echo $POSITIONS); do
+  scripts/arena.sh position $P ${at%:*} claude-opus-5-5 --turn ${at#*:} --check | head -5
+done
+
+for at in $(echo $POSITIONS); do
+  scripts/arena.sh position $P ${at%:*} claude-opus-5-5 --turn ${at#*:} --label old --repo $OLD_REPO --out ~/.config/spiremind/arena/positions-old
+done
+scripts/arena.sh compare ~/.config/spiremind/arena/positions-old ~/.config/spiremind/arena/positions-new
+```
+
+(`${at%:*}` is the scenario and `${at#*:}` the turn; the loops run in zsh and in bash.) Add `--reshuffle` to both arms, with other `--out` folders, for the same positions over five deals each. Add `--effort high` for the review's item 5.
+
+A position run takes the switches of a whole fight, `--brief` and `--forecast`, and its label names them behind the batch's own name (`new+forecast`). A switch does not change the position: the state hash is of the snapshot without the switch's keys, so runs with a switch pair with runs without one. The same eight positions with the enemies' coming moves shown, against the plain new prompt:
+
+```bash
+for at in $(echo $POSITIONS); do
+  scripts/arena.sh position $P ${at%:*} claude-opus-5-5 --turn ${at#*:} --label new --forecast --out ~/.config/spiremind/arena/positions-new-forecast
+done
+scripts/arena.sh compare ~/.config/spiremind/arena/positions-new ~/.config/spiremind/arena/positions-new-forecast
+```
+
+### Old prompt against new
+
+`--repo DIR` picks the checkout the play prompt, the strategy notes and the wiki index are read from, and whose wiki the sessions may open ([run](#run)). A position played from a frozen copy of an earlier checkout is the position under that checkout's notes; everything else is today's: the arena's appendix to the prompt, the tools, the snapshots, the simulator. So the old side's `prompt_hash` is the hash of the old notes under today's build, not the hash the pilot's own result lines carry (`aac717a13026`, from the pilot's build). The frozen pilot checkout gives `29dff10cfc7b` today. Every position run records its `prompt_hash`, the batch prints it before it starts, and the report and `compare` print it per label and per side.
+
+`compare DIR_A DIR_B` pairs position runs by position (scenario, turn and state hash), for every model both folders hold or only for `--model M`. Each folder must hold a model's position runs in one variant (one label, effort and deal); two labels in one folder are compared by that folder's `report`. This is the output for three positions, three runs each, played with the fake CLI under two checkouts whose notes differ in one line (`fake-notes`, reshuffled):
+
+```
+Arena compare, position runs: B against A, position by position (scenario and turn). A positive difference means B did better.
+  A: ~/arena/old-r/results.jsonl
+     fake-notes: experiment old, effort medium, deal reshuffled, 9 runs that count on 3 positions, system prompt 93f5015229a4
+  B: ~/arena/new-r/results.jsonl
+     fake-notes: experiment new, effort medium, deal reshuffled, 9 runs that count on 3 positions, system prompt 2d3b9cc7c5ad
+The two sides were played under different system prompts (A 93f5015229a4; B 2d3b9cc7c5ad): the play prompt, the strategy notes or the wiki index differ.
+
+fake-notes: B against A.
+  position          A: won  HP left  B: won  HP left    win share  HP left difference
+  boss-878005 T3       0/3      0.0     0/3      0.0     0 points              0.0 HP
+  elite-803170 T2      3/3     15.7     2/3     11.0   -33 points             -4.7 HP
+  normal-280469 T2     3/3     31.7     0/3      0.0  -100 points            -31.7 HP
+  all 3 positions      6/9     15.8     2/9      3.7   -44 points            -12.1 HP
+  By mean HP left, B was ahead in 0 of 3 positions, level in 1, behind in 2 (sign test p 0.50). A few runs of a position say little: read the lines taken, not only the means.
+  Deal by deal (both sides were reshuffled, so run k of a position had the same deal on both): on 9 deals both played to the end, B had more HP left in 2, the same in 3, less in 4 (sign test p 0.69); it won 2, A 6.
+  Lines taken on the position's turn (runs that took the line, how many of them won, their mean HP left):
+    boss-878005 T3
+      A  3 runs: Bash on Kin Follower (e0), Strike on Kin Follower (e0)  ->  0 won, HP left 0.0
+      B  3 runs: Barricade  ->  0 won, HP left 0.0
+```
+
+| Part | Meaning |
+| --- | --- |
+| A, B | Each side's variant, its runs that count, and the hash of the system prompt it was played under |
+| won, HP left | Per side: wins of the runs that count (won, lost or abandoned), and their mean HP left, 0 for a run that wasn't won |
+| win share | B's share of runs won minus A's, in points of 100 |
+| HP left difference | B's mean HP left minus A's |
+| all N positions | Over the positions both sides played: the wins added up, the mean of the positions' mean HP, and the means of the two differences. Each position counts the same |
+| By mean HP left | In how many positions B's mean HP left was higher, equal, lower, with the two-sided sign test |
+| Deal by deal | Only when both sides were reshuffled: run k of a position had the same deal on both, so the runs pair one to one. In how many deals B had more HP left, the same, less; the sign test; and each side's wins on those deals |
+| Lines taken | Per position and side, each different line of the position's turn, most often taken first |
+
+It says so when both sides were played under the same prompt, when one side was reshuffled and the other not (then they did not face the same draws), and when a position of the same scenario and turn has another state on the other side (rebuilt from another recording, or by a build that shows the fight differently): that one is named and left out.
+
+### The position report
+
+`report` prints position runs in a part of their own, after the fights if the file holds any, and `position` prints it when its batch ends:
+
+- **The header**: runs that count, positions, models; then which deal the runs had, and the system prompt's hash for each label (`System prompt by label (its hash): old 29dff10cfc7b; new ...`). A label with two hashes was played under two prompts and is said to be.
+- **Per position and label**: one row per model, label, effort and deal, with `runs` (won, lost or abandoned), `won`, the win rate with its 95% interval, the mean `HP left` (0 for a run that wasn't won), the mean last turn of the runs played to the end, minutes and API-price dollars a run, and columns for abandoned runs, timeouts and errors when there are any. Labels stand in the order they first appear in the file, `base` first.
+- **Lines taken on the position's turn**: for each position its HP at the start and what the recorded session played there, then per row each different line with the runs that took it, how many of them won and their mean HP left (`4 runs: Defend, Defend, Cinder on Vantom  ->  3 won, HP left 9.5`). "Play" is left off each card and the closing "End turn" off the line. A run whose session stopped before the turn was ended is listed under what it had played, marked `(the turn wasn't ended)`.
+- **Row against row**: where a model has two rows on the same kind of deal (two labels, two efforts), the later against the earlier, with the table and the lines `compare` prints. A reshuffled row is never set against a recorded one: that would compare the deals.
+
+Each run is counted once, by its number: the last line that counts, else the last line there is, so a run played again after a timeout or an error replaces it.
+
+### Reading a position test honestly
+
+- **The line is the measure, the outcome is noise around it.** Five runs that all take the same line say something about the decision. Four wins against one say little about the line's worth: the 95% intervals are 38-96% and 4-62%, and everything the session does on the later turns is in the outcome too.
+- **The recorded deal is one deal.** On it a line wins or loses by the one draw that follows. Use the recorded deal to see which line is taken and `--reshuffle` to see what a line is worth, and read the deal-by-deal count before the means.
+- **A new session starts cold.** It has the snapshot, the turn number and the sentence that it took the fight over. It has no plan from the turns before and has not seen what the enemy did on them, where the recorded session had both in its conversation. So a position test measures the decision from the snapshot and the prompt alone, for the old prompt and the new one alike.
+- **Old against new needs the same everything else.** The same recording, turn, model, effort, deal and number of runs on both sides, and the two checkouts differing only in what is being tried. `compare` prints both prompt hashes and says when the deals differ.
+- **A pilot recording reads a little differently.** The recorded session read `Ironclad` where a new session reads `The Ironclad`, and an older layout of the card choice screen's small picture. The position's notes say which of the two a recording has.
+- **It scores nothing by itself.** The review rated lines with the replay tool's search (its "turnscan" and "reroll", in the scratchpad's analysis copy). The arena does not hold that tool: a position test shows which line a model takes and how its fights then end, and no more.
+
 ## How one fight is run
 
 `ClaudeFight` does this for every fight:
 
-1. A new `ArenaGame` for the scenario, with `SnapshotVersioner`, `DecisionWaiter`, `ChatHub` (the Ironclad, with the dev host's small persona) and `BotTools`, behind a `BridgeServer` on a free loopback port (never 17772 or 17773, the game's). Two timings differ from the game: `act` waits at most 3 s for the next decision and `wait_for_decision` at most 5 s, since the simulator settles in well under a second and nothing in it takes the game's 20 s or four minutes.
-2. The system text: `PromptBuilder` builds it from `.claude/commands/play.md` and `strategy/general.md`, `rules.md`, `bosses-and-elites.md`, `characters/ironclad.md` and `learned.md`, with its index of the pages under `strategy/wiki/` (path and one-line summary each, not their text), exactly as for the in-game brain. Only the brain's closing appendix about its own harness (notes tools, the run journal) is swapped for a short one about the arena: that the wiki's pages are files under `<checkout>/strategy/wiki/` (the absolute path of the checkout the prompt was built from), read with the `Read` tool when the prompt says to; that the index stands in for globbing and the `notes_` tools the index names don't exist here; that nothing can be written, no lesson, no `learned.md`, no journal; that the fight follows the real game (v0.107.1) with only Burning Blood as a relic and with texts worded by the arena, so the snapshot wins over memory where the two differ; that the fight counts as lost if it isn't won by the end of turn 40 (the number is read from `Tuning.MaxTurns`); and what the end looks like. `learned.md` changes as the bot plays real runs, so each result carries a short hash of the prompt and the report says when a file mixes prompts. The hash is taken with the checkout's path left out, so the same notes in a frozen copy give the same hash. The pages' text is not in the prompt, so the wiki has a hash of its own (`wiki_hash`).
-3. The user prompt says this is a practice fight in a simulator with the same rules and tools, to play it to the end as well as possible (win first, then HP), to use `act_sequence` for whole turns where safe, that the wiki's pages can be read with `Read` and nothing can be written, to call `say` at most once, and to stop when a snapshot's `screen` is `arena_over`.
+1. A new `ArenaGame` for the scenario (with the simulator's experiment switches, when the batch has any), with `SnapshotVersioner`, `DecisionWaiter`, `ChatHub` (the Ironclad, with the dev host's small persona) and `BotTools`, behind a `BridgeServer` on a free loopback port (never 17772 or 17773, the game's). Two timings differ from the game: `act` waits at most 3 s for the next decision and `wait_for_decision` at most 5 s, since the simulator settles in well under a second and nothing in it takes the game's 20 s or four minutes.
+2. The system text: `PromptBuilder` builds it from `.claude/commands/play.md` and `strategy/general.md`, `rules.md`, `bosses-and-elites.md`, `characters/ironclad.md` and `learned.md`, with its index of the pages under `strategy/wiki/` (path and one-line summary each, not their text), exactly as for the in-game brain. Only the brain's closing appendix about its own harness (notes tools, the run journal) is swapped for a short one about the arena: that the wiki's pages are files under `<checkout>/strategy/wiki/` (the absolute path of the checkout the prompt was built from), read with the `Read` tool when the prompt says to; that the index stands in for globbing and the `notes_` tools the index names don't exist here; that nothing can be written, no lesson, no `learned.md`, no journal; that the fight follows the real game (v0.107.1) with only Burning Blood as a relic and with texts worded by the arena, so the snapshot wins over memory where the two differ; that the fight counts as lost if it isn't won by the end of turn 40 (the number is read from `Tuning.MaxTurns`); and what the end looks like. `learned.md` changes as the bot plays real runs, so each result carries a short hash of the prompt and the report says when a file mixes prompts. The hash is taken with the checkout's path left out, so the same notes in a frozen copy give the same hash. Under `--brief` the appendix has one more line, which the hash leaves out too (see [Experiments](#experiments)). The pages' text is not in the prompt, so the wiki has a hash of its own (`wiki_hash`).
+3. The user prompt says this is a practice fight in a simulator with the same rules and tools, to play it to the end as well as possible (win first, then HP), to use `act_sequence` for whole turns where safe, that the wiki's pages can be read with `Read` and nothing can be written, to call `say` at most once, and to stop when a snapshot's `screen` is `arena_over`. Under `--brief` the first session's prompt ends with the wiki pages of the fight's enemies.
 4. Claude Code is started with no shell:
 
    ```
@@ -279,7 +606,10 @@ One JSON object per fight in `results.jsonl`. It never holds the system prompt o
 | Field | Meaning |
 | --- | --- |
 | `scenario`, `tier`, `summary`, `seed` | The fight: its id, weak/normal/elite/boss, the one-line description, its seed |
-| `model`, `effort` | As asked for on the command line |
+| `model` | As asked for on the command line |
+| `effort` | The effort the fight's sessions were started with: `--effort`, or what `--effort-by-tier` names for the fight's tier |
+| `experiment` | The label of the batch's experiment: the switches that were on, `base` for none, with a position test's own name in front (`old`, `new+forecast`). A line from before there were switches has no such field and is read as `base` |
+| `position` | Only on the line of a position run ([Position tests](#position-tests)); see the table below. A line with it is no fight of its scenario: the fights' report and `run`'s rule for what is already played leave it out |
 | `models_used` | The model ids in Claude Code's `modelUsage` (what was billed) |
 | `outcome` | See the table below |
 | `hp_left`, `max_hp`, `damage_taken` | The player at the end; `damage_taken` is HP lost during the fight |
@@ -290,6 +620,7 @@ One JSON object per fight in `results.jsonl`. It never holds the system prompt o
 | `read_calls` | How often the model called `Read` |
 | `read_errors` | `Read` calls that came back as an error: a file that isn't there, or one outside the strategy folder, which the session's permissions refuse |
 | `wiki_pages` | The wiki pages the model opened, each once, in the order it first opened them, as the prompt's index names them (`strategy/wiki/enemies/vantom.md`). A page counts once its `Read` came back without an error |
+| `brief_pages`, `brief_chars`, `brief_missing` | Only under `--brief`: the wiki pages the fight's first message held, as the index names them, in the order the enemies stand; the length of those pages' text together, in characters; and the enemies the wiki had no page for, by name (each is also a line in `notes`) |
 | `other_reads` | Every other file it asked `Read` for, each once, at most 12: a file that isn't a wiki page (`strategy/wiki/README.md`, `strategy/general.md`, a path outside the checkout as it was asked for), and a wiki page whose `Read` failed. An entry ends in ` (failed)` when the call came back as an error |
 | `wall_seconds` | From the first session's start to the end of the fight (or of the last session, when the fight never ended), the gaps between sessions included; Claude Code's wind-down isn't in it |
 | `resumes` | How often the session ended before the fight was over and was started again with `--resume` (0 to 5) |
@@ -305,8 +636,21 @@ One JSON object per fight in `results.jsonl`. It never holds the system prompt o
 | `started_at` | UTC, ISO 8601 |
 | `cli` | `model` and `version` from the init line, `api_key_source` (`none` on the subscription login), `mcp_status`, `result_subtype`, `rate_limit_status` (`allowed`, `allowed_warning` or `rejected`, from the last `rate_limit_event`), `exit` (`exited` by itself, `interrupted`, `killed`), `exit_code`; where sessions differ, the last one's |
 | `last_text` | The start of the model's last text; says why it stopped when it gave up |
-| `prompt_hash` | 12 hex digits of the system text's SHA-256, with the checkout's path left out of it |
+| `prompt_hash` | 12 hex digits of the system text's SHA-256, with the checkout's path left out of it, and the one line `--brief` adds to the appendix left out the same way. So a brief run and a plain run on the same notes have the same hash, and a hash that differs between two runs always means the play prompt, the strategy notes or the wiki index changed |
 | `wiki_hash` | 12 hex digits of a SHA-256 over the files under `strategy/wiki/` as they stood when the fight ended; null when the checkout has no wiki, and in lines from before the sessions could read it |
+
+| In `position` | Meaning |
+| --- | --- |
+| `turn`, `run` | The player turn the session took the fight over at the start of, and the run's number among the position's runs, from 1 |
+| `mode`, `deal_seed` | `recorded`: the run went on with the recorded fight's own draw order and random numbers. `reshuffled`: with its own deal of what the player cannot know, from `deal_seed`, which follows from scenario, turn and run alone |
+| `state_hash` | 12 hex digits of the SHA-256 of the position's first snapshot. Scenario, turn and this are the position |
+| `hp_at_start` | The player's HP at the position |
+| `replayed_actions`, `snapshots_checked` | Recorded actions applied to reach the position, and recorded snapshots the rebuilt fight was compared with on the way |
+| `from` | The recording: `results` (the run's folder), `model`, the recorded fight's `outcome` and `hp_left`, and `line`, what the recorded session ran on that turn, by label |
+| `line`, `line_ids` | What this run's session ran on the position's turn, in order: the labels (`Play Defend`, `Play Cinder on Vantom`, `End turn`) and the ids |
+| `line_complete` | True when the turn was ended (or the fight ended in it); false when the session stopped in the middle of it, so `line` is only the turn's beginning |
+
+In a position run's line `turns`, `cards_played` and `damage_taken` count from the fight's first turn, the recorded part included, and `summary` and `seed` are the scenario's.
 
 | `outcome` | Meaning | Counts in the report | Played again by the next run |
 | --- | --- | --- | --- |
@@ -319,7 +663,11 @@ One JSON object per fight in `results.jsonl`. It never holds the system prompt o
 
 ## The report
 
+Position runs are reported apart from fights: nothing below counts them, and [The position report](#the-position-report) says what is printed for them.
+
 Each model's fight on a scenario is counted once: the last line that counts (won, lost or abandoned), else the last line there is (a timeout or an error). So a fight played again after a timeout or an error replaces it.
+
+The title names the effort and the experiment (`effort medium, experiment base`; under `--effort-by-tier` also the tiers that had their own, `effort medium (elite high, boss high)`). A model played at two `--effort`s is two rows, `claude-opus-5-5 (medium)` and `claude-opus-5-5 (high)`. A batch run with `--effort-by-tier` is one row: its fights differ in effort by tier, and that is the experiment, not two players.
 
 Under the title the report says how many fights ran out of time or couldn't be played, and how full Claude Code reported the subscription's 5 hour and 7 day windows from the first of the fights to end to the last. Those are the whole account's numbers, so they are the batch's footprint (and that of anything else running on the subscription meanwhile) and can't be split by model.
 
@@ -344,6 +692,8 @@ Under the title the report says how many fights ran out of time or couldn't be p
 
 **Wiki pages opened**: per model, in how many of its fights it opened a page at all, in how many of its elite and boss fights (where the prompt asks for the enemy's page), which pages most often with how many fights opened each, and how many of its `Read` calls failed.
 
+**Wiki pages given in the first message**, when a batch ran with `--brief`: per model, in how many fights pages were given, the mean number of pages and of characters, in how many fights a `Read` call opened a page the fight had been given all the same, and the enemies the wiki had no page for.
+
 **Per scenario**: each model's fight (`W <HP left>`, `L`, `gave up`, `timeout`, `error`, `-` for not played) next to each scripted policy's on the same fight, then the fights' summaries.
 
 **Paired comparison**: for each pair of models, on the fights both played to the end: in how many the first had more HP left, the same, less (a loss is 0 HP), the mean difference, and the two-sided sign test's p (how likely a split at least that lopsided is if neither is better; ties left out). The same against each scripted policy.
@@ -363,7 +713,8 @@ A pair is dropped when either side didn't play its fight to the end, and that in
 - **The tools are the game's.** Ids and names arrive as written (`play:0>e0`, `Bash+`), exactly as the mod's endpoint sends them in the real game: both serve tool results through the same `McpEndpoint`, which leaves `>` and `+` unescaped.
 - **Cost and time are Claude Code's, not the in-game brain's.** `$/fight` includes Claude Code's own system prompt and its caching, and wall-clock time depends on how busy the service is and on how many fights run at once. Use them to compare models within one run, at the same `--parallel`.
 - **The usage windows are the account's.** The percentages a batch prints tell what it took out of the 5 hour and 7 day windows (with whatever else ran on the subscription meanwhile), in whole points, for all its models together. To budget a model, run it alone.
-- **The effort is the same for every model** in a batch. Models respond to it differently; compare efforts with separate batches (or separate `--out` folders) on the same seed.
+- **The effort is the same for every model** in a batch. Models respond to it differently; compare efforts with separate batches on the same seed, into separate `--out` folders (`compare A B`) or into one (`report --by-label`).
+- **One switch, the same fights, the same notes.** An experiment says something only against a batch that differs in nothing else: see [An honest experiment](#an-honest-experiment).
 
 ## Trying the runner without Claude
 
@@ -383,8 +734,10 @@ A pair is dropped when either side didn't play its fight to the end, and that in
 | `fake-hang`, `fake-linger`, `fake-stubborn` | The time limit, the grace after the fight, and a session that has to be killed |
 | `fake-nomcp`, `fake-notools`, `fake-pending`, `fake-crash` | A dead MCP server, one whose tools aren't offered, one still connecting, and a crash |
 | `fake-reader` | Reading the act's page and each enemy's page before the first move: `read_calls` and `wiki_pages` |
+| `fake-briefed` | The same, but an enemy's page that the first message already holds under `--brief` is not opened again |
 | `fake-snoop` | Asking for a page that isn't there, a file outside the strategy folder and the wiki's README, and calling a `Write` tool it doesn't have: `read_errors`, `other_reads`, `Write` in `tool_calls`, and nothing written |
 | `fake-writer`, `fake-blind` | An init line that lists `Edit` and `Write`, and one without `Read`: both stopped at once, and the batch starts no more fights |
+| `fake-notes` | Playing by its notes: like `fake-block` when the system prompt it was started with holds the line `FAKE: block first`, else like `fake-play`. Two checkouts whose notes differ in that line (`--repo`) give two prompt hashes and two ways of playing, which is what an old prompt against a new one looks like |
 | `fake-replay` | A real session's saved stream-json output read back, to see what the runner makes of it |
 
 ```bash
@@ -392,10 +745,23 @@ scripts/arena.sh run --claude src/SpireMind.Arena/Fake/fake-claude.py --models f
   --scenarios 3 --out /tmp/arena-fake
 ```
 
-With `FAKE_CLAUDE_USAGE` set to a file holding two numbers (`0.05 0.86`), the fake reports those as the 5 hour and 7 day windows and raises them with every session, which is how `--stop-at-weekly` was tried. A resumed fake session carries its cost and `modelUsage` on from the sessions before it, as Claude Code 2.1.296 says it does; `FAKE_CLAUDE_CARRY=0` makes every result line hold only its own process's numbers, and the fight's totals must come out the same either way. Set `CLAUDE_CONFIG_DIR` to a scratch folder to keep the fake's sessions out of `~/.claude` while trying things. With `FAKE_CLAUDE_PROMPT` set to a file, the fake writes there the system prompt and the user prompt it was started with, which is the quickest way to read what a model is told.
+With `FAKE_CLAUDE_USAGE` set to a file holding two numbers (`0.05 0.86`), the fake reports those as the 5 hour and 7 day windows and raises them with every session, which is how `--stop-at-weekly` was tried. A resumed fake session carries its cost and `modelUsage` on from the sessions before it, as Claude Code 2.1.296 says it does; `FAKE_CLAUDE_CARRY=0` makes every result line hold only its own process's numbers, and the fight's totals must come out the same either way. Set `CLAUDE_CONFIG_DIR` to a scratch folder to keep the fake's sessions out of `~/.claude` while trying things. With `FAKE_CLAUDE_PROMPT` set to a file, the fake writes there the system prompt and the user prompt it was started with, which is the quickest way to read what a model is told. Set to a folder, every start writes its own file there (`<session id>.<n>.txt`, n counting the session's starts, with the model and the effort it was started at in the first line): that shows what each fight of a batch was told, the first message apart from the resumes, and at which effort.
 
 The fake answers a `Read` as the arena's flags should make Claude Code answer it: the file's text when it lies under the folder the `Read(//...)` rule names, Claude Code's refusal anywhere else, an error for a file that isn't there. That exercises the runner's counting. It is not a test of Claude Code's permissions, and the fake never writes anything but its own session files. `fake-replay` of a transcript saved before the sessions had `Read` (the pilot's) is stopped at its init line, which lists no `Read`.
 
 The fake plays the first card it may play and answers a card choice by confirming as soon as it can, so it gets through any fight the arena deals, and loses the hard ones.
+
+A position test needs a recording, and the fake makes those too. This records four fights, rebuilds one of them to turn 3, plays the position three times on the recorded deal and three times reshuffled, and prints the report:
+
+```bash
+F=src/SpireMind.Arena/Fake/fake-claude.py
+scripts/arena.sh run --claude $F --models fake-play --scenarios 4 --seed 7 --out /tmp/arena-rec
+scripts/arena.sh position /tmp/arena-rec boss-878005 fake-play --turn 3 --check
+scripts/arena.sh position /tmp/arena-rec boss-878005 fake-play --turn 3 --runs 3 --claude $F --models fake-play,fake-block --out /tmp/arena-pos
+scripts/arena.sh position /tmp/arena-rec boss-878005 fake-play --turn 3 --runs 3 --claude $F --models fake-play,fake-block --out /tmp/arena-pos --reshuffle
+scripts/arena.sh report /tmp/arena-pos
+```
+
+On the recorded deal `fake-play` ends every run as its recorded fight ended (lost on turn 7 after 20 cards), since the same player goes on with the same draws; reshuffled, the runs end differently. Change one number in a snapshot of `/tmp/arena-rec/transcripts/boss-878005__fake-play.jsonl` that lies before turn 3 and the position command stops with `THE REBUILT FIGHT DOES NOT MATCH THE RECORDING` and exit code 1.
 
 It spends nothing, and it is how the runner's paths (resume, timeout, grace, the usage limit and windows, a dead MCP server, Ctrl+C) were tested.

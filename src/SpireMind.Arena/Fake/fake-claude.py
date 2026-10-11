@@ -16,6 +16,10 @@ model name picks what it does:
     fake-done      plays to the end, then runs the end screen's "done" action once before stopping
     fake-prose     plays to the end while talking about limits ("hand limit reached"), which is
                    the model's own prose and must never be taken for the usage limit
+    fake-notes     plays by its notes: like fake-block when the system prompt it was started with
+                   holds the line "FAKE: block first", else like fake-play. So two checkouts whose
+                   notes differ in that line (--repo) give two prompts and two ways of playing,
+                   which is what a comparison of an old prompt with a new one looks like
 
   reading the wiki (Read is the one built-in tool the arena passes; see "Reading" below)
     fake-reader    before its first move reads the act's encounter page and the page of every
@@ -24,6 +28,10 @@ model name picks what it does:
                    strategy folder (refused) and for the wiki's README (readable, not a page), and
                    calls a Write tool it was never given (there is none, and nothing is written);
                    then plays to the end
+    fake-briefed   like fake-reader, but does as the arena's --brief asks: an enemy's page that its
+                   first message already holds (under "What the wiki says about this fight", inside
+                   <file path="strategy/wiki/enemies/...">) is not opened again. Without --brief it
+                   reads exactly what fake-reader reads
 
   ending early (Claude Code ends a headless session when the model answers without a tool call)
     fake-pause     ends its session normally after 3 actions, once; when resumed it plays to the end
@@ -82,7 +90,10 @@ about Claude Code's own. The fake never writes anywhere but its session files.
 appends its arguments, working folder and the names (never the values) of the CLAUDE*/ANTHROPIC*
 variables it was given, so a test can check what the arena passes on. With FAKE_CLAUDE_PROMPT set
 to a file, each start writes there what a model would be told: the system prompt the arena appends
-and, under a line of dashes, the user prompt.
+and, under a line of dashes, the user prompt. When it names a folder, each start writes its own
+file there instead, <session id>.<n>.txt with n counting the session's starts from 1 (so 2 is its
+first resume), and with the effort it was started at in the first line: that shows what each fight
+of a batch was told, the first message and the resumes apart.
 """
 import json
 import os
@@ -94,6 +105,7 @@ import urllib.request
 
 PREFIX = "mcp__spiremind__"
 OVER = "arena_over"
+BLOCK_NOTE = "FAKE: block first"  # the line of its notes that makes fake-notes play like fake-block
 
 
 def emit(obj):
@@ -129,8 +141,16 @@ def read_root(args):
 def log_start(args):
     told = os.environ.get("FAKE_CLAUDE_PROMPT")
     if told and "--append-system-prompt" in args:
+        text = option(args, "--append-system-prompt", "") + "\n" + "-" * 60 + "\n" + option(args, "-p", "") + "\n"
+        if os.path.isdir(told):
+            session_id = option(args, "--resume") or option(args, "--session-id") or "fake"
+            number = 1
+            while os.path.exists(os.path.join(told, f"{session_id}.{number}.txt")):
+                number += 1
+            told = os.path.join(told, f"{session_id}.{number}.txt")
+            text = f"model {option(args, '--model', '')}, effort {option(args, '--effort', '')}\n" + "-" * 60 + "\n" + text
         with open(told, "w", encoding="utf-8") as f:
-            f.write(option(args, "--append-system-prompt", "") + "\n" + "-" * 60 + "\n" + option(args, "-p", "") + "\n")
+            f.write(text)
     path = os.environ.get("FAKE_CLAUDE_LOG")
     if not path:
         return
@@ -209,6 +229,8 @@ class Session:
         self.kept = True  # whether the session is kept on disk (not under --no-session-persistence)
         self.builtins = []  # the built-in tools --tools named
         self.read_root = None  # the folder the Read rule opens
+        self.prompt = ""  # the user prompt (-p) this session was started with
+        self.system = ""  # the system prompt the arena appended
 
     def rate_limit(self, status="allowed", overage=False, limit_type="five_hour"):
         """One rate_limit_event, as Claude Code 2.1.296 prints it."""
@@ -360,12 +382,26 @@ def enemy_pages(session, snapshot):
     return [os.path.join(session.read_root, page) for page in pages if os.path.isfile(os.path.join(session.read_root, page))]
 
 
+def given_pages(session):
+    """The wiki pages the first message already holds under --brief, as the index names them
+    (strategy/wiki/enemies/nibbit.md); none when the message has no such section."""
+    at = session.prompt.find("## What the wiki says about this fight")
+    return re.findall(r'<file path="([^"]+)">', session.prompt[at:]) if at >= 0 else []
+
+
 def read_first(session, behaviour, snapshot):
     """What the reading behaviours do before their first move."""
     pages = enemy_pages(session, snapshot)
     if behaviour == "fake-reader":
         for page in pages:
             session.read(page)
+    elif behaviour == "fake-briefed":
+        given = given_pages(session)
+        for page in pages:
+            # The Read rule's folder is <checkout>/strategy, so the index's name starts one level above it.
+            name = os.path.relpath(page, os.path.dirname(session.read_root)).replace(os.sep, "/")
+            if name not in given:
+                session.read(page)
     elif behaviour == "fake-snoop" and session.read_root is not None:
         for page in pages[:1]:
             session.read(page)
@@ -415,7 +451,7 @@ def play(session, behaviour):
             session.tool("act", {"action_id": "play:99", "version": snapshot["version"]})
         if behaviour == "fake-prose" and actions % 4 == 1:
             session.say("Hand limit reached, so no more draws this turn. I have hit my limit of three energy; usage limit of block is next.")
-        choice = pick(snapshot, behaviour == "fake-block")
+        choice = pick(snapshot, behaviour == "fake-block" or (behaviour == "fake-notes" and BLOCK_NOTE in session.system.splitlines()))
         if behaviour == "fake-seq" and choice.startswith("play:"):
             reply = session.tool("act_sequence", {"version": snapshot["version"], "actions": [choice, "end_turn"]})
         else:
@@ -496,6 +532,8 @@ def main():
     session.kept = keep
     session.builtins = [tool for value in values(args, "--tools") for tool in re.split(r"[ ,]+", value) if tool]
     session.read_root = read_root(args)
+    session.prompt = option(args, "-p", "")
+    session.system = option(args, "--append-system-prompt", "")
 
     print(f"[claude-code:unrecognized_model] {model} is not a model this fake knows, running it anyway")
     sys.stdout.flush()

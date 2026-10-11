@@ -1,7 +1,9 @@
 namespace SpireMind.Arena;
 
-/// <summary>One fight to play: which scenario (and its place in the batch) and which model.</summary>
-public sealed record FightSlot(int ScenarioIndex, Scenario Scenario, string Model);
+/// <summary>One fight to play: which scenario (and its place in the batch) and which model.
+/// <paramref name="Run"/> is 0 for a whole fight, and for a position test the run's number
+/// among the position's runs, from 1.</summary>
+public sealed record FightSlot(int ScenarioIndex, Scenario Scenario, string Model, int Run = 0);
 
 /// <summary>
 /// The order a batch's fights start in. Two rules keep a batch that is cut short (a usage limit,
@@ -29,6 +31,25 @@ public sealed class FightSchedule
                 Total++;
                 if (skip?.Invoke(scenarios[s], model) == true) Skipped++;
                 else _waiting.Add(new FightSlot(s, scenarios[s], model));
+            }
+        _oneFightPerModel = parallel <= models.Count;
+    }
+
+    /// <summary>
+    /// The runs of a position test: every model plays the one position <paramref name="runs"/>
+    /// times. They start run by run (no model's run 2 before every model's run 1 has started),
+    /// which is the scenario-by-scenario rule with the run in the scenario's place, so a batch
+    /// that is cut short has the same runs for every model.
+    /// </summary>
+    /// <param name="skip">Runs to leave out, because the results already hold them: model and run number.</param>
+    public FightSchedule(Scenario scenario, IReadOnlyList<string> models, int runs, int parallel, Func<string, int, bool>? skip = null)
+    {
+        for (var run = 1; run <= runs; run++)
+            foreach (var model in models)
+            {
+                Total++;
+                if (skip?.Invoke(model, run) == true) Skipped++;
+                else _waiting.Add(new FightSlot(run, scenario, model, run));
             }
         _oneFightPerModel = parallel <= models.Count;
     }

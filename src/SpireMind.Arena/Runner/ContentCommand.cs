@@ -14,7 +14,9 @@ public static class ContentCommand
     };
 
     /// <summary><c>arena snapshot ID</c>: the scenario's first snapshot, as get_state hands it to a model.</summary>
-    public static int Snapshot(string scenarioId, TextWriter output)
+    /// <param name="experiments">The simulator's experiment switches (<c>--forecast</c>) the
+    /// fight is made with, to see what a model gets when they are on. Null for none.</param>
+    public static int Snapshot(string scenarioId, TextWriter output, ExperimentOptions? experiments = null)
     {
         Scenario scenario;
         try
@@ -26,9 +28,10 @@ public static class ContentCommand
             output.WriteLine(ex.Message);
             return 2;
         }
-        var game = new ArenaGame(scenario) { ActionDelay = TimeSpan.Zero };
+        var game = new ArenaGame(scenario) { ActionDelay = TimeSpan.Zero, Experiments = experiments ?? new ExperimentOptions() };
         var snapshot = game.CaptureAsync(CancellationToken.None).GetAwaiter().GetResult();
-        output.WriteLine($"{scenario.Id}: {scenario.Summary}");
+        output.WriteLine($"{scenario.Id}: {scenario.Summary}" +
+                         (experiments is not null && ExperimentLabel.Switches(experiments).Count > 0 ? $" (with {string.Join(" and ", ExperimentLabel.Switches(experiments))})" : ""));
         output.WriteLine(snapshot.ToJson().ToJsonString(Indented));
         return 0;
     }

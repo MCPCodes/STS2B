@@ -793,6 +793,10 @@ public sealed class RitualPower : Power
 {
     private bool _wasJustAppliedByEnemy;
 
+    /// <summary>On an enemy that got it this turn: the coming end of its turn gives nothing yet
+    /// (the game's private _wasJustAppliedByEnemy, which the mod's forecast reads).</summary>
+    internal bool SkipsNextTurnEnd => _wasJustAppliedByEnemy;
+
     public override string Name => "Ritual";
     public override PowerType Type => PowerType.Buff;
 

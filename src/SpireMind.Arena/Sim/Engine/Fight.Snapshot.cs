@@ -162,12 +162,19 @@ public sealed partial class Fight
             }
             else
             {
-                var kind = intent.Type.ToString().ToLowerInvariant();
-                // Only the status intent has a label in the game: the bare card count.
-                texts.Add(intent.Type == IntentType.StatusCard ? string.Create(CultureInfo.InvariantCulture, $"{kind}: {intent.StatusCount}") : kind);
+                texts.Add(IntentWord(intent));
             }
         }
         return texts;
+    }
+
+    /// <summary>An intent that is not an attack, in the mod's words: its kind, and the game's label
+    /// where that says more. Only the status intent has a label in the game: the bare card count
+    /// ("statuscard: 2").</summary>
+    internal static string IntentWord(Intent intent)
+    {
+        var kind = intent.Type.ToString().ToLowerInvariant();
+        return intent.Type == IntentType.StatusCard ? string.Create(CultureInfo.InvariantCulture, $"{kind}: {intent.StatusCount}") : kind;
     }
 
     private JsonArray IntentsJson(Creature enemy)

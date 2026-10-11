@@ -34,10 +34,18 @@ public static class ArenaPrompt
     /// <param name="repo">The checkout the prompt is built from, by the path the session's Read
     /// rule is given for (<see cref="ClaudeCli.ReadRule"/>): the index above the appendix lists
     /// this checkout's pages, so they are read from here too.</param>
-    public static string ArenaNotes(string repo)
+    /// <param name="brief">True under <c>--brief</c>: one more line says that the pages of the
+    /// fight's enemies are already in the first message (<see cref="WikiBrief"/>) and need not
+    /// be opened again. False leaves the appendix exactly as it is without the switch.</param>
+    public static string ArenaNotes(string repo, bool brief = false)
     {
         var root = Path.TrimEndingDirectorySeparator(repo).Replace(Path.DirectorySeparatorChar, '/');
         var wiki = $"{root}/{NotesTools.WikiFolder}";
+        var given = brief
+            ? $"- The pages of this fight's enemies are the exception: their full text is already in your first message, under " +
+              $"`{WikiBrief.Heading}`, each inside `<file path=\"{WikiBrief.EnemyFolder}<name>.md\">`. Don't open those again. " +
+              "An enemy the wiki has no page for is named there in one line, so don't look for its page either.\n"
+            : "";
         return
             "## Playing in the arena\n\n" +
             "This session is one practice fight in the SpireMind arena: a simulator with the game's combat rules, " +
@@ -47,6 +55,7 @@ public static class ArenaPrompt
             $"the index's `{NotesTools.WikiFolder}/enemies/<name>.md` is `{wiki}/enemies/<name>.md`. Read one with the `{ClaudeCli.ReadTool}` tool " +
             $"when the prompt says to. The index stands in for globbing, the `notes_` tools the prompt names don't exist here, and " +
             $"`{ClaudeCli.ReadTool}` opens no file outside that `strategy/` folder.\n" +
+            given +
             "- Nothing can be written here: no lesson on a wiki page, no `strategy/learned.md`, no journal. There is no run or map either, " +
             "so skip everything the prompt says about adding or fixing Lessons, `runs/current.md`, the Build plan, Orders and the Journal.\n" +
             "- The fight follows the real game (v0.107.1): the Ironclad's cards, act 1's enemies, elites and bosses, and potions, " +
@@ -72,6 +81,30 @@ public static class ArenaPrompt
         "only action left is `" + ArenaGame.DoneAction + "`. Then stop: make no more tool calls, and answer with one short line on how it went.";
 
     /// <summary>
+    /// The user prompt of a position run's first session (<c>arena position</c>):
+    /// <see cref="UserPrompt"/> with one sentence added to its first paragraph, which says that
+    /// the fight is under way and on which turn the session takes it over. Nothing about the
+    /// turns before is told: the session gets the snapshot of that turn's start, as it would
+    /// get any snapshot, and plays on from there.
+    /// </summary>
+    public static string PositionUserPrompt(int turn)
+    {
+        var at = UserPrompt.IndexOf("\n\n", StringComparison.Ordinal);
+        return UserPrompt[..at] +
+               string.Create(CultureInfo.InvariantCulture, $" This fight is already under way: you take it over at the start of turn {turn}, and the turns before it cannot be changed. ") +
+               "Your first snapshot shows where the fight stands." +
+               UserPrompt[at..];
+    }
+
+    /// <summary>
+    /// The user prompt of a fight's first session under <c>--brief</c>: <see cref="UserPrompt"/>
+    /// as it is, then the section with the pages of the fight's enemies, and nothing after it.
+    /// A resumed session gets <see cref="ResumePrompt"/> as always: the pages are in its
+    /// conversation already.
+    /// </summary>
+    public static string UserPromptWith(WikiBrief brief, string userPrompt = UserPrompt) => userPrompt + "\n\n" + brief.Section;
+
+    /// <summary>
     /// The prompt (<c>-p</c>) a session is started again with (<c>--resume</c>) when it ended
     /// before the fight was over. Claude Code headless ends as soon as the model answers without
     /// a tool call; the in-game brain resumes its session the same way
@@ -86,14 +119,15 @@ public static class ArenaPrompt
     /// the index of its wiki's pages, with <see cref="ArenaNotes"/> for the same checkout last.
     /// <see cref="SystemPrompt.Files"/> lists what it was built from.
     /// </summary>
-    public static SystemPrompt Build(string repo)
+    /// <param name="brief">True under <c>--brief</c>: the appendix has its extra line.</param>
+    public static SystemPrompt Build(string repo, bool brief = false)
     {
         var built = PromptBuilder.Build(repo, Character, multiplayer: false);
         var text = built.Text;
         var appendix = PromptBuilder.HarnessNotes + "\n";
         if (text.EndsWith(appendix, StringComparison.Ordinal))
             text = text[..^appendix.Length];
-        return built with { Text = text + ArenaNotes(repo) + "\n" };
+        return built with { Text = text + ArenaNotes(repo, brief) + "\n" };
     }
 
     /// <summary>
@@ -130,12 +164,20 @@ public static class ArenaPrompt
     /// The hash of a system text that <see cref="Build"/> made for <paramref name="repo"/>, with
     /// the checkout's path taken out of its appendix first (<see cref="CheckoutMark"/> in its
     /// place), so two checkouts that hold the same play prompt, strategy notes and wiki index
-    /// give the same hash wherever they lie.
+    /// give the same hash wherever they lie. The line <c>--brief</c> adds to the appendix is
+    /// left out the same way: a brief run and a plain one on the same notes have the same hash,
+    /// so a hash that differs between two runs always means the play prompt, the notes or the
+    /// index changed, and the run's label says which appendix it had.
     /// </summary>
     public static string Hash(string text, string repo)
     {
-        var own = ArenaNotes(repo) + "\n";
-        return Hash(text.EndsWith(own, StringComparison.Ordinal) ? text[..^own.Length] + ArenaNotes(CheckoutMark) + "\n" : text);
+        foreach (var brief in new[] { false, true })
+        {
+            var own = ArenaNotes(repo, brief) + "\n";
+            if (text.EndsWith(own, StringComparison.Ordinal))
+                return Hash(text[..^own.Length] + ArenaNotes(CheckoutMark) + "\n");
+        }
+        return Hash(text);
     }
 
     /// <summary>
