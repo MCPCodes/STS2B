@@ -69,22 +69,21 @@
 - Barricade is a trap without a real block engine. Killing fast is usually better.
 
 ## Packages to count
-Count these in `player.deck` before every pick (general.md 12); upgraded copies count. Unless a package says otherwise, at 2 pieces a payoff wins a close call and at 4 it beats a generic good card.
+Count these in `player.deck` before every pick (general.md 12); upgraded copies count. Thresholds: general.md 12, unless a package sets its own.
 - strategy/wiki/cards/ironclad-pick-values.md gives each card's worth in an average deck; add the packages on top. Measured synergy tables in strategy/wiki/cards/, where there are any, beat the counts here.
 - **Strength**: Inflame, Demon Form, Dominate, Rupture, Brand, Fight Me; Brimstone, Red Skull, Ruined Helmet, Vajra, Shuriken. Setup Strike counts on its own turn only.
   - Payoffs: each Strength adds 1 to every hit. Hits: Twin Strike 2, Thrash 2, Fight Me 2, Sword Boomerang 3 (4), Conflagration 4 (5) to ALL, Whirlwind X to ALL, Spite 2 (3) after HP loss that turn, Dismantle 2 against Vulnerable, Tear Asunder 1 + 1 per HP loss, Fiend Fire 1 per card exhausted. One-Two Punch and Anger add hits.
   - At 4 Strength: Sword Boomerang 3 x 7 = 21, Twin Strike 2 x 9 = 18, Strike 10. Flat damage (Inferno, Juggernaut, Flame Barrier) ignores Strength; Perfected Strike, Ashen Strike and Body Slam add it once.
-- **Vulnerable**: Break 5 (7), Tremble 3 (4), Bash 2 (3); 1 (2) from Uppercut, Taunt, Dominate; Thunderclap 1 to ALL; Molten Fist doubles it; Paper Phrog. N stacks cover N of your turns, so weigh long sources above 1-stack ones.
-  - Payoffs: every hit on a Vulnerable enemy is x1.5, so it multiplies Strength and multi-hits. Bully +2 (3) per stack before the x1.5. Dismantle hits 2 times. Cruelty x1.75 (2.0). Colossus halves hits from Vulnerable enemies. Dominate gains Strength per stack. Vicious draws 1 (2) per application.
+- **Vulnerable**: Break 5 (7), Tremble 3 (4), Bash 2 (3); 1 (2) from Uppercut, Taunt, Dominate; Thunderclap 1 to ALL; Molten Fist doubles it. N stacks cover N of your turns, so weigh long sources above 1-stack ones.
+  - Payoffs: every hit on a Vulnerable enemy is x1.5, so it multiplies Strength and multi-hits. Bully +2 (3) per stack before the x1.5. Dismantle hits 2 times. Cruelty x1.75 (2.0), Paper Phrog x1.75, and the two add up. Colossus halves hits from Vulnerable enemies. Dominate gains Strength per stack. Vicious draws 1 (2) per enemy given Vulnerable (Thunderclap on 3 draws 3).
   - Bully, Dismantle and Colossus measure well already. Cruelty and Vicious only once Vulnerable is up most turns (Break, or 3+ sources).
-- **Exhaust**: cards that exhaust others: Burning Pact, True Grit, Second Wind, Brand, Cinder, Thrash, Havoc, Stoke, Fiend Fire, Corruption. An Exhaust-keyword card feeds the pile once a fight.
+- **Exhaust**: cards that exhaust others: Burning Pact, True Grit, Second Wind, Brand, Cinder, Thrash, Havoc, Stoke, Fiend Fire, Corruption. An Exhaust-keyword card feeds the pile once a fight: count it for Ashen Strike and Pact's End, not toward the 4-5 sources Feel No Pain and Dark Embrace need (Traps).
   - Payoffs: per exhaust, Feel No Pain 3 (4) Block, Dark Embrace 1 draw, Charon's Ashes 3 to ALL. Ashen Strike +3 (4) per card in the exhaust pile, Pact's End 17 (23) to ALL from 3 there. Evil Eye and Forgotten Ritual need an exhaust earlier that turn. Drum of Battle +2 (3) energy when another effect exhausts it.
-  - Feel No Pain and Dark Embrace only from 4-5 sources (Traps).
 - **HP loss on your turn**: Bloodletting, Offering, Breakthrough, Hemokinesis, Blood Wall, Brand, and Inferno and Crimson Mantle every turn. Payoffs count losses, not HP: Brand's 1 counts as much as Offering's 6.
-  - Payoffs: per loss, Rupture +1 (2) Strength and Inferno 6 (9) to ALL; Spite hits 2 (3) times after one; Tear Asunder +1 hit per loss this fight, unblocked enemy hits included. Rupture makes this a Strength package too.
-- **Block**: the engine is Block that repeats: Unmovable, Stone Armor, Crimson Mantle (every turn), Rage (per Attack), Feel No Pain (per exhaust). Defends do not count. Payoffs only from 2 engine pieces (Traps); short of that, kill fast.
-  - Payoffs: Body Slam deals your current Block (Strength once). Barricade keeps Block between turns. Juggernaut 6 (8) flat to a random enemy per Block gain, so many small gains beat one big one (Rage per Attack, Second Wind per card, Evil Eye twice).
-- **Strike-tagged**: Strike, Perfected Strike, Pommel Strike, Twin Strike, Setup Strike, Ashen Strike; the starter deck has 5. Perfected Strike gets +2 (3) per one in any pile, itself included (18 (24) with the starter 5). Hellraiser plays each one you draw for free.
+  - Payoffs: per loss, Rupture +1 (2) Strength and Inferno 6 (9) to ALL; Spite hits 2 (3) times after one; Tear Asunder +1 hit per loss this fight, unblocked enemy hits included.
+- **Block**: the engine is Block that repeats: Unmovable, Stone Armor, Crimson Mantle (every turn), Rage (per Attack), Feel No Pain (per exhaust). Defends do not count. Payoffs only from 2 engine pieces; short of that, kill fast.
+  - Payoffs: Body Slam deals your current Block (Strength once). Barricade keeps Block between turns. Juggernaut 6 (8) flat to a random enemy per Block gain, so many small gains beat one big one (Rage per Attack, Second Wind per card, Evil Eye twice after an exhaust).
+- **Strike-tagged**: Strike, Perfected Strike, Pommel Strike, Twin Strike, Setup Strike, Ashen Strike; the starter deck has 5. Those 5 are already in the measured values, so count only Strike-tagged cards you add. Perfected Strike gets +2 (3) per one in any pile, itself included (18 (24) with the starter 5). Hellraiser plays each one you draw for free.
   - With either, each Strike-tagged pick moves up, and remove Defends, not Strikes.
 
 ## Draft priorities
@@ -95,7 +94,7 @@ Count these in `player.deck` before every pick (general.md 12); upgraded copies 
   - AoE for multi-enemy fights: Thunderclap, Whirlwind, Conflagration.
 - **Premium any time:** Offering, Demon Form, Dominate, Inferno, Crimson Mantle, Primal Force.
 - **Premium once their package is there** (Packages to count): Cruelty, Dark Embrace, Fiend Fire, Pact's End, Burning Pact, Unmovable.
-- **Upgrade first:** Bash or Break, Pommel Strike, Body Slam (0 cost), Offering (draw 5), Demon Form. Then the largest Up on the pick values page.
+- **Upgrade first:** Bash or Break, Pommel Strike, Body Slam (0 cost), Offering (draw 5), Demon Form. Then an upgrade that adds a hit, a Vulnerable stack or Strength to your package (Packages to count); then the largest Up on the pick values page, judging (?) cards yourself.
 
 ## Traps
 - Barricade or Body Slam without a block engine.
