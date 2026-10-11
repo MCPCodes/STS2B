@@ -102,7 +102,11 @@ internal sealed class CombatReader : IScreen
         };
     }
 
-    public ActionResult Execute(GameContext ctx, Node? node, string actionId)
+    // Co-op: TeamSince.Acted hears of every action of our own; one the model chose hands "team_since" over.
+    public ActionResult Execute(GameContext ctx, Node? node, string actionId) =>
+        TeamSince.Acted(ctx, Act(ctx, node, actionId));
+
+    private static ActionResult Act(GameContext ctx, Node? node, string actionId)
     {
         if (Enter(ctx, node, out var why) is not { } b)
             return ActionResult.Fail($"No fight to act in ({why}).");
@@ -670,6 +674,8 @@ internal sealed class CombatReader : IScreen
         var relics = new JsonArray();
         foreach (var relic in b.Me.Relics) relics.Add(Describe.Text(relic.Title));
         state["relics"] = relics;
+        // Co-op, last: "team_since" and "team_changed", what the others did since we last acted.
+        if (b.Coop) TeamSince.Add(state, ctx, b.Cs, b.Me, b.Enemies);
         return state;
     }
 

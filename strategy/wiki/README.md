@@ -11,7 +11,7 @@ Pages the bot reads when it needs them and adds to when a fight teaches it somet
 - `run/act1.md`: what an act gives between fights: floors, card reward odds, rest sites, heals.
 - `lessons/`: pages the bot starts itself, for anything that doesn't belong to one enemy or card.
 
-So far the enemy and encounter pages cover Overgrowth only, and the card pages the Ironclad only. Underdocks, acts 2 and 3 and the other characters have no pages yet.
+So far the enemy and encounter pages cover both first acts, Overgrowth and Underdocks (`encounters/act1-underdocks.md`), and the card pages the Ironclad only. Acts 2 and 3 and the other characters have no pages yet.
 
 ## How a page is laid out
 
