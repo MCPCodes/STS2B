@@ -54,7 +54,7 @@ public static partial class PromptBuilder
         "Keep the Build plan, Orders and floor log in `runs/current.md` current so nothing is lost.\n" +
         "- When `act_sequence` is in your tools, it can play a whole turn from one snapshot; see its description.\n" +
         "- Waiting costs nothing here: `wait_for_decision` waits as long as it takes, through enemy turns, teammates and pauses. " +
-        "Never end your turn while a run is in progress; call `wait_for_decision` instead.";
+        "While a run is in progress, every reply must end with a tool call; when there is nothing to do yet, call `wait_for_decision`.";
 
     /// <summary>
     /// Build the system text from <paramref name="folder"/> (the repo, or a fallback folder with

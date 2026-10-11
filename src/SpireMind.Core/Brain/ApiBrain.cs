@@ -72,7 +72,7 @@ public sealed class ApiBrain : IPlayBrain
     public const string KeepPlayingWithState = "Keep playing. This is the game now, as wait_for_decision would return it:";
 
     /// <summary>The reply after a response hit max_tokens.</summary>
-    public const string CutOff = "Your reply hit the output limit (max_tokens) and was cut off. Keep your thinking and notes shorter, then continue.";
+    public const string CutOff = "Your reply hit the output limit (max_tokens) and was cut off, so nothing in it was run. Continue from the current state: make your tool call sooner and keep note and chat text short.";
 
     /// <summary>Opens a conversation that replaces a long one.</summary>
     public const string Refreshed = "Context refreshed to save tokens.";
