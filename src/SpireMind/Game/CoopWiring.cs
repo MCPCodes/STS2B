@@ -41,8 +41,13 @@ internal static class CoopWiring
             return null;
 
         // The relay logs from its pool tasks; once the game is quitting, nothing is printed.
-        Action<string> info = line => { if (!_quiet) log(line); };
-        Action<string> warn = line => { if (!_quiet) logError(line); };
+        // The wrappers call the loggers they were given, kept under their own names: a lambda
+        // that read `log` after it was pointed at the wrapper would call itself until the
+        // stack ran out, which crashed the game at load.
+        var logTo = log;
+        var logErrorTo = logError;
+        Action<string> info = line => { if (!_quiet) logTo(line); };
+        Action<string> warn = line => { if (!_quiet) logErrorTo(line); };
         log = info;
         logError = warn;
 
