@@ -663,6 +663,9 @@ internal sealed class CombatReader : IScreen
         }
         else if (b.Players.Count > 1) state["teammates"] = TeammateList(b);
         state["enemies"] = Enemies(b);
+        // One sentence on how to read "next_moves", only when some enemy has them. Not "next":
+        // the tools already use that key for the snapshot after an action.
+        if (state["enemies"] is JsonArray foes && foes.Any(e => e?["next_moves"] is not null)) state["next_moves_note"] = Forecast.Hint;
         if (IncomingDamage(b) is { } incoming) state["incoming_damage"] = incoming;
         state["hand"] = hand;
         // Counts by name only: draw order is hidden from human players too.
@@ -730,6 +733,8 @@ internal sealed class CombatReader : IScreen
             // Down at 0 HP but kept in the fight: it comes back, and its intent says when and how.
             if (reviving) json["reviving"] = true;
             json["intents"] = Intents(enemy, cs);
+            // The moves after the shown intent, as far as they are certain (Forecast never guesses).
+            if (Forecast.For(enemy) is { } moves) json["next_moves"] = moves;
             if (mixed && enemy.IsPrimaryEnemy) json["primary"] = true;
             if (!enemy.IsHittable) json["untargetable"] = true;
             arr.Add(json);

@@ -1,4 +1,4 @@
-# Enemy move forecast ("next")
+# Enemy move forecast ("next_moves")
 
 In a fight the snapshot shows each enemy's current intent. `Forecast.For(enemy)` adds what the enemy does after that intent, as far as it is certain, so the model can plan across turns. The code is `src/SpireMind/Game/Forecast.cs`. The recipe it follows, with file and line evidence from the decompile, is on the Mac at `~/Projects/sts2-notes/forecast-v0.107.1/forecast.md`.
 
@@ -10,14 +10,14 @@ None of this has run in a live fight. It is built against v0.107.1 (0 warnings),
 {"i": 0, "name": "Byrdonis", "hp": 84, "max_hp": 84,
  "powers": [{"name": "Territorial", "amount": 1}],
  "intents": ["attack 17"],
- "next": ["attack 4x3", "attack 19", "attack 6x3"]}
+ "next_moves": ["attack 4x3", "attack 19", "attack 6x3"]}
 ```
 
-- `next` is an array of short strings, one per coming move, in order, starting with the move after the shown intent. At most 3 by default.
+- `next_moves` is an array of short strings, one per coming move, in order, starting with the move after the shown intent. At most 3 by default.
 - An entry is the move's intents in the words `intents` uses, joined with " + ": `"attack 18 + buff"`, `"attack 3x3"`, `"debuff"`, `"statuscard: 2"`.
 - When the first uncertain step is a random pick whose chances are exact, it is the last entry: `"50% debuff | 50% attack 11"` (whole percents, the game's own order, options that read the same merged). Nothing follows it.
 - A number with `~` (`"attack ~11"`, `"attack ~4x3"`) is today's number for a hit that something known will change before it lands. The hit count is never marked.
-- No `next` means unknown, never "it does nothing". An empty array is never sent.
+- No `next_moves` means unknown, never "it does nothing". An empty array is never sent.
 
 The note to show with it, once per snapshot, is `Forecast.Hint`:
 
@@ -30,13 +30,13 @@ It says that the enemy's own Strength gains are already counted, so the model do
 In `CombatReader.EnemiesJson`, after `json["intents"] = Intents(enemy, cs);`:
 
 ```csharp
-if (Forecast.For(enemy) is { } next) json["next"] = next;
+if (Forecast.For(enemy) is { } next) json["next_moves"] = next;
 ```
 
 And once per snapshot that has any, for example in `BoardState` after the enemies are set:
 
 ```csharp
-if (state["enemies"] is JsonArray foes && foes.Any(e => e?["next"] is not null)) state["next_note"] = Forecast.Hint;
+if (state["enemies"] is JsonArray foes && foes.Any(e => e?["next_moves"] is not null)) state["next_moves_note"] = Forecast.Hint;
 ```
 
 `EnemiesJson` also serves the hand-selection snapshot and the card choice screens in a fight. That is fine: the forecast makes its own timing tests and returns null whenever the shown intents are not still to come. Main thread only, like the reader.
@@ -45,7 +45,7 @@ Public surface:
 
 | Member | What |
 |---|---|
-| `public static JsonArray? Forecast.For(Creature enemy, int maxSteps = 3)` | the `next` array or null. Never throws. More than 6 steps are never walked. |
+| `public static JsonArray? Forecast.For(Creature enemy, int maxSteps = 3)` | the `next_moves` array or null. Never throws. More than 6 steps are never walked. |
 | `public const string Forecast.Hint` | the note above |
 | `public static string Forecast.SelfTest()` | the self-check; needs no game |
 
@@ -75,9 +75,9 @@ The whole feature is off for the session, with one log line saying why (`forecas
 - a read changed the game's state (the check above);
 - three reads have failed with an exception. Each failing monster class is logged once.
 
-No `next` in a snapshot when the fight is not running or is ending, it is not the players' side, the local player's phase is `None` (the stretch between the side switching back and the enemies' roll), or there is no local player.
+No `next_moves` in a snapshot when the fight is not running or is ending, it is not the players' side, the local player's phase is `None` (the stretch between the side switching back and the enemies' roll), or there is no local player.
 
-No `next` for an enemy when its class is not one of the 104 (another mod's monster, a test dummy), it has no machine, its move is not rolled yet, it is acting right now, its shown move has been performed already, the machine's current state is not the shown move, or anything threw.
+No `next_moves` for an enemy when its class is not one of the 104 (another mod's monster, a test dummy), it has no machine, its move is not rolled yet, it is acting right now, its shown move has been performed already, the machine's current state is not the shown move, or anything threw.
 
 The list ends early at: an escape or death blow (the monster is gone); a missing follow-up; a state that is not exactly one of the game's three state classes; a branch without a certain answer; a random pick with several open options (its chances are the last entry); an intent of an unknown kind.
 
@@ -87,7 +87,7 @@ Classes: 72 with fixed cycles, 10 with a conditional branch in the loop, 22 with
 
 | Monster | Where | Rule | Result |
 |---|---|---|---|
-| Bowlbug Rock | after Headbutt | The branch itself always gives the headbutt (the dizzy move is only reached through the engine's stun). But a fully blocked headbutt stuns it for a turn first, and blocking a hit in full is ordinary play, not a rare trigger. | the list stops: no `next` while a headbutt shows. While it shows `stunned`, `next` is the one headbutt that follows. |
+| Bowlbug Rock | after Headbutt | The branch itself always gives the headbutt (the dizzy move is only reached through the engine's stun). But a fully blocked headbutt stuns it for a turn first, and blocking a hit in full is ordinary play, not a rare trigger. | the list stops: no `next_moves` while a headbutt shows. While it shows `stunned`, `next_moves` is the one headbutt that follows. |
 | Knowledge Demon | after Ponder | The curse comes while its private counter plus the curses performed before that roll is below 3, then Slap. | followed |
 | Test Subject | after Respawn | Its respawn move raises the counter before the branch is asked: respawns now plus respawn moves before that roll below 2 means Multi Claw, else the third form's Lacerate. | followed |
 | Lagavulin Matriarch | after Sleep | Asleep loses 1 at the end of each enemy turn: sleep while its amount minus the step is 1 or more, then Slash. | followed. Unblocked damage wakes her at once (stun, then Slash). |
@@ -147,9 +147,9 @@ Never worked in: debuffs a coming move will put on the player (only the mark abo
 
 - The order of moves is the reliable part, the numbers are the weak part.
 - Anything the player does can change it: a stun (Whistle), an HP threshold (Ceremonial Beast's Plow, Terror Eel's Shriek), waking a sleeper, breaking Tunneler's Block, killing an ally. Poison on an enemy can do the same before it acts. The forecast is rebuilt from the live state for every snapshot, so the next one is right again.
-- Summons are not forecast: a new enemy gets its own `next` once it exists.
+- Summons are not forecast: a new enemy gets its own `next_moves` once it exists.
 - In co-op the numbers are for the local player.
-- `next` is not there for monsters from other mods, and for no monster after a game update until the tables are read again.
+- `next_moves` is not there for monsters from other mods, and for no monster after a game update until the tables are read again.
 - "Certain" has one hole of about 1 in 10^16 per roll: a draw of exactly 0 takes the first option.
 
 ## Self-check
@@ -183,12 +183,12 @@ Done once while writing, with throwaway scripts that load the built mod next to 
 ## Live checks, in the order to try them
 
 1. Nothing in the log. No `forecast: switched off` and no `forecast: no forecast for` line in a whole fight. That covers the build test, the private members and the purity check on every call.
-2. Timing. `next` is there in a normal turn and in a hand selection at turn start and at turn end, and never in a snapshot whose intents are last turn's. Log the side, the local player's phase and each enemy's performed flag for a fight if in doubt.
-3. Step 1 against the next turn. For several turns and monsters, the first entry of `next` equals `intents` one turn later, text and number. Include Byrdonis (Territorial), Nibbit or Ceremonial Beast (a Strength gain from a move, the second Plow), and a cultist (Ritual).
+2. Timing. `next_moves` is there in a normal turn and in a hand selection at turn start and at turn end, and never in a snapshot whose intents are last turn's. Log the side, the local player's phase and each enemy's performed flag for a fight if in doubt.
+3. Step 1 against the next turn. For several turns and monsters, the first entry of `next_moves` equals `intents` one turn later, text and number. Include Byrdonis (Territorial), Nibbit or Ceremonial Beast (a Strength gain from a move, the second Plow), and a cultist (Ritual).
 4. A seeded fight plays out the same with the hook in and out.
-5. Flyconid after Vulnerable Spores, Frail Spores, Smash: the next move is Vulnerable Spores, which `next` gives as certain.
-6. A stun. Whistle on Twig Slime M while its first pounce shows: `intents` reads `stunned`, `next` starts with the pounce, then the sticky shot for certain.
-7. The branch rules, each where its monster turns up: Test Subject after its first and second death, Knowledge Demon's third curse (the one rule that could not be run outside the game), Lagavulin Matriarch and Slumbering Beetle counting down (amount 1 means the attack is next). Bowlbug Rock: no `next` while its headbutt shows, and a fully blocked headbutt really gives `stunned` the turn after.
+5. Flyconid after Vulnerable Spores, Frail Spores, Smash: the next move is Vulnerable Spores, which `next_moves` gives as certain.
+6. A stun. Whistle on Twig Slime M while its first pounce shows: `intents` reads `stunned`, `next_moves` starts with the pounce, then the sticky shot for certain.
+7. The branch rules, each where its monster turns up: Test Subject after its first and second death, Knowledge Demon's third curse (the one rule that could not be run outside the game), Lagavulin Matriarch and Slumbering Beetle counting down (amount 1 means the attack is next). Bowlbug Rock: no `next_moves` while its headbutt shows, and a fully blocked headbutt really gives `stunned` the turn after.
 8. The marks. Each `~` against what the game shows a turn later: an enemy with 1 Weak, the player with 1 Vulnerable, a Flyconid showing its spores, the Amalgam while the Queen burns bright, a Tough Egg that has Strength when it hatches. And unmarked: an enemy under a temporary Strength loss.
 9. Two-Tailed Rat: chances on the first two turns, nothing once it may call for backup.
 10. Co-op: the numbers are the local player's.
@@ -230,4 +230,4 @@ The forecast switches itself off (the build test). To bring it back: run the rec
 - The number corrections of the recipe's section 3.3 (dividing a factor out, 1.5 for Vulnerable to come, Strength from another enemy) are not applied. Those numbers are marked.
 - Brimstone is marked, not added. Its Strength lands in the turn-start hooks, after the roll, so a hand selection during turn setup is read one point short of what the recipe's formula assumes.
 - After a move that applies Vulnerable, later numbers stay marked for good. The recipe takes the mark off once a fresh Vulnerable of the listed amount has run out, but the amount a player receives can be changed by relics, and stacking adds turns.
-- The reader now lists an enemy that is down and coming back (`"reviving": true`), which the recipe says is missing. Such an enemy gets a `next` from its forced state: a Decimillipede segment `["heal", "33% ... | 33% ... | 33% ..."]`, a Test Subject its next form's attacks.
+- The reader now lists an enemy that is down and coming back (`"reviving": true`), which the recipe says is missing. Such an enemy gets a `next_moves` from its forced state: a Decimillipede segment `["heal", "33% ... | 33% ... | 33% ..."]`, a Test Subject its next form's attacks.

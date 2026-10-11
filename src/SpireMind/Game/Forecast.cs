@@ -23,9 +23,9 @@ internal static class Forecast
 {
     /// <summary>The note that goes with "next" in a snapshot, once per snapshot.</summary>
     public const string Hint =
-        "next = this enemy's moves after its shown intent, in order and only as far as they are certain "
+        "next_moves = this enemy's moves after its shown intent, in order and only as far as they are certain "
         + "(a last entry with % is a random pick at exactly those chances); the list ends where the move after "
-        + "depends on what happens in the fight, and no next means unknown, not nothing. A number already counts "
+        + "depends on what happens in the fight, and no next_moves means unknown, not nothing. A number already counts "
         + "the Strength the enemy gains by then and otherwise assumes today's Weak, Vulnerable and other modifiers; "
         + "~ marks one that something already in play will change. What you do can replace the list: a stun, waking it, "
         + "or an HP threshold or death named in its powers.";

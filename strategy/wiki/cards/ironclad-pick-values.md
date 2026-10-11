@@ -3,6 +3,11 @@ Measured worth of adding, upgrading or removing each Ironclad card in simulated 
 
 ## Facts (simulator, game v0.107.1)
 
+### Status: evidence, not rules
+- These numbers come from single fights. They have not been confirmed over whole runs, where HP, potions and the deck carry from fight to fight.
+- Weigh them with everything else you know about the run. Do not take a rule from them, least of all for removals: "remove a Defend before a Strike" is what single elite and boss fights show, and whether it holds over a run is not known yet.
+- This note goes when the run simulator has re-measured them.
+
 ### What was measured and how to read it
 - The arena simulator played 300 hallway, 300 elite and 300 boss fights of act 1 with generated decks (see Limits), each as it was and again with one change: one copy of a card added, one card upgraded, or one Strike or Defend removed.
 - The player was a script that searches one turn ahead and plans nothing across turns. Unchanged, it won every hallway fight, 84% of the elite fights and 60% of the boss fights.
