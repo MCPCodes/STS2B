@@ -216,6 +216,8 @@ public static class CompareCommand
         var (wikisA, wikisB) = (Hashes(a.Where(r => compared.Contains(r.Model)), r => r.WikiHash), Hashes(b.Where(r => compared.Contains(r.Model)), r => r.WikiHash));
         if (wikisA.Count > 0 && wikisB.Count > 0 && !wikisA.SequenceEqual(wikisB))
             output.WriteLine($"Note: the wiki's pages differed between the two sides (A {Listed(wikisA)}; B {Listed(wikisB)}), so their sessions didn't read the same pages.");
+        if (BrainNote(a.Where(r => compared.Contains(r.Model)).ToList(), b.Where(r => compared.Contains(r.Model)).ToList()) is { } brains)
+            output.WriteLine(brains);
         foreach (var (m, sheetA, sheetB) in sides)
         {
             var (variantA, variantB) = (sheetA.Variants[0], sheetB.Variants[0]);
@@ -293,10 +295,25 @@ public static class CompareCommand
         var (wikisA, wikisB) = (Hashes(a, r => r.WikiHash), Hashes(b, r => r.WikiHash));
         if (wikisA.Count > 0 && wikisB.Count > 0 && !wikisA.SequenceEqual(wikisB))
             output.WriteLine($"Note: the wiki's pages differed between the two runs (A {Listed(wikisA)}; B {Listed(wikisB)}), so their sessions didn't read the same pages.");
+        if (BrainNote(a, b) is { } brains)
+            output.WriteLine(brains);
         foreach (var (m, sheetA, sheetB) in sides)
             if (sheetA.Players[0] == sheetB.Players[0])
                 output.WriteLine($"Note: A and B hold {m} as the same variant ({sheetA.Players[0].Describe()}), so this shows how much the same fights " +
                                  "differ from one run to the next, not what a switch does.");
+    }
+
+    /// <summary>What to say when the two sides were not driven by the same brain, or null when
+    /// they were: Claude Code and the mod's own brain differ in more than a switch, and their
+    /// system prompts differ by design.</summary>
+    internal static string? BrainNote(IReadOnlyList<FightResult> a, IReadOnlyList<FightResult> b)
+    {
+        var (brainsA, brainsB) = (Hashes(a, r => r.Brain), Hashes(b, r => r.Brain));
+        if (brainsA.SequenceEqual(brainsB))
+            return null;
+        return $"Note: the two sides were not driven the same way (A {Listed(brainsA)}; B {Listed(brainsB)}). {Brains.ClaudeCode} is Claude Code on the subscription, with its own " +
+               $"instructions around the arena's prompt; {Brains.Api} is the mod's own brain on the API, as in the real game. Their system prompts differ by design, " +
+               "and so does what a model is told about the fight, so a difference below is the two harnesses' as well as anything else's.";
     }
 
     private static string Listed(IReadOnlyList<string> items) => items.Count == 0 ? "none" : string.Join(", ", items);

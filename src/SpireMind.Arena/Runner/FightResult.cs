@@ -184,6 +184,17 @@ public sealed record FightResult
     /// that were on, "base" for none and for every line from before there were any.</summary>
     public string Experiment { get; init; } = ExperimentLabel.Base;
 
+    /// <summary>What drove the fight (<see cref="Brains"/>): Claude Code headless on the
+    /// subscription, or the mod's own brain on the API. A line from before there were two has no
+    /// such field and is Claude Code's.</summary>
+    public string Brain { get; init; } = Brains.ClaudeCode;
+
+    /// <summary>Only on the line of a fight the API brain played (<c>--brain api</c>): what the
+    /// brain was run with and what it did, as <see cref="ApiFight"/> gathers it (the settings,
+    /// each request's model, effort and max_tokens, the brain's own spend figures and fight line,
+    /// how it stopped, and the notes it wrote). docs/arena.md lists the keys.</summary>
+    public JsonObject? Api { get; init; }
+
     /// <summary>
     /// Present on the line of a position run (<c>arena position</c>): the session took a
     /// recorded fight over at the start of a turn instead of playing the scenario from its
@@ -414,6 +425,7 @@ public sealed record FightResult
             ["models_used"] = new JsonArray(ModelsUsed.Select(m => (JsonNode)JsonValue.Create(m)!).ToArray()),
             ["effort"] = Effort,
             ["experiment"] = Experiment,
+            ["brain"] = Brain,
             ["outcome"] = Outcome,
             ["hp_left"] = HpLeft,
             ["max_hp"] = MaxHp,
@@ -423,6 +435,7 @@ public sealed record FightResult
             ["refused_actions"] = RefusedActions,
         };
         if (Position is not null) json["position"] = Position.ToJson();
+        if (Api is not null) json["api"] = Api.DeepClone();
         var calls = new JsonObject();
         foreach (var (name, count) in ToolCalls.OrderBy(c => c.Key, StringComparer.Ordinal))
             calls[name] = count;
@@ -501,6 +514,8 @@ public sealed record FightResult
             ModelsUsed = Strings(json["models_used"]),
             Effort = Str(json["effort"]) ?? "",
             Experiment = Str(json["experiment"]) is { Length: > 0 } label ? label : ExperimentLabel.Base,
+            Brain = Str(json["brain"]) is { Length: > 0 } brain ? brain : Brains.ClaudeCode,
+            Api = json["api"]?.DeepClone() as JsonObject,
             Position = PositionInfo.FromJson(json["position"] as JsonObject),
             Outcome = outcome,
             HpLeft = (int)(Long(json["hp_left"]) ?? 0),

@@ -570,11 +570,7 @@ public sealed class ClaudeFight
     {
         var versioner = new SnapshotVersioner();
         var waiter = new DecisionWaiter(game, versioner);
-        var chat = new ChatHub
-        {
-            BotName = ArenaPrompt.Character,
-            Persona = new JsonObject { ["name"] = "Ironclad", ["title"] = "The Ironclad", ["id"] = "IRONCLAD", ["tone"] = "A terse, grim soldier." },
-        };
+        var chat = NewChat();
         var tools = new BotTools(game, waiter, versioner, chat) { ActSettleTimeout = settleTimeout, MaxWait = maxWait };
 
         lock (PortGate)
@@ -605,6 +601,14 @@ public sealed class ClaudeFight
             throw new IOException($"Couldn't open a loopback port for the fight's bridge: {last?.Message ?? "no free port"}");
         }
     }
+
+    /// <summary>The chat a fight's tools speak through: the Ironclad, with the dev host's small
+    /// persona. The same for either brain (<see cref="ApiFight"/> uses it too).</summary>
+    internal static ChatHub NewChat() => new()
+    {
+        BotName = ArenaPrompt.Character,
+        Persona = new JsonObject { ["name"] = "Ironclad", ["title"] = "The Ironclad", ["id"] = "IRONCLAD", ["tone"] = "A terse, grim soldier." },
+    };
 
     private static int FreePort()
     {

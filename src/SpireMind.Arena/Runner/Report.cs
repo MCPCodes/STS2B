@@ -317,6 +317,20 @@ public static class Report
         var keyed = results.Select(r => r.ApiKeySource).Where(s => s is not (null or "none")).Distinct().ToList();
         if (keyed.Count > 0)
             output.WriteLine($"Warning: some sessions report an API key source ({string.Join(", ", keyed)}), so they may not have run on the subscription.");
+        // Two brains are two players: the mod's own brain on the API, or Claude Code on the subscription.
+        var api = results.Where(r => r.Brain == Brains.Api).ToList();
+        if (api.Count > 0)
+        {
+            // A fight played against the scripted stand-in (--fake-api) cost nothing, whatever its count says.
+            var standIn = api.Count(r => FightResult.Str(r.Api?["key_source"]) == "fake");
+            output.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"Brain: {api.Count} of these {(results.Count == 1 ? "fight was" : "fights were")} played by the mod's own brain on the API (brain api), the program that plays the real game. ") +
+                string.Create(CultureInfo.InvariantCulture, $"Their $/fight is the brain's own count of what its requests cost, ${api.Sum(r => r.TotalCostUsd ?? 0):0.00} in all, timeouts and errors included") +
+                (standIn == api.Count ? "; they ran against the scripted stand-in (--fake-api), so nothing was billed."
+                    : standIn > 0 ? $", billed to the API credit except for the {standIn} that ran against the scripted stand-in (--fake-api)."
+                    : ", billed to the API credit.") +
+                (api.Count < results.Count ? " The others were played by Claude Code on the subscription." : ""));
+        }
         var prompts = results.Select(r => r.PromptHash).Where(h => h is not null).Distinct().Count();
         if (prompts > 1)
             output.WriteLine($"Note: these fights were played with {prompts} different system prompts; the play prompt or the strategy notes changed in between.");
@@ -411,6 +425,9 @@ public static class Report
 
     // How each model drove the tools: a model that plays card by card with act pays for it in
     // time and tokens, and so does one that reads a page it has no use for.
+    // The API brain's tool for opening a wiki page, counted in the Read column like Claude Code's Read.
+    private const string ApiReadTool = "notes_read";
+
     private static void ToolCalls(List<string> players, Sheet sheet, TextWriter output)
     {
         output.WriteLine("Tool calls per fight (Read is Claude Code's file tool, the way a session opens the wiki; wiki pages are the different pages a fight opened):");
@@ -425,12 +442,15 @@ public static class Report
                 .. MainTools.Select(tool => PerFight(r => r.ToolCalls.GetValueOrDefault(tool)).ToString("0.0", CultureInfo.InvariantCulture)),
                 PerFight(r => r.ReadCalls).ToString("0.0", CultureInfo.InvariantCulture),
                 PerFight(r => r.WikiPages.Count).ToString("0.0", CultureInfo.InvariantCulture),
-                PerFight(r => r.ToolCalls.Where(c => !MainTools.Contains(c.Key) && c.Key != ClaudeCli.ReadTool).Sum(c => c.Value)).ToString("0.0", CultureInfo.InvariantCulture),
+                PerFight(r => r.ToolCalls.Where(c => !MainTools.Contains(c.Key) && c.Key != ClaudeCli.ReadTool && c.Key != ApiReadTool).Sum(c => c.Value)).ToString("0.0", CultureInfo.InvariantCulture),
                 PerFight(r => r.ToolErrors).ToString("0.00", CultureInfo.InvariantCulture),
                 Stats.Mean(counted.Where(r => r.NumTurns is not null).Select(r => (double)r.NumTurns!.Value)),
             ]);
         }
         table.Write(output);
+        if (players.Any(name => sheet.FightsOf(name).Any(r => r.Brain == Brains.Api)))
+            output.WriteLine($"For a fight the API brain played, Read is its {ApiReadTool} calls (its way to open the wiki), other holds its other notes tools and get_persona, " +
+                             "and the turns are its API requests.");
 
         // Which pages, and whether a model opens one where the prompt asks for it: before an
         // elite or a boss.

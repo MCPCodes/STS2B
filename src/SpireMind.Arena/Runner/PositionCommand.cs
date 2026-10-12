@@ -101,6 +101,13 @@ public static class PositionCommand
             return 0;
         }
 
+        // The mod's own brain on the API credit plays the position: no Claude Code is looked for or started.
+        if (options.Brain == Brains.Api)
+        {
+            output.WriteLine();
+            return await ApiRun.PositionAsync(options, output, position, transport: options.FakeApiTransport ? new FakeApi() : null);
+        }
+
         if (RunCommand.Prepare(options, output, home, out var exitCode) is not { } setup)
             return exitCode;
         var (claude, repo, readRule, prompt, promptHash, wikiPages, wikiHash, environment) = setup;
