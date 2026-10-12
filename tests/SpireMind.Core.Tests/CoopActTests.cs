@@ -238,7 +238,9 @@ public class CoopActTests
 
     /// <param name="settle">The waiter's settle time; zero makes a step settle on its first
     /// capture, which <see cref="CoopFight.BetweenSteps"/> counts on.</param>
-    private static BotTools Build(CoopFight game, TimeSpan? hold = null, TimeSpan? settle = null, ChatHub? chat = null)
+    // actTimeout: the short default keeps a step that never settles quick; a test whose game goes
+    // busy for a few captures gives it room, since a loaded machine can stretch the 2 ms polls.
+    private static BotTools Build(CoopFight game, TimeSpan? hold = null, TimeSpan? settle = null, ChatHub? chat = null, TimeSpan? actTimeout = null)
     {
         var versioner = new SnapshotVersioner();
         var waiter = new DecisionWaiter(game, versioner)
@@ -248,7 +250,7 @@ public class CoopActTests
         };
         return new BotTools(game, waiter, versioner, chat ?? new ChatHub { BotName = "Ironclad" })
         {
-            ActSettleTimeout = TimeSpan.FromMilliseconds(250),
+            ActSettleTimeout = actTimeout ?? TimeSpan.FromMilliseconds(250),
             RepeatWaitHold = hold ?? TimeSpan.FromSeconds(60),
         };
     }
@@ -492,7 +494,7 @@ public class CoopActTests
             game.BusyCaptures = 3;
             game.Block += 7;
         };
-        var tools = Build(game, settle: TimeSpan.Zero);
+        var tools = Build(game, settle: TimeSpan.Zero, actTimeout: TimeSpan.FromSeconds(10));
 
         var outcome = Sequence(tools, Version(tools), "play:0", "play:1>e0");
 
@@ -528,7 +530,7 @@ public class CoopActTests
             game.BusyCaptures = 3;
             chat.PostFromHuman("Mark", line);
         };
-        var tools = Build(game, settle: TimeSpan.Zero, chat: chat);
+        var tools = Build(game, settle: TimeSpan.Zero, chat: chat, actTimeout: TimeSpan.FromSeconds(10));
 
         var outcome = Sequence(tools, Version(tools), "play:0", "play:1>e0", "play:2>e0");
 
