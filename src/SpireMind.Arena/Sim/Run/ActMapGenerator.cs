@@ -55,7 +55,8 @@ public sealed record ActMapRules(string Act, int Rooms, Func<GameRng, MapCounts>
 /// <summary>
 /// The game's map generator (v0.107.1, its standard act map), number for number: the same
 /// draws from the same stream in the same order, so that a seed gives the map the game gives.
-/// Five real saves are rebuilt by it point for point (MapChecks).
+/// Five real saves are rebuilt by it point for point (MapChecks), and a second reader's own
+/// port of the game's generator makes the same map on 1,430 seeds (GenerationChecks).
 /// <para>
 /// The steps. The act's numbers of Rest Sites and Unknown rooms are drawn. Seven paths are
 /// walked from the first row to the last, each step to the same or a neighbouring column, never
@@ -304,8 +305,14 @@ public static class ActMapGenerator
         /// <summary>
         /// The placement rules. No Rest Site in the three top rows. No Rest Site and no elite below
         /// row 6. An elite, a Rest Site, a Treasure room or a shop never directly before or after
-        /// one of its own kind. Two children of one parent are never both Rest Sites, both Monster
-        /// rooms, both Unknown rooms, both elites or both shops.
+        /// one of its own kind. Two children of one parent are never both Rest Sites, both Unknown
+        /// rooms, both elites or both shops.
+        /// <para>
+        /// The game's list of kinds that may not be siblings names the Monster room too, and so
+        /// does this test. But nobody ever asks it about a Monster room: the queue holds none, the
+        /// repair puts none back, and what is left free becomes one without a question. Finished
+        /// maps are full of Monster rooms under one parent; that is the game's, not a slip.
+        /// </para>
         /// </summary>
         private bool IsAllowed(MapPointType type, MapPoint point)
         {
@@ -457,6 +464,13 @@ public static class ActMapGenerator
         /// parent and one child, whose parent has other children, with no fork further along the
         /// stretch, where the stretch's end can still be reached another way and no child outside
         /// the stretch would be left without a parent.
+        /// <para>
+        /// Four of the tests in here can never decide (the point that is already gone, the parent
+        /// whose cell is empty, the end with one parent left, the child outside the stretch), and
+        /// two of those that find the stretches cannot either (a start on row 0, an end with two
+        /// parents). They are the game's and are kept as written; MAP.md, "Six tests of the pruning
+        /// pass that cannot decide", says why no map can show them.
+        /// </para>
         /// </summary>
         private bool PruneSegment(MapPoint[] segment)
         {
@@ -528,6 +542,11 @@ public static class ActMapGenerator
         /// are turned into the kind wherever the placement rules allow it. The fixed rows are never
         /// touched. The Rest Sites counted include the whole last row, so pruned Rest Sites are
         /// rarely put back. True when anything was changed: the map is then pruned again.
+        /// <para>
+        /// All four kinds are asked in every round, also after an earlier one was put back: the
+        /// game joins the four answers with an "or" that looks at both sides. Stopping at the first
+        /// yes would put one kind back a round, and make another map on about 2 seeds in 1,000.
+        /// </para>
         /// </summary>
         private bool Repair()
         {

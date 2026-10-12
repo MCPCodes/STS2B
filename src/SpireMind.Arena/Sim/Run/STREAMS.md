@@ -19,7 +19,9 @@ Everything here is the game's (v0.107.1, single player, ascension 0, standard mo
 | `GoldenSave.cs` | `GoldenSave`: reads a real save and compares it with what its seed gives |
 | `RunGoldenData.cs` | six real saves, reduced to the parts the checks read |
 | `Tools/game_lists.py`, `Tools/golden_data.py` | the scripts that make `GameLists.cs` (from the decompiled game) and `RunGoldenData.cs` (from the saves); run the first again after a game update |
+| `Tools/check_game_lists.py` | a second reader's script: reads the game's pools, acts, encounters and epochs its own way and names every difference from `GameLists.cs` (none today) |
 | `RunStreamsChecks.cs` | the checks |
+| `GenerationChecks.cs` | a second reader's checks (below, "A second reading") |
 
 `Sim/Scenario.cs` rolls card rarity, potion drops and Unknown rooms through the odds classes here; its scenarios are the same as before, one by one. `Sim/Engine/GameRng.cs` has one more `RngSet` constructor, from nine streams.
 
@@ -83,7 +85,7 @@ The run keeps the card rarity offset and the potion chance as numbers of `RunSta
 
 ## The relic bags
 
-`RelicBag` is the game's bag alone: `PullFromFront(rarity, isAllowed, filter)`, `PullFromBack(...)`, `Remove(name)`, `Contains`, `HasAvailableRelics`, `Relics(rarity)`, `Rarities`. An empty rarity gives way Shop, Common, Uncommon, Rare, and after Rare nothing. The shared bag refills an empty rarity from its start list, unshuffled; the player's bag does not. The rarity roll, taking a pulled relic out of the other bag, the shop's filter and what to do when a pull lands on a relic the arena has left out belong to whoever pulls.
+`RelicBag` is the game's bag alone: `PullFromFront(rarity, isAllowed, filter)`, `PullFromBack(...)`, `Remove(name)`, `Contains`, `HasAvailableRelics`, `Relics(rarity)`, `Rarities`. An empty rarity gives way Shop, Common, Uncommon, Rare, and after Rare nothing. (The bag counts the steps of that way, four at most, and throws when there are more: no rule of the game's, only so that a way that was changed into a circle fails loudly instead of searching an empty bag forever.) The shared bag refills an empty rarity from its start list, unshuffled; the player's bag does not. The rarity roll, taking a pulled relic out of the other bag, the shop's filter and what to do when a pull lands on a relic the arena has left out belong to whoever pulls.
 
 ## Golden saves
 
@@ -92,6 +94,21 @@ The run keeps the card rarity offset and the potion chance as numbers of `RunSta
 One of the folder's nine saves looks like a save of the start and is not: `run-164521-69b44341ea82.save` is seed 1BUSLN0FY5 again, saved seven seconds after `run-164514`, AFTER Neow's pick (Arcane Scroll, which put Barricade into the deck). Its `rewards` counter is 1 (the one number Arcane Scroll's card took), its event counter is 1, and its bags are still whole. So nothing on Neow's screen draws from `rewards` before the pick.
 
 Only saves of v0.107.1 count. The Regent save of May 2026 that the plan named as the test was written by an older build (its third act's boss does not exist in this one, and its player seed is the seed number plus one): it cannot be rebuilt by these rules and is not used.
+
+## A second reading
+
+The game's code was read once more by a reader who had not written the port (chunk 7 of the plan), line by line against `RunSeed.cs`, `RunStreams.cs`, `RunGeneration.cs`, `RelicBag.cs`, `RunOdds.cs`, `RunUnlocks.cs` and `GameLists.cs`. No difference in behaviour was found. What that reading added, in `GenerationChecks`:
+
+- **A whole real run on the lists.** The game's record of a three-act run (seed 75F277YN2G, a single Ironclad, 48 floors, `golden-saves/history/1791592972.run`) met 19 hallway fights, 4 elites and 3 Ancients, each the next entry of its act's generated list (the k-th Monster room takes hallway entry k, an Unknown room that turns out to be one included), and its one Event room took entry 1 of the event list. That is the lists in use through Underdocks, Hive and Glory, on a seed no save holds.
+- **The forced boss, in the real game.** That run's third boss was Aeonglass where the roll gives the Queen: the first boss of the act's order of introduction that the profile had never met replaces the rolled one, and nothing is drawn for it.
+- **The act roll on eleven real seeds** (the five saves' and six more from the run history), and the first hallway fight of four of them.
+- **The Unknown room's roll, written out a second time** and held against `UnknownRoomOdds.Roll` over 30,000 rolls with every set of barred kinds, room and odds alike.
+- **Names.** `GameNames.SnakeCase` and `GameNames.Slug` against the game's own pattern, run by the runtime's pattern matcher, for every name the lists hold (about 570: streams, relics, events, encounters, acts, Ancients, cards) and the corners of the pattern.
+- **A pull always ends**: after Rare nothing, also in a bag that only holds Shop relics.
+
+`Tools/check_game_lists.py <decompiled folder> Sim/Run/GameLists.cs` is the lists' second reading: every pool in order with each relic's rarity and the epoch that gates it, every act's numbers, events, encounters (room, weak, tags), Ancients with their gates and boss order, the shared events, the epochs. It prints `0 differences` on v0.107.1; run it after `game_lists.py` on a new build.
+
+The map's second reading is in `MAP.md`.
 
 ## Left out, by name
 

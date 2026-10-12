@@ -2,7 +2,7 @@
 
 Chunk 5 of the run-mode plan (`sts2-notes/run-mode-v0.107.1/plan.md`, sections 1.5, 1.6, gaps 3 to 5 and 7). The frame of a run is in `README.md`, the streams and bags in `STREAMS.md`. Everything here is the game's (v0.107.1, single player) unless a line says "house rule"; the game's files are named where a rule comes from.
 
-No relic of the game is built here. This is what relic content is written against.
+No relic of the game is built here: this is what relic content is written against. The relics themselves, and the list of the 157 an act 1 Ironclad can get, are in `../Content/RELICS.md`.
 
 ## Files
 
@@ -100,11 +100,11 @@ run.ObtainRelic(pull.Relic!);
 - Front of the player's bag for elites, events and capsules; back for shops, never one of `NeverInShops` (five relics); front of the shared bag for a chest. An empty rarity gives the next one's: Shop, Common, Uncommon, Rare (`RelicBag`). A relic pulled from the player's bag leaves the shared bag at once; a chest's relic leaves the player's bag when it is obtained.
 - `IsAllowed`: the seventeen relics of `OnlyBeforeTheLastChest` are dropped from the bag from total floor 41 on, Lasting Candy also for a profile with no finished run. In act 1 everything else is allowed.
 - A relic obtained inside a fight cannot reach the bags; `SyncBags`, which every pull calls first, takes every held relic out of both.
-- **House rule, relics that are not built** (the plan's "draw again"). The pull first finds the relic the game would give (`pull.GameRelic`). Built: it is taken, and the pull is the game's own (`pull.IsTheGames`). Not built, `strict`: nothing is pulled; end the run as unrepresentable. Not built, otherwise: the next built relic of the same list is taken and the ones before it are passed over (`pull.PassedOver`); they stay in the bag, where they will be passed over again. When the list has no built relic, a rolled rarity is rolled again on the same stream (`pull.Rerolls`), as long as some rolled rarity still has one; a rarity that was not rolled gives nothing. `isBuilt` is the registry unless a check passes its own.
+- **House rule, relics that are not built** (the plan's "draw again"). The pull first finds the relic the game would give (`pull.GameRelic`). Built: it is taken, and the pull is the game's own (`pull.IsTheGames`). Not built, `strict`: nothing is pulled; end the run as unrepresentable. Not built, otherwise: the next built relic of the same list is taken and the ones before it are passed over (`pull.PassedOver`); they stay in the bag, where they will be passed over again. When the list has no built relic, a rolled rarity is rolled again on the same stream (`pull.Rerolls`), as long as some rolled rarity still has one; a rarity that was not rolled gives nothing. `isBuilt` is the registry unless a check passes its own. Whoever pulls writes to the run's `LeftOutLog` what the pull did not take from the game: `pull.GameRelic` when `pull.Rerolls` is above 0 (it is of a list the arena holds nothing of, so it is not among the passed-over ones), then every relic of `pull.PassedOver` (`RelicReward.Populate` does).
 
 ## The 27 hooks outside a fight
 
-`RunHooks.Hooks` lists them with the number of reachable relics that use each. Twenty-four are declared and sent. Eighteen are on `Listener` (and `Relic` for the pickup):
+`RunHooks.Hooks` lists them with the number of reachable relics that use each. All 27 are declared and sent. Twenty-one are on `Listener` (and `Relic` for the pickup):
 
 | Hook | Sent by |
 | --- | --- |
@@ -117,13 +117,15 @@ run.ObtainRelic(pull.Relic!);
 | `ModifyUnknownMapPointRoomTypes`, `ShouldAllowFreeTravel` | `RunHooks`: the map |
 | `ShouldGenerateTreasure` | `RunHooks`: the treasure room |
 | `ShouldDisableRemainingRestSiteOptions`, `ModifyRestSiteHealAmount`, `AfterRestSiteHeal`, `ModifyExtraRestSiteHealText` | `RunHooks`: the rest site |
+| `TryModifyRestSiteOptions` | `RestSite.GenerateOptions`: the rest site, when its options are made (`REST-AND-TREASURE.md`) |
+| `ModifyMerchantPrice`, `ShouldRefillMerchantEntry` (and `AfterItemPurchased`, which is not one of the 27) | `ShopHooks`: the shop (`SHOP.md`) |
 | `AfterModifyingRewards`, `AfterModifyingCardRewardOptions` | `RunHooks`: the rewards, with the listeners that changed something |
 
 Six more have rewards and card offers as their arguments and are declared on the rewards' interface `IRewardHooks`, sent by `RewardHooks` (`REWARDS.md`): `TryModifyRewards` (`RewardHooks.ModifyRewards`), `TryModifyRestSiteHealRewards` (`RewardHooks.ModifyRestSiteHealRewards`), `TryModifyCardRewardOptions` and `TryModifyCardRewardOptionsLate` (`RewardHooks.ModifyCardRewardOptions`, and `CardReward.OnRelicObtained` for a relic obtained while a card reward waits), `ModifyCardRewardCreationOptions` (`RewardHooks.ModifyCardRewardCreationOptions`), `ModifyMerchantCardCreationResults` (`RewardHooks.ModifyMerchantCardCreationResults`).
 
-Three wait for a type a later part defines: `TryModifyRestSiteOptions` (a rest site option), `ModifyMerchantPrice` and `ShouldRefillMerchantEntry` (a shop entry). The part that defines the type declares the hook on `Listener` with a `RunContext` first and sends it with `RunHooks.Modifiers`, `Fold`, `Any`, `All` or `Each`; each entry of the list says how the game does it. Then the entry gets its `SentBy` and loses its `Waits`. A check holds the list to what is declared: a waiting hook that turns up on `Listener` or `IRewardHooks` fails it, every call site the list names must exist, and no hook of the run may be declared both on `Listener` and on an interface of a part.
+None waits any more: the three that waited for a type of a later part were declared by the part that defines the type (the rest site's option, the shop's entry). A hook that is not among the 27 and that a later part needs is added the same way: a virtual on `Listener` with a `RunContext` first, sent from one named call site with `RunHooks.Modifiers`, `Fold`, `Any`, `All` or `Each`. A check holds the list to what is declared: every call site the list names must exist, and no hook of the run may be declared both on `Listener` and on an interface of a part.
 
-Only the pickup, room entered, the gold hooks and the fight's end and victory are exercised by relics in the checks; the other declared hooks are checked for who is asked, in which order and when the asking stops. The relic that first uses one brings its own checks.
+In `RelicFrameworkChecks` only the pickup, room entered, the gold hooks and the fight's end and victory are exercised by relics; the other declared hooks are checked for who is asked, in which order and when the asking stops. The rooms' checks exercise theirs with check relics under the game's class names (`RestSiteChecks`, `TreasureChecks`, `ShopChecks`), and the relic that first uses a hook brings its own checks (`../Content/RELICS.md`).
 
 ## Left out by name
 
@@ -135,7 +137,6 @@ Only the pickup, room entered, the gold hooks and the fight's end and victory ar
 - **A random number drawn from a fight's streams by a hook that is heard outside a fight** (it throws).
 - **Stackable relics** (only the fallback relic Circlet, which the game hands out when a bag is empty: a pull then finds nothing), wax and melted relics (an act 2 Ancient's), the floor a relic was obtained on (the game keeps it for its run history).
 - **The run history entries** the game writes in these commands (gold gained, HP healed, relics picked).
-- **The completeness list for relics**: `RunRelics.IsBuilt` is "registered". The chunk that registers the first relics adds the list of the 157 reachable ones to `Completeness`, so that each is registered or left out with a reason.
 
 ## Checks
 

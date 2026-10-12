@@ -150,7 +150,8 @@ public sealed class PotionsChecks : IArenaChecks
                 c.Equal(e.Generated, p.CanBeGeneratedInCombat, $"{e.ClassName} can be generated in a fight");
                 c.That(p.Text(null).Length > 0, $"{e.ClassName} has a text outside a fight");
             }
-            c.Equal(Expected.Length, registry.Potions.Count, "no other potion is registered");
+            // Potion-Shaped Rock is the game's one Token-rarity potion: in no pool, made by the relic Petrified Toad alone (Relics1).
+            c.Equal(Expected.Length, registry.Potions.Keys.Count(name => name != Relics1.PotionShapedRock), "no other potion of the pools is registered");
         });
 
         c.Group("every potion is offered under the action id its target kind calls for", () =>

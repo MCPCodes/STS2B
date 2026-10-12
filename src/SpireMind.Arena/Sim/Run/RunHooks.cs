@@ -26,14 +26,15 @@ public sealed record RunHookInfo(string Name, int Users, string SentBy, string? 
 /// belongs to the fight goes on to the fight's own listeners when it is sent inside one.
 /// <para>
 /// <see cref="Hooks"/> lists the 27 hooks outside a fight that the relics of an act 1 Ironclad
-/// use. Twenty-four are declared and sent: eighteen on <see cref="Listener"/> (and
-/// <see cref="Relic"/> for the pickup), sent from here or from the command named in the list,
-/// and the six whose arguments are rewards and card offers on <see cref="IRewardHooks"/>, sent
-/// from <see cref="RewardHooks"/> through the helpers here. The content that first uses one
-/// brings its checks. Three wait for types that later parts of run mode define (a shop entry,
-/// a rest site option): the part that defines the type declares the hook on
-/// <see cref="Listener"/> and sends it with <see cref="Modifiers"/>, <see cref="Fold{T}"/> or
-/// <see cref="Any"/> as the list says.
+/// use. All are declared and sent: twenty-one on <see cref="Listener"/> (and
+/// <see cref="Relic"/> for the pickup), sent from here, from the command named in the list,
+/// from <see cref="RestSite.GenerateOptions"/> (the options of a rest site) or from
+/// <see cref="ShopHooks"/> (a shop entry's price and refill), and the six whose arguments are
+/// rewards and card offers on <see cref="IRewardHooks"/>, sent from <see cref="RewardHooks"/>
+/// through the helpers here. The content that first uses one brings its checks. A hook that a
+/// later part needs and that is not among the 27 is declared by that part on
+/// <see cref="Listener"/> and sent with <see cref="Modifiers"/>, <see cref="Fold{T}"/>,
+/// <see cref="Any"/>, <see cref="All"/> or <see cref="Each"/> from one named call site.
 /// </para>
 /// <para>
 /// Hooks outside a fight that no reachable relic's count is listed for live with their part:
@@ -43,9 +44,6 @@ public sealed record RunHookInfo(string Name, int Users, string SentBy, string? 
 /// </summary>
 public static class RunHooks
 {
-    private const string ShopEntries = "a shop entry (chunk 10, shop)";
-    private const string RestOptions = "a rest site option (chunk 8, rest-and-treasure)";
-
     /// <summary>The 27, in the order of how many reachable relics use each.</summary>
     public static readonly IReadOnlyList<RunHookInfo> Hooks =
     [
@@ -56,8 +54,8 @@ public static class RunHooks
         new("ModifyMerchantCardCreationResults", 3, "RewardHooks.ModifyMerchantCardCreationResults"),
         new("TryModifyCardBeingAddedToDeck", 3, "RunHooks.ModifyCardBeingAddedToDeck (called by DeckEdits)"),
         new("ModifyExtraRestSiteHealText", 3, "RunHooks.ModifyExtraRestSiteHealText"),
-        new("TryModifyRestSiteOptions", 2, "", RestOptions, "Modifiers(c, l => l.TryModifyRestSiteOptions(c, options)); the list is not used further"),
-        new("ModifyMerchantPrice", 2, "", ShopEntries, "Fold(c, price, (l, p) => l.ModifyMerchantPrice(c, entry, p))"),
+        new("TryModifyRestSiteOptions", 2, "RestSite.GenerateOptions"),
+        new("ModifyMerchantPrice", 2, "ShopHooks.ModifyMerchantPrice"),
         new("AfterRestSiteHeal", 2, "RunHooks.AfterRestSiteHeal"),
         new("AfterModifyingCardRewardOptions", 2, "RunHooks.AfterModifyingCardRewardOptions"),
         new("AfterModifyingRewards", 1, "RunHooks.AfterModifyingRewards"),
@@ -72,7 +70,7 @@ public static class RunHooks
         new("ShouldDisableRemainingRestSiteOptions", 1, "RunHooks.ShouldDisableRemainingRestSiteOptions"),
         new("ModifyRestSiteHealAmount", 1, "RunHooks.ModifyRestSiteHealAmount"),
         new("ShouldGenerateTreasure", 1, "RunHooks.ShouldGenerateTreasure"),
-        new("ShouldRefillMerchantEntry", 1, "", ShopEntries, "Any(c, l => l.ShouldRefillMerchantEntry(c, entry))"),
+        new("ShouldRefillMerchantEntry", 1, "ShopHooks.ShouldRefillMerchantEntry"),
         new("TryModifyRestSiteHealRewards", 1, "RewardHooks.ModifyRestSiteHealRewards"),
         new("ShouldForcePotionReward", 1, "RunHooks.ShouldForcePotionReward"),
         new("ShouldAllowFreeTravel", 1, "RunHooks.ShouldAllowFreeTravel"),

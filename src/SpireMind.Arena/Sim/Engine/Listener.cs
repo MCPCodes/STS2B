@@ -348,6 +348,13 @@ public abstract class Listener
     /// <summary>False leaves a treasure room without its relic. Listeners after the first no are not asked.</summary>
     public virtual bool ShouldGenerateTreasure(RunContext c) => true;
 
+    /// <summary>
+    /// The options of a rest site were made (Rest and Smith): add to them or take some away (Shovel
+    /// adds Dig, Girya Lift, the deck card Byrdonis Egg Hatch). True when anything was changed.
+    /// Every listener is asked, before "after room entered" is sent for the rest site.
+    /// </summary>
+    public virtual bool TryModifyRestSiteOptions(RunContext c, ICollection<RestSiteOption> options) => false;
+
     /// <summary>False keeps the other rest site options after one was used. Listeners after the first no are not asked.</summary>
     public virtual bool ShouldDisableRemainingRestSiteOptions(RunContext c) => true;
 
@@ -365,4 +372,18 @@ public abstract class Listener
 
     /// <summary>Called on a listener that changed the cards of a card reward.</summary>
     public virtual void AfterModifyingCardRewardOptions(RunContext c) { }
+
+    /// <summary>
+    /// The price of a shop entry, asked whenever the price is read while the player stands in the
+    /// shop: return the new price (Membership Card halves it, The Courier takes a fifth off). Each
+    /// listener gets what the one before returned; the result is cut to a whole number.
+    /// </summary>
+    public virtual decimal ModifyMerchantPrice(RunContext c, ShopEntry entry, decimal price) => price;
+
+    /// <summary>True fills a shop entry again right after it was bought instead of leaving its place empty (The
+    /// Courier). The card removal is not asked about. Listeners after the first yes are not asked.</summary>
+    public virtual bool ShouldRefillMerchantEntry(RunContext c, ShopEntry entry) => false;
+
+    /// <summary>Something was bought in a shop, for this much gold; the entry has already been emptied or filled again.</summary>
+    public virtual void AfterItemPurchased(RunContext c, ShopEntry entry, int goldSpent) { }
 }

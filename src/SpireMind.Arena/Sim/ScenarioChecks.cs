@@ -421,7 +421,8 @@ public sealed class ScenarioChecks : IArenaChecks
                 c.That(has || registry.IsExcluded(ContentKind.Potion, name, out _), $"{name} is either in the registry or left out with a reason");
                 if (has) c.Equal(rarity, registry.Potion(name).Rarity, $"{name}'s rarity");
             }
-            foreach (var name in registry.Potions.Keys)
+            // Potion-Shaped Rock is the game's one Token-rarity potion: in no pool, made by the relic Petrified Toad alone (Relics1).
+            foreach (var name in registry.Potions.Keys.Where(n => n != Relics1.PotionShapedRock))
                 c.That(pool.Any(p => p.ClassName == name), $"the registry's {name} is a potion of the Ironclad's pool");
         });
 

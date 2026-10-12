@@ -584,9 +584,11 @@ public static class Forecast
             _vulnerable = me.GetPower<VulnerablePower>();
 
             // Things that change this enemy's hits in ways that are not worked out here, power for
-            // power as the mod's file lists them. (The mod also marks for the Brimstone relic and for
-            // a Queen or an Obscura beside the enemy; the simulator has none of those.)
-            _rough = Roster.EnemyMarks.Any(_enemy.HasPower) || Roster.PlayerMarks.Any(me.HasPower);
+            // power as the mod's file lists them, and the relic Brimstone (1 Strength to every enemy
+            // at each player turn), which the mod marks for too. (The mod also marks for a Queen or
+            // an Obscura beside the enemy; the simulator has neither.)
+            _rough = Roster.EnemyMarks.Any(_enemy.HasPower) || Roster.PlayerMarks.Any(me.HasPower)
+                || f.Relics.Any(relic => relic is Brimstone);
 
             _vulnerableFrom = int.MaxValue;
             var actsFirst = true;

@@ -2,7 +2,7 @@
 
 The simulator plays one Slay the Spire 2 fight (public build v0.107.1, Ironclad, ascension 0, single player, act 1 "Overgrowth") by the game's own rules. The engine is in `Sim/Engine/`. Everything a fight contains (cards, powers, monsters, encounters, potions) is content, one file per chunk in `Sim/Content/`. This page is for whoever changes the engine or writes a content file. What the arena is for, and how to read its results, is in `docs/arena.md`.
 
-What it holds now: all 85 single-player cards of the Ironclad's pool (the two multiplayer-only cards are left out), the 12 status cards, Giant Rock, all 22 Overgrowth encounters with their 29 monsters, 46 of the 48 potions an Ironclad can find, 58 powers and Burning Blood. `scripts/arena.sh content` prints the table and every name; section 13 lists what is left out and the known gaps.
+What it holds now: all 85 single-player cards of the Ironclad's pool (the two multiplayer-only cards are left out), the 12 status cards, Giant Rock, all 22 Overgrowth encounters with their 29 monsters, 46 of the 48 potions an Ironclad can find, 59 powers and Burning Blood; for run mode also 25 more relics of the 157 an act 1 Ironclad can get, with the potion Potion-Shaped Rock (`Sim/Content/RELICS.md`), the 18 curses and Neow's Fury (`Sim/Run/CURSES.md`) and 12 of the 64 colorless cards (`Sim/Run/COLORLESS.md`). A single fight never holds any of the run-mode content: the scenario generator deals only what it dealt before. `scripts/arena.sh content` prints the table and every name; section 13 lists what is left out and the known gaps.
 
 The rule that matters most: **never approximate.** If something cannot be reproduced exactly, leave it out with `r.Exclude(...)` and a reason. A wrong card is worse than a missing card.
 
@@ -16,6 +16,7 @@ Sources, in this order: the verified spec files in `/Users/mark/Projects/sts2-no
 | Overgrowth monsters and encounters | `Sim/Content/MonstersA.cs`, `MonstersB.cs`, `MonstersC.cs` | `MonstersAChecks.cs` ... |
 | Elites, bosses | `Sim/Content/Elites.cs`, `Bosses.cs` | `ElitesChecks.cs`, `BossesChecks.cs` |
 | Potions | `Sim/Content/Potions.cs` | `PotionsChecks.cs` |
+| Run mode: the first relics, the curses and Neow's Fury, the first colorless cards | `Sim/Content/Relics1.cs`, `Curses.cs`, `ColorlessCore.cs` (pages `Sim/Content/RELICS.md`, `Sim/Run/CURSES.md`, `Sim/Run/COLORLESS.md`) | `Relics1Checks.cs`, `CursesChecks.cs`, `ColorlessCoreChecks.cs` |
 | Scenario generator | `Sim/Scenario.cs` | `Sim/ScenarioChecks.cs` |
 | Scripted players | `Policies/GreedyPolicy.cs`, `Policies/LookaheadPolicy.cs`, `Policies/RolloutPolicy.cs` | `Policies/PolicyChecks.cs`, `Policies/RolloutChecks.cs` |
 | Card values, measured (`scripts/arena.sh values`) | `Runner/ValuesCommand.cs` | (section 15) |
@@ -29,7 +30,7 @@ Sources, in this order: the verified spec files in `/Users/mark/Projects/sts2-no
 - Everything is looked up by **the game's class name**: card `"StrikeIronclad"`, power class `StrengthPower`, monster class `Nibbit`, encounter class `NibbitsWeak`, potion `"FirePotion"`.
 - All files share one namespace, so type names must not collide. Power, monster and encounter classes carry the game's class names and are top-level. **Every other type you need (card behaviours, helpers, check-only cards and powers) goes inside your module or checks class as a private nested type.**
 - A name registered twice, or registered by one file and excluded by another, fails the self-check with both file names.
-- The self-check also fails when a card of the Ironclad's pool, a status card, an Overgrowth encounter or a potion of the Ironclad's pool is neither registered nor left out with a reason, when something is registered that is on none of those lists, and when random card generation would not pick from the game's 78 cards (33 Attacks, 27 Skills, 18 Powers): it picks by index, so one card too few shifts every pick. The lists are in `Sim/Completeness.cs`.
+- The self-check also fails when a card of the Ironclad's pool, a status card, an Overgrowth encounter or a potion of the Ironclad's pool is neither registered nor left out with a reason, when something is registered that is on none of those lists, and when random card generation would not pick from the game's 78 cards (33 Attacks, 27 Skills, 18 Powers): it picks by index, so one card too few shifts every pick. Run mode added lists of its own under the same rule: the colorless card pool, the curses, the event and quest cards an act 1 run can meet, the 157 relics an act 1 Ironclad can get, the events of an Overgrowth act with Neow. The lists are in `Sim/Completeness.cs`.
 - If the engine cannot express something exactly, extend the engine from the game's code, with a check; where that is not possible, exclude the content with the reason.
 
 The core (in `Sim/Content/Core*.cs`): the powers `StrengthPower`, `DexterityPower`, `VulnerablePower`, `WeakPower`, `FrailPower`, `ArtifactPower`, `MinionPower`, `SlipperyPower`, `ShrinkPower`, `PlatingPower`, the abstract `TemporaryStrengthPower`; the relic `BurningBlood`; the cards `StrikeIronclad`, `DefendIronclad`, `Bash`, `Armaments`; the 12 status cards (`Beckon`, `Burn`, `Dazed`, `Debris`, `FranticEscape`, `Infection`, `Wither`, `Slimed`, `Soot`, `Toxic`, `Void`, `Wound`); the monster `Nibbit` with the encounters `NibbitsWeak` and `NibbitsNormal`. Read them as worked examples. The powers only potions use (`RegenPower`, `ThornsPower`, `ClarityPower`, `DuplicationPower`, `RadiancePower`, `RetainHandPower`, `DemisePower`, `GigantificationPower`, `BufferPower`, `RitualPower`, `BlockNextTurnPower`) are in `Potions.cs`.
@@ -218,7 +219,8 @@ Tests on flags: `props.IsPoweredAttack()` (what Strength, Weak, Vulnerable, Flam
 | `f.GeneratePlayCount(card, target)` | How many times a play of the card would run (spends one-shot doubling charges): only for effects that count as a play, like Drum of Battle's trigger. |
 | `f.Afflict(card, "Entangled", amount)`, `f.ClearAffliction(card)` | Afflictions monsters put on cards (register the affliction with `r.Affliction(new AfflictionDef(...))`). A card that already carries one keeps it: another kind is refused, and so is the same kind again unless the affliction is registered with `IsStackable: true` (in the game only Galvanized and Tainted are; none in the arena is). Returns whether anything changed. |
 | `f.CostOf(card)`, `f.LocalCostOf(card)`, `f.CanPlay(card, out reason)` | Reading. `CostOf` is what the card costs to play; `LocalCostOf` is its own cost before the cost hooks of powers (Touch of Insanity asks for both). |
-| `Content.Registry.IroncladPool` | The card pool for random generation, in pool order. Filter it (`c.Type == CardType.Attack && c.IsGeneratableInCombat`) and pick with the stream and the call the spec names (`f.Rng.CombatCardGeneration`). |
+| `Content.Registry.IroncladPool` | The card pool for random generation, in pool order: the registered cards of the game's Ironclad pool and no others (a colorless card, a curse or an event card that run mode registers is not in it). Filter it (`c.Type == CardType.Attack && c.IsGeneratableInCombat`) and pick with the stream and the call the spec names (`f.Rng.CombatCardGeneration`). |
+| `f.RemoveFromDeck(deckCard)` | In a fight of a run: takes a card out of the DECK (not out of a pile), with "before card removed" sent to the run's listeners first. Hand it the deck card (`f.DeckVersionOf(card)`, or a deck card's own hook object's `Card`). Guilty leaves the deck this way (`Sim/Run/CURSES.md`). |
 
 **Energy, potions, monsters**
 
@@ -259,6 +261,8 @@ Play = c =>
 | `f.ChooseFromPile(pile, prompt, min, max, filter)` | `FromCombatPile` | screen `card_select`, kind `combat_pile_select`: `card:<n>` (and `confirm` when min and max differ) |
 | `f.ChooseOneOf(cards, canSkip)` | `FromChooseACardScreen` | screen `card_select`, kind `choose`: `card:<n>`, `skip` |
 | `f.ChooseFromGrid(cards, prompt, min, max)` | `FromSimpleGrid` | screen `card_select`, kind `select` |
+
+The picks come back in the order the game's screen holds them: on the hand the order picked; on the pile screen, the grid and the choose screen the order of the game's hash set, where a new pick takes the place the last taken-back pick left (`PendingChoice.Selected` is a `ChoicePicks`; it shows only after a pick was taken back). The snapshot's `selected` and the confirm label follow it.
 
 They follow the game's rules for not asking: nothing with no candidate; with min = max and no more candidates than that, all are taken without a question (the upgrade choice also takes a single candidate without asking). The prompt is your own wording.
 
@@ -572,12 +576,12 @@ A check should be able to fail. After writing one, break the rule it checks in a
 Left out on purpose (`r.Exclude`, printed by `scripts/arena.sh content`):
 
 - **Demonic Shield and Tank**: multiplayer only. The game takes them out of every single-player pool.
-- **Colorless Potion**: it offers three cards of the colorless pool, 64 cards the arena does not have. Adding it means adding that pool, card by card, as the Ironclad's was.
+- **Colorless Potion**: it offers three cards of the colorless pool. The arena holds 12 of that pool's 64 cards so far, for run mode (`Sim/Run/COLORLESS.md`); the potion comes when the rest are built (run-mode plan, chunk 28).
 - **Entropic Brew**: it fills the belt with random potions of the whole pool, Colorless Potion among them, so it cannot be exact before that one is.
 
 The scenario generator rolls a drop again when it comes up with one of these two potions (2 of 48).
 
-Not in the simulator at all, because a single act-1 Ironclad fight never meets them: relics other than Burning Blood, other characters' cards and powers, the Underdocks act, events' fights, enchantments, pets, orbs and stars, co-op.
+Not in the simulator at all, because a single act-1 Ironclad fight never meets them: relics other than Burning Blood (the scenario fights have no other; run mode has 25 more, `Sim/Content/RELICS.md`), other characters' cards and powers, the Underdocks act, events' fights, enchantments, pets, orbs and stars, co-op.
 
 Known gaps in the engine, none of which shows in a snapshot today:
 
@@ -615,7 +619,7 @@ One difference to the mod's reader does show in a snapshot: an enemy that is dow
 Where the two still differ, and why:
 
 - The mod's reader lists an enemy that is down and coming back (`"reviving": true`) and gives it a list from its forced state. The snapshot here leaves a 0 HP Eye with Teeth out (section 13), so it has no list on that one turn.
-- The mod also marks for the Brimstone relic and for a Queen or an Obscura beside the enemy, and has rules for monsters that are not in act 1. None of that can be met here.
+- The mod also marks for a Queen or an Obscura beside the enemy, and has rules for monsters that are not in act 1. None of that can be met here. (Both mark for the Brimstone relic, which run mode has.)
 - The mod switches itself off on another game build, after three failed reads, or when a read changed the game. Here a fault of the forecast is thrown (`Forecast.Fault`) so that a check sees it.
 
 **It could be had in the real game.** Everything it uses is on the game's live objects, read without changing them: the move that shows, whether it was performed since it was entered, each move's follow-up, a random branch's options with their weights, repeat rules and cooldowns, the move log, the powers. It never rolls, never looks at a random stream, and foresees nothing that is forced from outside the machine: a stun, an HP threshold, a revive, a summon. The mod's reader has called its forecast since commit 76e01a2 (2026-10-11). Not had yet: a live fight. Nothing of the mod's version has run in the game (`docs/forecast.md`).

@@ -520,7 +520,7 @@ public sealed class Potions : IContentModule
     {
         void Out(string className, string reason) => r.Exclude(ContentKind.Potion, className, reason);
 
-        Out("ColorlessPotion", "offers three cards of the colorless pool (64 cards), which the arena does not have");
+        Out("ColorlessPotion", "offers three cards of the colorless pool, of which the arena holds 12 of 64 so far (the run-mode plan builds the rest, and then this potion, in chunk 28)");
         Out("EntropicBrew", "fills the belt with random potions of the whole pool, and one of them (Colorless Potion) the arena does not have");
     }
 }

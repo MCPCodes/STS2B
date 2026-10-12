@@ -18,6 +18,9 @@ public sealed class RelicBag
     /// <summary>The rarities a player's bag holds, in the order the game asks them when it only wants to know whether anything is left.</summary>
     public static readonly IReadOnlyList<RelicRarity> PlayerRarities = [RelicRarity.Common, RelicRarity.Uncommon, RelicRarity.Rare, RelicRarity.Shop];
 
+    /// <summary>The most steps a pull can take from one rarity's list to the next: from Shop over Common, Uncommon and Rare to nothing.</summary>
+    private const int LongestWayDown = 4;
+
     // The game keeps the lists in a dictionary that is only ever added to, so they stand in the
     // order their rarities first appeared in the pool. That order is the order of the shuffles.
     private readonly List<(RelicRarity Rarity, List<string> Relics)> _lists = new();
@@ -132,8 +135,14 @@ public sealed class RelicBag
             Refresh(rarity);
             DropDisallowed(isAllowed);
         }
+        // The way down has four steps at most (Shop, Common, Uncommon, Rare, nothing). The count is
+        // no rule of the game's: it only turns a way that was changed into a circle (Rare giving
+        // way to Shop again) into an error, where an empty bag would otherwise be searched forever.
+        var steps = 0;
         while (list is not null && !list.Any(filter))
         {
+            if (++steps > LongestWayDown)
+                throw new InvalidOperationException("A relic bag's rarities give way in a circle: after Rare there must be nothing.");
             rarity = rarity switch
             {
                 RelicRarity.Shop => RelicRarity.Common,

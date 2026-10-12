@@ -2,7 +2,7 @@ using System.Reflection;
 
 namespace SpireMind.Arena;
 
-public enum ContentKind { Card, Power, Monster, Encounter, Potion, Relic, Affliction }
+public enum ContentKind { Card, Power, Monster, Encounter, Potion, Relic, Affliction, Event }
 
 /// <summary>
 /// A file of content. Every class in the arena assembly that implements this and has a
@@ -36,6 +36,7 @@ public sealed class Registry
     private readonly Dictionary<string, PotionDef> _potions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Func<Relic>> _relics = new(StringComparer.Ordinal);
     private readonly Dictionary<string, AfflictionDef> _afflictions = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Func<RunEvent>> _events = new(StringComparer.Ordinal);
     private readonly Dictionary<(ContentKind, string), string> _excluded = new();
     private readonly Dictionary<(ContentKind, string), string> _source = new();
     private readonly List<string> _problems = new();
@@ -48,17 +49,22 @@ public sealed class Registry
     public IEnumerable<string> MonsterNames => _monsters.Keys;
     public IEnumerable<string> EncounterNames => _encounters.Keys;
     public IEnumerable<string> RelicNames => _relics.Keys;
+    public IEnumerable<string> EventNames => _events.Keys;
 
     private IReadOnlyList<CardDef>? _pool;
 
     /// <summary>
-    /// The Ironclad's card pool as far as the arena has it: every registered card of rarity
-    /// Basic, Common, Uncommon, Rare, Ancient or Event, in the order of the game's pool (by class
-    /// name). Status cards and tokens are not in it; cards left out on purpose are missing.
+    /// The Ironclad's card pool as far as the arena has it: every registered card of the game's
+    /// Ironclad pool (<see cref="CardPools.Ironclad"/>), in the order of that pool (by class
+    /// name). Status cards and tokens are not in it, nor are the cards of the other pools a run
+    /// can hold (colorless cards, curses, event cards); cards left out on purpose are missing.
     /// Random card generation filters this list.
     /// </summary>
     public IReadOnlyList<CardDef> IroncladPool => _pool ??= _cards.Values
         .Where(c => c.Rarity is CardRarity.Basic or CardRarity.Common or CardRarity.Uncommon or CardRarity.Rare or CardRarity.Ancient or CardRarity.Event)
+        // Run mode registers cards of other pools under the same rarities (Neow's Fury is an Ancient-rarity
+        // card of the event pool, the colorless cards are Uncommon and Rare): only the Ironclad's own count here.
+        .Where(c => CardPools.Ironclad.Contains(c.ClassName))
         .OrderBy(c => c.ClassName, StringComparer.Ordinal)
         .ToList();
 
@@ -114,6 +120,14 @@ public sealed class Registry
         if (Claim(ContentKind.Affliction, def.ClassName)) _afflictions[def.ClassName] = def;
     }
 
+    /// <summary>An event of a run (an event room's, or an Ancient's), under its class name. A new object is made for every room.</summary>
+    public void Event<T>() where T : RunEvent, new()
+    {
+        if (!Claim(ContentKind.Event, typeof(T).Name)) return;
+        _events[typeof(T).Name] = static () => new T();
+        _problems.AddRange(EventFields.UnsafeFields(typeof(T)));
+    }
+
     /// <summary>
     /// Leaves something out on purpose: a card, monster or potion that cannot be reproduced
     /// exactly, or that cannot occur in a single-player Ironclad fight. A wrong card is worse
@@ -153,6 +167,7 @@ public sealed class Registry
         ContentKind.Encounter => _encounters.ContainsKey(name),
         ContentKind.Potion => _potions.ContainsKey(name),
         ContentKind.Relic => _relics.ContainsKey(name),
+        ContentKind.Event => _events.ContainsKey(name),
         _ => _afflictions.ContainsKey(name),
     };
 
@@ -172,6 +187,7 @@ public sealed class Registry
     public Monster NewMonster(string className) => _monsters.TryGetValue(className, out var make) ? make() : throw Missing(ContentKind.Monster, className);
     public Encounter NewEncounter(string className) => _encounters.TryGetValue(className, out var make) ? make() : throw Missing(ContentKind.Encounter, className);
     public Relic NewRelic(string className) => _relics.TryGetValue(className, out var make) ? make() : throw Missing(ContentKind.Relic, className);
+    public RunEvent NewEvent(string className) => _events.TryGetValue(className, out var make) ? make() : throw Missing(ContentKind.Event, className);
 
     private KeyNotFoundException Missing(ContentKind kind, string className) =>
         new(_excluded.TryGetValue((kind, className), out var why)

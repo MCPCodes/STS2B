@@ -31,8 +31,15 @@ internal sealed class PendingChoice
     /// <summary>The candidates in the order the screen lists them.</summary>
     public required List<CardInstance> Options { get; init; }
 
-    /// <summary>Indexes into <see cref="Options"/>, in the order picked.</summary>
-    public List<int> Selected { get; init; } = new();
+    /// <summary>Indexes into <see cref="Options"/>, in the order the game's screen holds its picks: the order
+    /// picked on the hand, the order of the game's set on the grid screens (<see cref="ChoicePicks"/>).</summary>
+    public ChoicePicks Selected
+    {
+        get => _selected ??= new ChoicePicks(asSet: !IsHand);
+        init => _selected = value;
+    }
+
+    private ChoicePicks? _selected;
 
     /// <summary>The game only shows a confirm button on these screens when min and max differ.</summary>
     public bool ManualConfirm => Min != Max;
@@ -44,7 +51,7 @@ internal sealed class PendingChoice
         Kind = Kind, Prompt = Prompt, Min = Min, Max = Max, CanSkip = CanSkip,
         // Offered cards that are in no pile yet (a card potion's three) are not in the map: they are shared, and never changed.
         Options = Options.Select(c => map.Get(c)!).ToList(),
-        Selected = Selected.ToList(),
+        Selected = Selected.Clone(),
     };
 }
 

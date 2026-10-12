@@ -979,6 +979,52 @@ public sealed class MapChecks : IArenaChecks
             }
         });
 
+        c.Group("repair: all four kinds are put back in one round, also after an earlier one was (the game's \"or\" does not stop at the first yes)", () =>
+        {
+            // One path of eleven rows: a fixed Monster room, nine Monster rooms that can be changed (rows 2 to 10)
+            // and a fixed Rest Site. A shop, an elite, a second Rest Site and an Unknown room are short, all four
+            // at once. One path has no two stretches, so pruning draws nothing. The game asks for the four kinds
+            // one after the other and joins the answers with an "or" that always looks at both sides: all four are
+            // put back in the first round. Each takes the Monster rooms that are left, sorts and shuffles them
+            // (8, 7, 6 and 5 numbers) and takes the first that may hold it: any for the shop; row 6 or higher for
+            // the elite; rows 6 to 8 for the Rest Site (not below row 6, not in the three top rows of this
+            // twelve-row grid); any for the Unknown room. The second round finds nothing short and ends it.
+            // (An "or" that stopped at the first yes would put one kind back a round, and after three rounds the
+            // Unknown room would still be missing: 21 numbers instead of 26.)
+            for (ulong seed = 1; seed <= 10; seed++)
+            {
+                var drawn = Sketch(
+                    "c3:ancient^3", "c3:monster!^3", "c3:monster^3", "c3:monster^3", "c3:monster^3", "c3:monster^3", "c3:monster^3",
+                    "c3:monster^3", "c3:monster^3", "c3:monster^3", "c3:monster^3", "c3:rest!^3", "c3:boss");
+                var rng = new GameRng(seed);
+                var map = ActMapGenerator.Finish(drawn, new MapCounts(Rests: 2, Shops: 1, Elites: 1, Unknowns: 1), rng, prune: true, sideways: false);
+
+                // The same by the rule, on the same stream: the rows that are still Monster rooms, sorted, shuffled, first that fits.
+                var numbers = new GameRng(seed);
+                var free = Enumerable.Range(2, 9).ToList();
+                int Take(Func<int, bool> fits)
+                {
+                    free.Sort();
+                    numbers.Shuffle(free);
+                    var row = free.First(fits);
+                    free.Remove(row);
+                    return row;
+                }
+                var shop = Take(_ => true);
+                var elite = Take(row => row >= 6);
+                var rest = Take(row => row is >= 6 and <= 8);
+                var unknown = Take(_ => true);
+
+                c.Equal(26, rng.Counter, $"seed {seed}: 8 + 7 + 6 + 5 numbers, all in the first round");
+                c.Equal((1, 1, 2, 1), (map.Count(MapPointType.Shop), map.Count(MapPointType.Elite), map.Count(MapPointType.RestSite), map.Count(MapPointType.Unknown)),
+                    $"seed {seed}: a shop, an elite, two Rest Sites and an Unknown room");
+                c.Equal((MapPointType.Shop, MapPointType.Elite, MapPointType.RestSite, MapPointType.Unknown),
+                    (map.Point(3, shop)!.Type, map.Point(3, elite)!.Type, map.Point(3, rest)!.Type, map.Point(3, unknown)!.Type),
+                    $"seed {seed}: on rows {shop}, {elite}, {rest} and {unknown}");
+                c.Equal(6, map.Count(MapPointType.Monster), $"seed {seed}: six Monster rooms are left");
+            }
+        });
+
         c.Group("repair can make two stretches equal: the map is pruned again, up to three rounds", () =>
         {
             // Two stretches from (3,1) to (3,4): Unknown then Monster in column 2, Unknown then shop in column 4.

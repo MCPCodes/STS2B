@@ -52,7 +52,7 @@ It follows from how the game builds a set (`RewardsSet.cs:85-147, 206-256`):
 3. The hooks may add rewards (`TryModifyRewards`, then `TryModifyRewardsLate`). What they added and is not filled yet is filled in the order added.
 4. The rows are sorted for the screen: gold, potion, relic, special card, card, removal. The sort is the game's list sort (`SmallSort`): three rows are settled by fixed swaps, which turns two equal rows round when a lower one stands behind them (two card rewards made before a gold row change places).
 
-So a hallway fight takes 11 numbers, or 13 with a potion; an elite 12 or 14; a boss 11 or 13. The boss of the run's last act gives nothing and draws nothing.
+So a hallway fight takes 11 numbers, or 13 with a potion; an elite 12 or 14; a boss 11 or 13. The boss of the run's last act gives nothing and draws nothing. Every reward row the room's set was MADE with adds its own draws, a gold row of a fixed amount one number: in the game the gold a thief stole comes back that way when it dies (an Underdocks monster; the real run on seed 75F277YN2G shows the twelfth number, `TreasureChecks`).
 
 Gold: 10 to 20 after a hallway fight, 35 to 45 after an elite, 100 after a boss. Only a hallway fight pays by the share of its monsters that did not get away: `RewardRoom.GoldShare` is 1 minus the escaped creatures over the KINDS of monster the fight had (the game keeps each monster class once), each bound is rounded to the nearest whole number with a half going to the even one, and a share of 0 or less means no gold row. `RewardRoom.Of(FightOutcome)` counts the distinct titles in the outcome's enemy names; a check holds that no two monster classes of the arena share a title. No Overgrowth monster escapes.
 
@@ -118,7 +118,7 @@ One rule: a roll runs over the game's full list, and one that lands on something
 
 - A card: the pick alone is drawn again (`CardPools.Pick`); the rarity roll has already moved the pity offset.
 - A potion: rarity and pick are both drawn again, as the single-fight scenarios have always done.
-- A relic: the relic framework's pull decides (`RunRelics`: the next built relic of the same list, a rolled rarity rolled again when the list has none). A relic reward that gets nothing throws the exception with the pull's reason.
+- A relic: the relic framework's pull decides (`RunRelics`: the next built relic of the same list, a rolled rarity rolled again when the list has none). The reward writes to the log every relic the pull passed over and, when the rarity was rolled again, the relic the game would have given (which is of a list the arena holds nothing of, so it is not among the passed-over ones). A relic reward that gets nothing throws the exception with the pull's reason.
 
 The exception flies out of `RunRewards.OfferForRoomEnd` and out of a rewards screen's action, and nobody has to catch it: since the merge of wave 2 the run itself does (`Run.Perform`), in an action outside a fight and in what follows a won fight alike. The run ends as `unrepresentable` with the exception's text as the reason, standing as it stood before that action.
 

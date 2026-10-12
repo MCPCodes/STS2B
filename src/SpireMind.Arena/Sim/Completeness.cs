@@ -31,6 +31,19 @@ public static class Completeness
     /// <summary>Cards that are in no pool and are only made by an Ironclad card (Primal Force's Giant Rock).</summary>
     public static readonly IReadOnlyList<string> TokenCards = ["GiantRock"];
 
+    /// <summary>The 18 cards of the game's curse card pool, in its order (run mode: a curse is given by an event or
+    /// a relic of Neow's, and a transformed curse becomes any other of them).</summary>
+    public static IReadOnlyList<string> CursePool => CardPools.Curse.All.Select(card => card.ClassName).ToList();
+
+    /// <summary>
+    /// The cards of the game's event and quest card pools that an act 1 Ironclad run can be given
+    /// (plan file cards-extra.json): by Neow's Torment (Neow's Fury), Wood Carvings (Peck, Toric
+    /// Toughness), Byrdonis Nest (Byrdonis Egg, which hatches into Byrd Swoop) and The Legends
+    /// Were True (Spoils Map). The other 24 cards of the two pools belong to later acts, other
+    /// Ancients and Underdocks.
+    /// </summary>
+    public static readonly IReadOnlyList<string> EventAndQuestCards = ["ByrdSwoop", "NeowsFury", "Peck", "ToricToughness", "ByrdonisEgg", "SpoilsMap"];
+
     /// <summary>What random card generation in a fight may produce in a solo Ironclad run: the pool
     /// without Basic cards, multiplayer-only cards and the two cards flagged as never generated.</summary>
     public const int GeneratableCards = 78;
@@ -61,14 +74,20 @@ public static class Completeness
             Make("Ironclad card pool", ContentKind.Card, IroncladPool),
             Make("status cards", ContentKind.Card, StatusCards),
             Make("cards made by Ironclad cards", ContentKind.Card, TokenCards),
+            Make("colorless card pool", ContentKind.Card, CardPools.Colorless.All.Select(c => c.ClassName)),
+            Make("curses", ContentKind.Card, CursePool),
+            Make("event and quest cards an act 1 run can meet", ContentKind.Card, EventAndQuestCards),
             Make("Overgrowth encounters", ContentKind.Encounter, Scenarios.Roster.Select(e => e.ClassName)),
             Make("potions an Ironclad can find", ContentKind.Potion, Scenarios.PotionPool.Select(p => p.ClassName)),
+            Make("potions only a relic makes", ContentKind.Potion, [Relics1.PotionShapedRock]),
+            Make("relics an act 1 Ironclad can get", ContentKind.Relic, ReachableRelics.Names),
+            Make("events of an Overgrowth act, and Neow", ContentKind.Event, EventList.InAnOvergrowthAct.Append(nameof(Neow))),
         ];
     }
 
     /// <summary>Everything that is wrong: a name of the game's lists that is neither registered nor
-    /// left out, a registered card, encounter or potion that is on none of the lists, and a pool
-    /// for random card generation that is not the game's.</summary>
+    /// left out, a registered card, encounter, potion, relic or event that is on none of the lists,
+    /// and a pool for random card generation that is not the game's.</summary>
     public static IReadOnlyList<string> Problems()
     {
         var registry = Content.Registry;
@@ -87,6 +106,8 @@ public static class Completeness
         Strays(ContentKind.Card, registry.Cards.Keys);
         Strays(ContentKind.Encounter, registry.EncounterNames);
         Strays(ContentKind.Potion, registry.Potions.Keys);
+        Strays(ContentKind.Relic, registry.RelicNames);
+        Strays(ContentKind.Event, registry.EventNames);
 
         // Random generation picks by index from this list, so one card too few or too many shifts every pick.
         var generatable = registry.IroncladPool.Where(c => c.IsGeneratableInCombat).ToList();

@@ -81,7 +81,7 @@ The order outside a fight has one definition, `run.Listeners()` (`Run.Commands.c
 
 A random pick must run over the game's full list, or leaving a card out would shift which index means which card. So: `CardPools.Pick(run, rng, options, what)` draws an index into the full list and draws again, from the same stream, while it lands on a card that is not built. Every card passed over is written to the run's `LeftOutLog` with the floor (`FirstFloor` is where the run stopped being the game's own run for its seed). Two cases end the run instead, by throwing `RunUnrepresentableException`: a list with no built card at all, and any landing on an unbuilt card when `LeftOutLog.Strict` is set (the game's streams, nothing drawn again). `CardPools.NextBuilt` is the same pick without a run.
 
-Today only the Ironclad's pool is built (85 of its 87 cards; the two missing ones are multiplayer only and never in a single-player list). No curse and no colorless card is built yet, so transforming a curse, a Quest card or an Event-, Ancient- or Token-rarity card ends the run as unrepresentable until chunks 11 and 13 are in.
+What is built today: the Ironclad's pool (85 of its 87 cards; the two missing ones are multiplayer only and never in a single-player list), all 18 curses (`CURSES.md`), 12 of the 64 colorless cards (`COLORLESS.md`) and Neow's Fury of the event pool. So a transformed curse is always the game's own pick (any of the other 17, nothing drawn again), and a transformed Quest card or Event-, Ancient- or Token-rarity card becomes one of the built colorless cards, with every colorless card the pick passed over in the run's log.
 
 ## For whoever connects the chunks
 
@@ -99,7 +99,7 @@ Today only the Ironclad's pool is built (85 of its 87 cards; the two missing one
 - The `enchant` kind (chunk 31) and the `bundle` kind (Scroll Boxes, chunk 22) of `card_select`; the `enchant` key of a card entry.
 - `CardSelectorPrefs.Comparison` (a sort of the plain grid): only the Sealed Deck run modifier sets it.
 - Cloning a deck card (Dolly's Mirror, the Eggs): `Listener.TryModifyCardBeingAddedToDeck` hands back the replacement card; making an exact copy of a deck card with an id of its own is left to the chunks that need it.
-- Deck edits from inside a fight (Guilty leaves the deck after its fifth fight): through `Fight.DeckList`, without these hooks.
+- Deck edits from inside a fight other than a removal. A removal is built: `Fight.RemoveFromDeck(deckCard)` (`../Engine/Fight.Deck.cs`) sends "before card removed" to the run's listeners while the card is still in the deck, as the game's one command does in a fight and outside (Guilty leaves the deck this way after its fifth fight, `CURSES.md`). Adding a card to the deck from inside a fight with its hooks is not built: nothing in reach does it.
 - The other four characters' pools and the pool of withdrawn cards: no card of the seven pools is in any of them, so a card's pool is found the same without them.
 
 ## Held against the real game

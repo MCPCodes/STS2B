@@ -1121,10 +1121,10 @@ public sealed class RelicFrameworkChecks : IArenaChecks
             c.Equal(27, hooks.Select(h => h.Name).Distinct(StringComparer.Ordinal).Count(), "each once");
             // relics.json: how many of the 157 reachable relics override each.
             c.Equal(105, hooks.Sum(h => h.Users), "uses in all: 38 + 23 + 7 + 4 + 3 x 3 + 4 x 2 + 16 x 1");
-            c.Equal(24, hooks.Count(h => h.IsDeclared), "declared now: eighteen with the relic framework, six with the rewards");
-            c.Sequence(["ModifyMerchantPrice", "ShouldRefillMerchantEntry", "TryModifyRestSiteOptions"],
+            c.Equal(27, hooks.Count(h => h.IsDeclared), "declared now: eighteen with the relic framework, six with the rewards, one with the rest site, two with the shop");
+            c.Sequence(System.Array.Empty<string>(),
                 hooks.Where(h => !h.IsDeclared).Select(h => h.Name).OrderBy(n => n, StringComparer.Ordinal),
-                "waiting for the types of later parts: the shop's two and the rest site's one");
+                "none waits for the type of a later part any more");
             var onRewards = new[]
             {
                 "ModifyCardRewardCreationOptions", "ModifyMerchantCardCreationResults", "TryModifyCardRewardOptions",

@@ -288,6 +288,8 @@ public sealed class RelicReward : Reward
             ? RunRelics.RollAndPullFromFront(state, Streams(run).Draw(RunStream.Rewards, Purpose.RelicRarity(index)), strict)
             : RunRelics.PullFromFront(state, _rarity, rerollWith: null, strict);
         if (!pull.Found) throw new RunUnrepresentableException(string.Create(CultureInfo.InvariantCulture, $"a relic reward on floor {state.TotalFloor}: {pull.Reason}"));
+        // A rarity that was rolled again: the game's relic is of a list the arena holds nothing of, so it is not among the passed-over ones.
+        if (pull.Rerolls > 0 && pull.GameRelic is { } games) state.Part<LeftOutLog>().PassedOver(state, "relic", games, "a relic reward, whose rarity was then rolled again");
         foreach (var passed in pull.PassedOver) state.Part<LeftOutLog>().PassedOver(state, "relic", passed, "a relic reward");
         Relic = Content.Registry.NewRelic(pull.Relic!);
     }

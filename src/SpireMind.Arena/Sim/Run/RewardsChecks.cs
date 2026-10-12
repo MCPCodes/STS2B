@@ -379,6 +379,8 @@ public sealed class RewardsChecks : IArenaChecks
             relicRarity = pull.Asked;
             relic = pull.Relic;
             noRelicLeft = !pull.Found;
+            // A rarity rolled again: the game's relic, of a list the arena holds nothing of, is logged first.
+            if (pull.Found && pull.Rerolls > 0 && pull.GameRelic is { } games) passedOver.Add(games);
             passedOver.AddRange(pull.PassedOver);
         }
         return new Traced(dropped, amount, potion, cards, upgraded, relicRarity, relic, noRelicLeft, passedOver);
