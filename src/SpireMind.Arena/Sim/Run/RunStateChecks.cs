@@ -680,6 +680,7 @@ public sealed class RunStateChecks : IArenaChecks
             [
                 new LegalAction("go", "Go"), new LegalAction("twice", "Twice"), new LegalAction("boom", "Boom"), new LegalAction("late boom", "Late boom"),
                 new LegalAction("fight", "Fight"), new LegalAction("finish", "Finish"),
+                new LegalAction("missing", "Missing"), new LegalAction("late missing", "Late missing"),
             ],
         };
 
@@ -714,6 +715,16 @@ public sealed class RunStateChecks : IArenaChecks
                     run.State.Gold += 5;
                     run.Ask(new PickOne(2));
                     throw new InvalidOperationException("late boom");
+                case "missing":
+                    // A roll that can only land on something the arena has not built, after the action changed things.
+                    run.State.Gold = 0;
+                    Done = 88;
+                    throw new RunUnrepresentableException("a check's roll on floor 0 can only land on cards the arena leaves out (NeverBuilt)");
+                case "late missing":
+                    // The same, met only once the question is answered.
+                    run.State.Gold += 5;
+                    run.Ask(new PickOne(2));
+                    throw new RunUnrepresentableException("a check's pick on floor 0 landed on the card NeverBuilt, which the arena leaves out");
                 case "fight":
                     run.StartFight(Dummy("Guard", 5));
                     return ActionResult.Success;
@@ -879,6 +890,34 @@ public sealed class RunStateChecks : IArenaChecks
         public override void AfterFightWon(Run run, FightOutcome fight) => throw new InvalidOperationException("no rewards here");
     }
 
+    /// <summary>What follows its one fight lands on something the arena has not built.</summary>
+    private sealed class NothingToGive : RunDirector
+    {
+        public override void Begin(Run run)
+        {
+            run.State.TotalFloor = 6;
+            run.StartFight(Dummy("Guard", 5));
+        }
+
+        public override void AfterFightWon(Run run, FightOutcome fight)
+        {
+            run.State.Gold += 50;
+            throw new RunUnrepresentableException("a relic reward on floor 6: no relic of the player's bag is built");
+        }
+    }
+
+    /// <summary>Its first step lands on something the arena has not built.</summary>
+    private sealed class NothingToStartWith : RunDirector
+    {
+        public override void Begin(Run run)
+        {
+            run.State.Gold = 0;
+            throw new RunUnrepresentableException("Neow's offer: none of the three relics is built");
+        }
+
+        public override void AfterFightWon(Run run, FightOutcome fight) { }
+    }
+
     private static void RefusalsAndFailures(Check c)
     {
         c.Group("a refused action changes nothing and is not in the save", () =>
@@ -949,6 +988,52 @@ public sealed class RunStateChecks : IArenaChecks
             c.Equal("""{"result":"unrepresentable","run":{"act":1,"floor":5,"ascension":0},"me":{"name":"The Ironclad","hp":80,"max_hp":80},"summary":"Stopped on floor 5: the run met something the arena does not hold.","reason":"the shop's Rare colorless card is not in the arena"}""",
                 Text(run.Snapshot().State), "the end snapshot");
             c.Equal("The run is over: it met something the arena does not hold. Nothing is left to do; stop here.", Label(run.Snapshot(), "done"), "the label of done");
+        });
+
+        c.Group("an action that meets something the arena has not built ends the run as unrepresentable, as it stood before", () =>
+        {
+            var run = new Run(new RunSetup(), new Idle());
+            Do(run, "go", "card:1", "confirm");
+            c.Equal(110, run.Gold, "99 + 1 + 10 x 1 before the action");
+            Do(run, "missing");
+            c.That(run.AtEnd, "the end snapshot is up: nothing was thrown at the caller");
+            c.Equal(RunResult.Unrepresentable, run.Result, "as unrepresentable, not as an error");
+            c.Equal("a check's roll on floor 0 can only land on cards the arena leaves out (NeverBuilt)", run.ResultReason, "the reason is the exception's own text");
+            c.Equal(110, run.State.Gold, "the gold the action took before it met the missing thing is back");
+            c.Equal("""{"result":"unrepresentable","run":{"act":1,"floor":0,"ascension":0},"me":{"name":"The Ironclad","hp":80,"max_hp":80},"summary":"Stopped on floor 0: the run met something the arena does not hold.","reason":"a check's roll on floor 0 can only land on cards the arena leaves out (NeverBuilt)"}""",
+                Text(run.Snapshot().State), "the end snapshot");
+            c.Sequence(["go", "card:1", "confirm", "missing"], run.Actions, "the action is in the save");
+            c.Equal(run.Dump(), Arena.Run.Replay(new RunSetup(), new Idle(), run.Actions).Dump(), "so the save replays to the same end");
+            c.That(!run.Execute("go").Ok, "and the run is over");
+
+            var asked = new Run(new RunSetup(), new Idle());
+            Do(asked, "late missing", "card:0");
+            c.That(!asked.IsOver && asked.Gold == 104, "an action that asks first: the question is up, the 5 gold is paid");
+            Do(asked, "confirm");
+            c.That(asked.AtEnd && asked.Result == RunResult.Unrepresentable, "it meets the missing thing when it is run again with the answer, and the run ends");
+            c.Equal("a check's pick on floor 0 landed on the card NeverBuilt, which the arena leaves out", asked.ResultReason, "with the reason");
+            c.Equal(null, asked.Question, "the question is closed");
+            c.Equal(99, asked.State.Gold, "the run stands as before the action: the 5 gold is back");
+            c.Sequence(["late missing", "card:0", "confirm"], asked.Actions, "the action and the steps of its question stay in the save");
+            c.Equal(asked.Dump(), Arena.Run.Replay(new RunSetup(), new Idle(), asked.Actions).Dump(), "which replays to the same end");
+        });
+
+        c.Group("the same after a won fight and at the start of a run", () =>
+        {
+            var run = new Run(new RunSetup(), new NothingToGive());
+            Do(run, "play:0>e0");
+            c.That(run.AtEnd && run.Result == RunResult.Unrepresentable, "what follows the fight met something missing: unrepresentable, not an error");
+            c.Equal("a relic reward on floor 6: no relic of the player's bag is built", run.ResultReason, "the reason as thrown");
+            c.Equal(80, run.State.Hp, "the player was handed back by the fight first");
+            c.Equal(99, run.State.Gold, "and the 50 gold that step took before it met the missing thing is back");
+            c.Sequence(["play:0>e0"], run.Actions, "the action that ended the fight is the save");
+            c.Equal(run.Dump(), Arena.Run.Replay(new RunSetup(), new NothingToGive(), run.Actions).Dump(), "and replays");
+
+            var atStart = new Run(new RunSetup(), new NothingToStartWith());
+            c.That(atStart.AtEnd && atStart.Result == RunResult.Unrepresentable, "a run whose first step meets something missing is made, and is over");
+            c.Equal("Neow's offer: none of the three relics is built", atStart.ResultReason, "with the reason");
+            c.Equal(99, atStart.State.Gold, "as the player started");
+            c.Equal(0, atStart.Actions.Count, "with an empty save");
         });
 
         c.Group("a director without a rule for a finished room says so", () =>

@@ -1112,7 +1112,7 @@ The coordinates and the potion text are illustrative. The `rows` and `ahead` str
         "12": "c2:elite^1,3 c4:monster^3,5 c6:shop^5,6",
         "13": "c1:monster^2 c3:unknown^2,4 c5:elite^4,5 c6:monster^5",
         "14": "c2:elite^2 c4:monster^3,4 c5:unknown^4",
-        "15": "c2:rest c3:rest c4:rest",
+        "15": "c2:rest^3 c3:rest^3 c4:rest^3",
         "16": "c3:boss"
       }
     }
@@ -1137,7 +1137,7 @@ Other moments in the act, as fragments:
 - **On the last grid row:**
   - `"at": "(3,15) rest"`
   - `"next": [{"n": 0, "at": "(3,16)", "type": "boss"}]`, with no `ahead`.
-  - `"rows": {"15": "@c3:rest", "16": "c3:boss"}`
+  - `"rows": {"15": "@c3:rest^3", "16": "c3:boss"}`
   - The action is `{"id": "map:0", "label": "Go to Boss at (3,16)"}`.
 - **Busy:** `{"version": 57, "screen": "map", "awaiting_decision": false, "waiting": "map not generated yet", "state": {}, "actions": []}`.
 

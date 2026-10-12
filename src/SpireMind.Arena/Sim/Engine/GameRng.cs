@@ -90,6 +90,46 @@ public sealed class GameRng
             (list[i], list[j]) = (list[j], list[i]);
         }
     }
+
+    /// <summary>
+    /// The game's other shuffle (its "stable" one): the list is sorted first and shuffled after,
+    /// so the result depends on what is in the list and not on the order it came in. The map
+    /// generator uses it for the three step directions of a path and for the free map points.
+    /// The same draws as <see cref="Shuffle"/>: one per item but the first, none for a list of
+    /// one or none. The items must all differ in <paramref name="order"/> (the game's lists do:
+    /// three numbers, or map points that each have their own place), since the order two equal
+    /// items come out of a sort in is not something to rely on.
+    /// </summary>
+    /// <param name="order">How to sort; the items' own order when left out.</param>
+    public void StableShuffle<T>(List<T> list, Comparison<T>? order = null)
+    {
+        if (order is null) list.Sort();
+        else list.Sort(order);
+        Shuffle(list);
+    }
+
+    /// <summary>
+    /// The game's rounded normal draw (its NextGaussianInt): two numbers make one normal value
+    /// (the sine form of the Box-Muller transform, both numbers taken as 1 minus the fraction so
+    /// that the logarithm never meets 0), scaled by <paramref name="stdDev"/> around
+    /// <paramref name="mean"/> and rounded to the nearest whole number, a half to the even one.
+    /// A value outside <paramref name="min"/>..<paramref name="max"/> is thrown away and two new
+    /// numbers are drawn, so the call takes 2, 4, 6, ... draws. An act's map draws its number of
+    /// Rest Sites and of Unknown rooms this way.
+    /// </summary>
+    public int NextGaussianInt(int mean, int stdDev, int min, int max)
+    {
+        int value;
+        do
+        {
+            var u = 1.0 - NextDouble();
+            var v = 1.0 - NextDouble();
+            var normal = Math.Sqrt(-2.0 * Math.Log(u)) * Math.Sin(Math.PI * 2.0 * v);
+            value = (int)Math.Round(mean + stdDev * normal);
+        }
+        while (value < min || value > max);
+        return value;
+    }
 }
 
 /// <summary>

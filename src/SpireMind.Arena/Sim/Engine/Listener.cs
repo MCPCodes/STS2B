@@ -282,4 +282,87 @@ public abstract class Listener
 
     public virtual void BeforePotionUsed(Fight f, PotionDef potion, Creature? target) { }
     public virtual void AfterPotionUsed(Fight f, PotionDef potion, Creature? target) { }
+
+    // ---------- the run (run mode) ----------
+    //
+    // Hooks of the run rather than of a fight. They are handed a RunContext instead of a fight,
+    // because most of them are heard outside fights and some in both places. RunHooks
+    // (Sim/Run/RunHooks.cs) sends each of them, in the game's order: listening deck cards
+    // (IListensInDeck) in deck order, relics in pickup order, potions' hook objects in slot order.
+    // Where a line says "with the fight's listeners", a dispatch inside a fight goes on to the
+    // player's powers, the cards in the piles and the enemies, as the fight's own hooks do.
+    //
+    // The pickup itself is a relic's own: Relic.AfterObtained and Relic.AfterRemoved (Models.cs).
+    // The hooks whose arguments are things later parts of run mode define (rewards, card offers,
+    // shop entries, rest site options) are declared with those parts; RunHooks.Hooks lists all 27.
+
+    /// <summary>
+    /// A room was entered and is set up. In a fight's room this comes after the monsters stand
+    /// and the draw pile is shuffled, before the monsters get their starting powers and first
+    /// intents and before <see cref="BeforeCombatStart"/> (<c>c.Fight</c> is the fight; powers
+    /// can be applied). In every other room <c>c.Run</c> is the run. Never with the fight's listeners.
+    /// </summary>
+    public virtual void AfterRoomEntered(RunContext c, RoomKind room) { }
+
+    /// <summary>An amount of gold the player is about to gain. Return the new amount. With the fight's listeners.</summary>
+    public virtual decimal ModifyGoldGained(RunContext c, decimal amount) => amount;
+
+    /// <summary>Called on a listener whose <see cref="ModifyGoldGained"/> changed the whole-number amount, with the final amount. With the fight's listeners.</summary>
+    public virtual void AfterModifyingGoldGained(RunContext c, decimal amount) { }
+
+    /// <summary>After gold was gained (not when the final amount was 0 or less).</summary>
+    public virtual void AfterGoldGained(RunContext c) { }
+
+    /// <summary>
+    /// A card is about to be added to the deck. Return true and set <paramref name="newCard"/> to
+    /// put another card in its place (the Eggs hand back an upgraded copy). Two passes; every
+    /// listener of the first is asked before any of the second.
+    /// </summary>
+    public virtual bool TryModifyCardBeingAddedToDeck(RunContext c, CardInstance card, out CardInstance? newCard)
+    {
+        newCard = null;
+        return false;
+    }
+
+    public virtual bool TryModifyCardBeingAddedToDeckLate(RunContext c, CardInstance card, out CardInstance? newCard)
+    {
+        newCard = null;
+        return false;
+    }
+
+    /// <summary>A potion went into the belt. With the fight's listeners.</summary>
+    public virtual void AfterPotionProcured(RunContext c, PotionDef potion) { }
+
+    /// <summary>A potion was thrown away. With the fight's listeners.</summary>
+    public virtual void AfterPotionDiscarded(RunContext c, PotionDef potion) { }
+
+    /// <summary>What an Unknown map point may become. Return the set to go on with (Juzu Bracelet takes Monster out).</summary>
+    public virtual IReadOnlySet<RolledRoom> ModifyUnknownMapPointRoomTypes(RunContext c, IReadOnlySet<RolledRoom> roomTypes) => roomTypes;
+
+    /// <summary>True makes the fight of this kind of room drop a potion whatever the roll says. Listeners after the first yes are not asked.</summary>
+    public virtual bool ShouldForcePotionReward(RunContext c, RoomKind room) => false;
+
+    /// <summary>True lets the player travel to any point of the next map row. Listeners after the first yes are not asked.</summary>
+    public virtual bool ShouldAllowFreeTravel(RunContext c) => false;
+
+    /// <summary>False leaves a treasure room without its relic. Listeners after the first no are not asked.</summary>
+    public virtual bool ShouldGenerateTreasure(RunContext c) => true;
+
+    /// <summary>False keeps the other rest site options after one was used. Listeners after the first no are not asked.</summary>
+    public virtual bool ShouldDisableRemainingRestSiteOptions(RunContext c) => true;
+
+    /// <summary>What resting heals. Return the new amount.</summary>
+    public virtual decimal ModifyRestSiteHealAmount(RunContext c, decimal amount) => amount;
+
+    /// <summary>After the heal of a rest (also one a relic or event mimics).</summary>
+    public virtual void AfterRestSiteHeal(RunContext c, bool isMimicked) { }
+
+    /// <summary>Lines added to what the Rest option says it does. Return the list to go on with.</summary>
+    public virtual IReadOnlyList<string> ModifyExtraRestSiteHealText(RunContext c, IReadOnlyList<string> extraText) => extraText;
+
+    /// <summary>Called on a listener that changed a set of rewards.</summary>
+    public virtual void AfterModifyingRewards(RunContext c) { }
+
+    /// <summary>Called on a listener that changed the cards of a card reward.</summary>
+    public virtual void AfterModifyingCardRewardOptions(RunContext c) { }
 }

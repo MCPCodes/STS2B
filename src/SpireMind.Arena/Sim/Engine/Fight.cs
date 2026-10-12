@@ -10,7 +10,8 @@ namespace SpireMind.Arena;
 /// The parts: Fight.Hooks (who hears a hook), Fight.Turns (the turn loop), Fight.Damage
 /// (damage, attacks, block, healing, death), Fight.Powers, Fight.Cards (piles, drawing,
 /// playing), Fight.Monsters, Fight.Choices (cards the player must pick), Fight.Actions (action
-/// ids), Fight.Snapshot (what the model sees).
+/// ids), Fight.Snapshot (what the model sees), Fight.Run (what a run hands a fight and takes
+/// back), Fight.Relics (gold and relics gained inside a fight, and the player outside one).
 /// </para>
 /// </summary>
 public sealed partial class Fight
@@ -50,6 +51,8 @@ public sealed partial class Fight
         _pending = other._pending?.CloneFor(map);
         _rerandomize = other._rerandomize.ToList();
         _scripted = other._scripted;
+        _relicsLeft = other._relicsLeft;
+        _outOfCombat = other._outOfCombat;
     }
 
     // ---------- what content reads ----------
@@ -213,6 +216,15 @@ public sealed partial class Fight
             if (enemy.Slot is not null) SortEnemiesBySlot();
         }
         foreach (var enemy in _s.Enemies) AddToRoster(enemy);
+
+        // 5. The room is entered: the monsters stand and the draw pile is shuffled, but no monster
+        // has its starting powers or an intent yet, and the fight is not in progress (the game's
+        // CombatRoom.StartCombat sends "after room entered" between CombatManager.SetUpCombat and
+        // AfterCombatRoomLoaded). Relics act here before turn 1: Vajra's Strength, Bronze Scales'
+        // Thorns. Only the run's listeners hear it: deck cards, relics, potions.
+        var entered = Context;
+        var room = RoomKinds.Of(_info.RoomType);
+        EachOfRun(l => l.AfterRoomEntered(entered, room));
 
         // 6. Monster by monster: starting powers, then the first intent (R8).
         foreach (var enemy in _s.Enemies.ToList()) AfterCreatureAdded(enemy);

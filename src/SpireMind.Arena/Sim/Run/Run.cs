@@ -73,6 +73,13 @@ internal sealed class RunQuestionPendingException : Exception;
 /// refused or throws leaves the run as it was, and an action that has to ask the player
 /// something (<see cref="Ask"/>) is run again from that copy once the answer is known.
 /// </para>
+/// <para>
+/// One exception is not a failure: <see cref="RunUnrepresentableException"/>, thrown by a roll
+/// that can only land on something the arena has not built. Wherever it is thrown (an action
+/// outside a fight, what follows a won fight, the director's first step) the run ends as
+/// <see cref="RunResult.Unrepresentable"/> with the exception's text as the reason, standing
+/// as it stood before that action. Nobody has to catch it.
+/// </para>
 /// </summary>
 public sealed partial class Run
 {
@@ -293,6 +300,18 @@ public sealed partial class Run
         catch (RunQuestionPendingException)
         {
             // The state stays as it was when the question came up: that is what the question's screen shows.
+            return ActionResult.Success;
+        }
+        catch (RunUnrepresentableException missing)
+        {
+            // A roll could only land on something the arena has not built, or strict mode met such
+            // a thing (LeftOutLog): the run cannot go on as the game would. It ends here, as it stood
+            // before the action, with the reason. Unlike a failure the action stays in the save
+            // (the caller adds it; a question's steps are there already), so a replay ends the same way.
+            _c = _checkpoint!;
+            Settle();
+            _question = null;
+            End(RunResult.Unrepresentable, missing.Message);
             return ActionResult.Success;
         }
         catch (Exception ex)

@@ -25,7 +25,17 @@ public abstract class Encounter
     public abstract IReadOnlyList<(Monster Monster, string? Slot)> GenerateMonsters(GameRng rng);
 }
 
-/// <summary>A relic the player holds in the fight. The Ironclad's Burning Blood is the only one in scope.</summary>
+/// <summary>
+/// A relic the player holds. In a run it is one object from the moment it is obtained: what it
+/// counts in its fields goes into every fight and comes back (the fight works on a copy). It
+/// hears the fight's hooks and the run's (<see cref="Listener"/>), after the listening deck
+/// cards and before the potions; inside a fight after the player's powers.
+/// <para>
+/// A relic is obtained through <see cref="Run.ObtainRelic(Relic, int)"/> (or, from a hook,
+/// <see cref="RunContext.ObtainRelic"/>), never by adding it to a list: that runs
+/// <see cref="AfterObtained"/> and takes it out of the relic bags.
+/// </para>
+/// </summary>
 public abstract class Relic : Listener
 {
     public string ClassName => GetType().Name;
@@ -35,6 +45,19 @@ public abstract class Relic : Listener
 
     /// <summary>What it does, in our own words (get_deck shows it).</summary>
     public abstract string Describe();
+
+    /// <summary>
+    /// The pickup effect: the relic has just joined the player's relics (it is already in the
+    /// list, at its place) and, outside a fight, has left the relic bags. Outside a fight <c>c.Run</c> is there
+    /// for a pickup that needs the run (<see cref="RunContext.NeedRun"/>): a card choice
+    /// (<see cref="Run.Ask"/>), a roll on a stream of the run, a pull from a bag, a screen. A
+    /// relic can also be obtained inside a fight (Sword of Stone turns into Sword of Jade in
+    /// the victory hook); then only what <see cref="RunContext"/> itself offers can be done.
+    /// </summary>
+    public virtual void AfterObtained(RunContext c) { }
+
+    /// <summary>The relic has just left the player's relics (it was replaced or taken away).</summary>
+    public virtual void AfterRemoved(RunContext c) { }
 
     internal Relic CloneFor(CloneMap map)
     {
