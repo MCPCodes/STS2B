@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The arena: seeded fights in a simulator of the game's combat (v0.107.1), to compare how the models play.
 #   scripts/arena.sh baseline [--scenarios N] [--seed S]        the scripted policies; costs nothing
+#   scripts/arena.sh run-baseline [--runs N] [--mode M] ...      scripted players on whole first acts; costs nothing
 #   scripts/arena.sh run --models a,b,c [--scenarios N] ...      Claude Code on your subscription
 #   scripts/arena.sh report DIR|results.jsonl                    the report of a run again
 #   scripts/arena.sh selfcheck [--checks A,B]                    the simulator and the tool path still hold

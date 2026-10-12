@@ -20,8 +20,6 @@ public sealed class EventsLeftOut : IContentModule
             foreach (var name in events) r.Exclude(ContentKind.Event, name, reason);
         }
 
-        LeaveOut("not built yet: chunk 15 of the run-mode plan (events-a)",
-            "AromaOfChaos", "JungleMazeAdventure", "MorphicGrove", "SunkenStatue", "TabletOfTruth", "ThisOrThat", "UnrestSite");
         LeaveOut("not built yet: chunk 24 of the run-mode plan (events-b)",
             "LuminousChoir", "Wellspring", "WhisperingHollow", "RoomFullOfCheese", "SlipperyBridge", "TeaMaster", "TheLegendsWereTrue");
         LeaveOut("not built yet: needs the whole colorless card pool; chunk 28 of the run-mode plan (colorless-c-and-users)",

@@ -34,6 +34,14 @@ public abstract class RunDirector
     /// it here. <paramref name="map"/> gives the copy's deck card or relic for one of the run's.
     /// </summary>
     public virtual RunDirector Clone(CloneMap map) => (RunDirector)MemberwiseClone();
+
+    /// <summary>
+    /// True for a director whose run keeps its choices (<see cref="Run.Choices"/>): every accepted
+    /// action outside a fight, and every potion action inside one, with the floor, the screen and
+    /// the label it was offered under. The act's director says yes, for its floor log; a run of
+    /// anything else keeps none and reads no label.
+    /// </summary>
+    public virtual bool KeepsChoices => false;
 }
 
 /// <summary>How a run can end: the <c>state.result</c> of the end snapshot and <see cref="Run.Result"/>.</summary>
@@ -120,6 +128,10 @@ public sealed partial class Run
     private Core _c;
     private List<string> _actions = new();
 
+    // The choices among the actions, each with the label it was offered under: kept beside the
+    // save, never in the state, so that an action that ends the run as it stood is still listed.
+    private List<RunChoice> _choices = new();
+
     // An action outside a fight that is running, or waiting for an answer.
     private Core? _checkpoint;
     private string? _pendingAction;
@@ -145,6 +157,7 @@ public sealed partial class Run
         _setup = other._setup;
         _c = other._c.Clone(out var map);
         _actions = other._actions.ToList();
+        _choices = other._choices.ToList();
         _checkpoint = other._checkpoint?.Clone(out _);
         _pendingAction = other._pendingAction;
         _pendingMark = other._pendingMark;
@@ -211,6 +224,17 @@ public sealed partial class Run
     /// </summary>
     public IReadOnlyList<string> Actions => _actions;
 
+    /// <summary>
+    /// The choices of the run so far, in order, when its director keeps them
+    /// (<see cref="RunDirector.KeepsChoices"/>): every accepted action outside a fight (a path, a
+    /// reward, a card, an event option, a purchase, a rest site option, the steps of a card
+    /// choice) and every potion used or thrown away inside one, each with the total floor and
+    /// the screen it was taken on and the label the snapshot offered it under. It is a view of
+    /// <see cref="Actions"/>: a replay builds the same list, and an action that was taken back
+    /// is not in it. The plays of a fight are not choices of this list.
+    /// </summary>
+    public IReadOnlyList<RunChoice> Choices => _choices;
+
     /// <summary>The snapshot of the run as it stands: the open question, else the top screen.</summary>
     public GameSnapshot Snapshot() => Showing.Snapshot(this);
 
@@ -233,8 +257,9 @@ public sealed partial class Run
         {
             // A question's own steps (a pick, a preview, backing out of one) change only the
             // question. Its last step calls Answer, which runs the waiting action again.
+            var step = Read(question, actionId);
             var answered = question.Execute(this, actionId);
-            if (answered.Ok) _actions.Add(actionId);
+            if (answered.Ok) Accept(actionId, step);
             return answered;
         }
 
@@ -249,14 +274,40 @@ public sealed partial class Run
         if (screen.CopiesItself)
         {
             // A fight: it copies itself before every action, so the run takes no copy of its own.
+            // Of a fight's actions only the potions are choices of the run's list.
+            var potion = IsPotionAction(actionId) ? Read(screen, actionId) : null;
             var result = screen.Execute(this, actionId);
-            if (result.Ok) _actions.Add(actionId);
+            if (result.Ok) Accept(actionId, potion);
             return result;
         }
 
+        var choice = Read(screen, actionId);
         var outcome = RunAction(actionId);
-        if (outcome.Ok) _actions.Add(actionId);
+        if (outcome.Ok) Accept(actionId, choice);
         return outcome;
+    }
+
+    private static bool IsPotionAction(string actionId) =>
+        actionId.StartsWith("potion:", StringComparison.Ordinal) || actionId.StartsWith("discard_potion:", StringComparison.Ordinal);
+
+    /// <summary>
+    /// What a choice looks like before it is taken: the floor and the screen the player stands on
+    /// and the label the screen offers the id under (the id itself for one it does not list).
+    /// Null when the run's director keeps no choices.
+    /// </summary>
+    private RunChoice? Read(RunScreen screen, string actionId)
+    {
+        if (!_c.Director.KeepsChoices) return null;
+        var label = screen.LegalActions(this).FirstOrDefault(action => action.Id == actionId)?.Label ?? actionId;
+        return new RunChoice(_actions.Count, _c.State.TotalFloor, screen.Name, actionId, label);
+    }
+
+    /// <summary>An action was accepted: it joins the save, and the choices when it is one.</summary>
+    private void Accept(string actionId, RunChoice? choice)
+    {
+        // The place in the save is read now: an action that asked a question was put back and run again since.
+        if (choice is not null) _choices.Add(choice with { Action = _actions.Count });
+        _actions.Add(actionId);
     }
 
     /// <summary>An action outside a fight: the run is copied first, then the action runs on the live state.</summary>
@@ -343,7 +394,10 @@ public sealed partial class Run
         _c = _checkpoint!;
         // What follows a fight is not in the save by itself; the fight's last action is, and it stays.
         if (_pendingAction is not (AfterFightAction or BeginAction) && _actions.Count > _pendingMark)
+        {
             _actions.RemoveRange(_pendingMark, _actions.Count - _pendingMark);
+            _choices.RemoveAll(choice => choice.Action >= _pendingMark);
+        }
     }
 
     private void Settle()

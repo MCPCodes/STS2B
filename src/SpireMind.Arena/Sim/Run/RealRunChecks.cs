@@ -28,10 +28,11 @@ namespace SpireMind.Arena;
 /// </para>
 /// <para>
 /// How the fights are played does not show in any of that: a fight draws from the run's other
-/// streams, never from <c>rewards</c>. They are played by the Greedy player. Neow's relics and
-/// the event This or That are not built yet, so the director of this check does by hand what
-/// each did in the real run: Arcane Scroll's card, and the event's relic pull and curse. The
-/// shop, the rest site and the treasure room are the built ones.
+/// streams, never from <c>rewards</c>. They are played by the Greedy player. Every room is
+/// the built one: Neow's room is the registry's own (her offer on this seed is three built
+/// relics, and the check takes Arcane Scroll as the real run did), the event of floor 4 is the
+/// built This or That? (the check takes its second option, as the real run did), and so are
+/// the shop, the rest site and the treasure room.
 /// </para>
 /// <para>
 /// Where the arena has not built what the game gave (Stone Cracker, the shop's colorless cards
@@ -55,9 +56,11 @@ public sealed class RealRunChecks : IArenaChecks
     // ---------- the director of the check ----------
 
     /// <summary>
-    /// The act as far as it is built: the map, the fights of the act's lists with their rewards,
-    /// the shop, the rest site and the treasure room, and a stand-in for an event's room, since no
-    /// event of the game is built yet. The act ends at the proceed of the boss's rewards.
+    /// The act as far as it is built: Neow's room on the start point, the map, the fights of the
+    /// act's lists with their rewards, the shop, the rest site, the treasure room and the event
+    /// rooms with the events that are built. The act ends at the proceed of the boss's rewards.
+    /// (The act's own director, with its modes and its floor log, is <see cref="ActDirector"/>;
+    /// this one is kept small and apart from it, so that the two hold each other.)
     /// </summary>
     private sealed class Floors : RunDirector, IMapDirector
     {
@@ -69,19 +72,15 @@ public sealed class RealRunChecks : IArenaChecks
 
         public override void Begin(Arena.Run run)
         {
-            RunWorld.Begin(run.State);
+            var world = RunWorld.Begin(run.State);
             if (Strict) run.State.Part<LeftOutLog>().Strict = true;
             var map = MapState.BeginAct(run, 0);
             var arrival = map.Enter(run, map.Map.Start.Coord);
-            run.AfterRoomEntered(arrival.Room);
 
-            // Neow is not built. What the real run took there, Arcane Scroll, added one Rare of the
-            // character's pool: one pick at uniform odds, no upgrade roll (ArcaneScroll.cs).
-            var options = new CardCreationOptions([CardPools.Character], CardCreationSource.Other, CardOddsType.Uniform, static card => card.Rarity == CardRarity.Rare)
-                .WithFlags(CardCreationFlags.NoUpgradeRoll);
-            DeckEdits.Add(run, CardFactory.CreateForReward(run, 1, options)[0].Card);
+            // The start point holds the act's Ancient, Neow. Her room tells the relics that it was entered, and its
+            // Leave option finishes the room (AfterRoom opens the map).
+            EventScreen.Open(run, world.Rooms[run.State.ActIndex].Ancient!);
             MapState.MarkRoomVisited(run, arrival.Room);
-            run.Push(new MapScreen());
         }
 
         public void EnterRoom(Arena.Run run, MapArrival arrival)
@@ -114,14 +113,16 @@ public sealed class RealRunChecks : IArenaChecks
                     MapState.MarkRoomVisited(run, arrival.Room);
                     return;
                 default:
-                    // An Event room: the event the game takes from the act's list, built or not. None is built, so the room is a stand-in.
+                    // An Event room: the act's next event that is allowed, unmet and built (the game's own, built or not, is noted).
                     Event = EventList.Peek(run, static _ => true).GameEvent;
+                    EventScreen.Open(run, EventList.Pull(run));
                     MapState.MarkRoomVisited(run, arrival.Room);
-                    run.AfterRoomEntered(arrival.Room);
-                    run.Push(new StandIn());
                     return;
             }
         }
+
+        /// <summary>An Unknown point can be an Event room while a built event is allowed and unmet (in a strict run always: it then ends in the room).</summary>
+        public bool CanHold(Arena.Run run, RolledRoom room) => room != RolledRoom.Event || EventList.CanHold(run);
 
         public override void AfterFightWon(Arena.Run run, FightOutcome fight)
         {
@@ -141,58 +142,6 @@ public sealed class RealRunChecks : IArenaChecks
         }
 
         public override RunDirector Clone(CloneMap map) => new Floors { Strict = Strict, Encounters = Encounters.ToList(), Event = Event };
-    }
-
-    /// <summary>
-    /// An event's room while no event of the game is built: it can be left, and before that it can
-    /// do what the second option of This or That did in the real run (ThisOrThat.cs, "Ornate"): a
-    /// relic of a rarity rolled on <c>rewards</c> from the front of the player's bag, then the
-    /// curse Clumsy.
-    /// </summary>
-    private sealed class StandIn : RunScreen
-    {
-        public string Pulled = "";
-
-        public override string Name => "event";
-
-        public override GameSnapshot Snapshot(Arena.Run run)
-        {
-            var actions = new List<LegalAction>();
-            if (Pulled.Length == 0) actions.Add(new LegalAction("pull", "Pull a relic"));
-            actions.Add(new LegalAction("proceed", "Proceed"));
-            return new GameSnapshot
-            {
-                Screen = Name, AwaitingDecision = true,
-                State = new JsonObject { ["run"] = run.RunJson(), ["room"] = RoomKind.Event.ToString(), ["pulled"] = Pulled },
-                Actions = actions,
-            };
-        }
-
-        public override ActionResult Execute(Arena.Run run, string actionId)
-        {
-            if (actionId == "proceed")
-            {
-                run.RoomFinished();
-                return ActionResult.Success;
-            }
-            if (actionId != "pull" || Pulled.Length > 0) return ActionResult.Fail($"Unknown action '{actionId}'.");
-
-            var state = run.State;
-            var log = state.Part<LeftOutLog>();
-            var rng = state.Part<RunWorld>().Streams.Draw(RunStream.Rewards, Purpose.RelicRarity(0));
-            var pull = RunRelics.RollAndPullFromFront(state, rng, log.Strict);
-            Pulled = $"{pull.Asked}: the game gives {pull.GameRelic}";
-            // No relic can be given (in a run that must be the game's own: the game's relic is not built).
-            if (!pull.Found) throw new RunUnrepresentableException(pull.Reason!);
-            // What the pull did not take from the game goes into the run's log, as every caller of a pull writes it.
-            if (pull.Rerolls > 0 && pull.GameRelic is { } games) log.PassedOver(state, "relic", games, "an event's relic, whose rarity was then rolled again");
-            foreach (var passed in pull.PassedOver) log.PassedOver(state, "relic", passed, "an event's relic");
-            run.ObtainRelic(pull.Relic!);
-            if (!run.IsOver) DeckEdits.AddCurses(run, [Content.Registry.Card("Clumsy")]);
-            return ActionResult.Success;
-        }
-
-        public override RunScreen Clone(CloneMap map) => new StandIn { Pulled = Pulled };
     }
 
     // ---------- helpers ----------
@@ -276,6 +225,18 @@ public sealed class RealRunChecks : IArenaChecks
             // was asked a question goes on from a copy of its state.)
             c.Equal("Overgrowth", World(run).Acts[0], "the seed's first act");
             var s = run.Snapshot();
+            c.Equal("event", s.Screen, "the run begins in Neow's room");
+            c.Equal("Neow", s.State["event"]!.GetValue<string>(), "the Ancient of the act's start point");
+            c.Sequence(["Precise Scissors", "Arcane Scroll", "Leafy Poultice"], s.State["options"]!.AsArray().Select(option => option!["title"]!.GetValue<string>()),
+                "she offers the three relics of the game's record, in its order");
+            c.Equal(0, RewardsCounter(run), "nothing on her screen draws from rewards");
+            c.Sequence([], Logged(run).Select(entry => entry.ClassName), "all three are built: nothing was passed over");
+            Do(run, "option:1");
+            c.Sequence(["BurningBlood", "ArcaneScroll"], run.State.Relics.Select(held => held.ClassName), "the real run took Arcane Scroll");
+            s = run.Snapshot();
+            c.Equal("option:0=Leave", Labels(s), "Neow is finished: the room's Leave is all that is left");
+            Do(run, "option:0");
+            s = run.Snapshot();
             c.Equal("map", s.Screen, "after Neow's room the map is up");
             c.Equal("""{"act":1,"floor":1,"ascension":0}""", Text(s.State["run"]), "on floor 1");
             c.Equal("Vantom", s.State["boss"]!.GetValue<string>(), "the act's boss");
@@ -350,7 +311,11 @@ public sealed class RealRunChecks : IArenaChecks
             c.Equal("map:0 discard_potion:0", Ids(s), "the map's action, then the potion's: it needs an enemy, so only the discard is offered");
             Do(run, "map:0");
             s = run.Snapshot();
-            c.Equal("Event", s.State["room"]!.GetValue<string>(), "the Unknown room is an event");
+            c.Equal("event", s.Screen, "the Unknown room is an event");
+            c.Equal("This or That?", s.State["event"]!.GetValue<string>(), "the event of the game's record");
+            c.Equal("""[{"n":0,"title":"This","text":"Lose 6 HP. Gain 61 Gold."},{"n":1,"title":"That","text":"Obtain a random Relic. Add Clumsy to your Deck.","cards":[{"name":"Clumsy","cost":"-","type":"Curse","text":"Unplayable. / Ethereal."}]}]""",
+                Text(s.State["options"]), "its two options: 6 HP for the gold the seed rolls, or a random relic and the curse Clumsy");
+            c.Equal("option:0 option:1 discard_potion:0", Ids(s), "one action each, then the held potion's discard");
             c.Equal(4, run.State.TotalFloor, "on floor 4");
             var odds = World(run).UnknownOdds;
             c.Equal((0.2f, -2f, 0.04f, 0.06f), (odds.Monster, odds.Elite, odds.Treasure, odds.Shop), "the odds of the next Unknown room, as the later save has them");
@@ -358,19 +323,22 @@ public sealed class RealRunChecks : IArenaChecks
             c.Equal(2, World(run).Rooms[0].EventsVisited, "and the counter is at 2 now");
             c.Equal(RoomKind.Event, run.Room, "the hooks were told an Event room");
 
-            // What the event's second option did: a relic from the front of the player's bag, then the curse Clumsy.
-            Do(run, "pull");
-            c.Equal("Uncommon: the game gives StoneCracker", run.Snapshot().State["pulled"]!.GetValue<string>(), "the 26th number of rewards rolls Uncommon, and the front of the player's Uncommon list is Stone Cracker");
+            // What the real run chose, the second option (the record's ORNATE): a relic from the front of the player's bag, then the curse
+            // Clumsy. The 26th number of rewards rolls Uncommon, and the front of the player's Uncommon list is Stone Cracker.
+            Do(run, "option:1");
             c.Equal(26, RewardsCounter(run), "one number for the rarity");
+            c.Equal("""[{"n":0,"title":"Proceed","leave":true}]""", Text(run.Snapshot().State["options"]), "the event is finished: the room's own option is left");
+            c.Equal((80, 120), (run.Hp, run.Gold), "HP and gold as the record has them after the room: 80 HP, 120 gold");
             var (relic, passedOver) = FirstBuilt(UncommonFront);
-            c.Sequence(["BurningBlood", relic], run.State.Relics.Select(held => held.ClassName), "the relic given is the first of the saved Uncommon list that the arena holds, Stone Cracker itself once it is built");
+            c.Sequence(["BurningBlood", "ArcaneScroll", relic], run.State.Relics.Select(held => held.ClassName), "the relic given is the first of the saved Uncommon list that the arena holds, Stone Cracker itself once it is built");
             c.Sequence(passedOver, LoggedOn(run, 4, "relic"), "and every relic before it in the game's list is in the run's log as passed over on floor 4");
             c.Equal(passedOver.Length > 0 ? 4 : null, run.State.FindPart<LeftOutLog>()?.FirstFloor, "which makes floor 4 the first floor on which the run is not the game's own (none while Stone Cracker is built)");
             c.That(!World(run).PlayerBag.Contains(relic) && !World(run).SharedBag.Contains(relic), "the relic has left both bags");
             c.Equal("StrikeIronclad StrikeIronclad StrikeIronclad StrikeIronclad StrikeIronclad DefendIronclad DefendIronclad DefendIronclad DefendIronclad Bash Barricade Colossus FightMe Clumsy",
                 DeckNames(run), "the deck as the game's save has it on entering floor 5: the curse Clumsy is its fourteenth card");
             c.Equal("""{"name":"Clumsy","cost":"-","type":"Curse","text":"Unplayable. / Ethereal.","rarity":"Curse"}""", Text(run.DescribeDeck()["deck"]![13]), "and get_deck shows it last");
-            Do(run, "proceed");
+            c.Sequence(["ThisOrThat"], run.State.Part<EventsState>().Visited, "This or That? is met (the save's events_seen)");
+            Do(run, "option:0");
 
             // Floor 5: the shop, through its own screen.
             s = run.Snapshot();
@@ -461,7 +429,7 @@ public sealed class RealRunChecks : IArenaChecks
         {
             var setup = new RunSetup { Seed = PlayedSeed };
             var run = new Arena.Run(setup, new Floors { Strict = true });
-            Do(run, "map:2");
+            Do(run, "option:1", "option:0", "map:2");
             PlayFight(run);
             var offer = Offered(TakeGoldAndOpenCards(run));
             Do(run, $"card:{offer.IndexOf("Colossus")}", "proceed", "map:0");
@@ -472,7 +440,7 @@ public sealed class RealRunChecks : IArenaChecks
             c.That(!run.IsOver && run.State.TotalFloor == 4 && RewardsCounter(run) == 25, "everything up to the event's room is built: the run stands on floor 4 with rewards at 25");
 
             var before = run.Clone();
-            Do(run, "pull");
+            Do(run, "option:1");
             if (RunRelics.IsBuilt("StoneCracker"))
             {
                 c.That(!run.IsOver && run.State.HasRelic("StoneCracker"), "Stone Cracker is built: the run has the game's relic and goes on");
@@ -484,7 +452,7 @@ public sealed class RealRunChecks : IArenaChecks
             c.Equal(4, run.State.TotalFloor, "on floor 4");
             c.Equal(25, RewardsCounter(run), "standing as before the action: the rarity's number is not drawn");
             c.Equal(before.State.Dump().ToJsonString(), run.State.Dump().ToJsonString(), "nothing of the state changed");
-            c.Equal("pull", run.Actions[^1], "the action stays in the save");
+            c.Equal("option:1", run.Actions[^1], "the action stays in the save");
             c.Equal(run.Dump(), Arena.Run.Replay(setup, new Floors { Strict = true }, run.Actions).Dump(), "which replays to the same end");
         });
     }
@@ -529,9 +497,9 @@ public sealed class RealRunChecks : IArenaChecks
 
     /// <summary>
     /// A scripted walker for every screen of an act: Greedy in the fights, and outside them plain rules that touch every
-    /// kind of action (every reward taken, a card of every card reward, Rest and Smith by turns, the chest opened and its
-    /// relic taken, up to two purchases in a shop, the event stand-in's relic). Which of several equal choices it takes
-    /// depends on the step count alone, so a walk is the same every time.
+    /// kind of action (one of Neow's relics and whatever its pickup asks, every reward taken, a card of every card reward,
+    /// Rest and Smith by turns, the chest opened and its relic taken, up to two purchases in a shop, an option of every
+    /// event page). Which of several equal choices it takes depends on the step count alone, so a walk is the same every time.
     /// </summary>
     private static string Walk(Arena.Run run, GameSnapshot s, int step, ref (int Floor, int Bought) shop)
     {
@@ -550,8 +518,10 @@ public sealed class RealRunChecks : IArenaChecks
             case "card_reward":
                 return Pick(All("card:"));
             case "card_select":
-                // A deck screen: pick a card, then confirm its preview.
-                return ids.Contains("confirm") ? "confirm" : First("card:") is not null ? Pick(All("card:")) : ids[0];
+                // A deck screen: pick a card that is not picked yet, then confirm the preview. A row to choose from: take one.
+                if (ids.Contains("confirm")) return "confirm";
+                var unpicked = s.Actions.Where(action => action.Id.StartsWith("card:", StringComparison.Ordinal) && !action.Label.StartsWith("Deselect", StringComparison.Ordinal)).Select(action => action.Id).ToList();
+                return unpicked.Count > 0 ? Pick(unpicked) : ids[0];
             case "rest":
                 return All("option:") is { Count: > 0 } options ? Pick(options) : "proceed";
             case "treasure":
@@ -572,12 +542,24 @@ public sealed class RealRunChecks : IArenaChecks
                 }
                 return "proceed";
             case "event":
-                return ids.Contains("pull") ? "pull" : "proceed";
+                // Neow's room (one of her three relics, then Leave) or an event of the act's list: one of the options the
+                // page offers (an option that would kill is listed in the state and not offered).
+                return Pick(All("option:"));
             case "game_over":
                 return "continue";
             default:
                 return ids[0];
         }
+    }
+
+    /// <summary>A run's result and state without the two logs that only the act's own director writes in full.</summary>
+    private static string WithoutLogs(Arena.Run run)
+    {
+        var state = run.State.Dump();
+        var parts = state["parts"]!.AsObject();
+        parts.Remove(nameof(FloorLog));
+        parts.Remove(nameof(LeftOutLog));
+        return $"{run.Result} {state.ToJsonString()}";
     }
 
     /// <summary>Where two dumps part, with a little of both around it.</summary>
@@ -609,6 +591,7 @@ public sealed class RealRunChecks : IArenaChecks
             var rooms = new HashSet<RoomKind>();
             var problems = new List<string>();
             var floors = 0;
+            var compared = 0;
             foreach (var seed in seeds)
             {
                 var setup = new RunSetup { Seed = seed };
@@ -665,6 +648,7 @@ public sealed class RealRunChecks : IArenaChecks
                         "relic" => RunRelics.IsBuilt(entry.ClassName),
                         "card" => CardPools.IsBuilt(entry.ClassName),
                         "potion" => Content.Registry.Has(ContentKind.Potion, entry.ClassName),
+                        "event" => EventList.IsBuilt(entry.ClassName),
                         _ => false,
                     };
                     if (built) problems.Add($"{seed}: the log says {entry.Kind} {entry.ClassName} was passed over on floor {entry.Floor}, but it is built");
@@ -673,6 +657,20 @@ public sealed class RealRunChecks : IArenaChecks
                 // The save is the run, and a copy taken on the way plays on to the same end.
                 var replayed = Arena.Run.Replay(setup, new Floors(), run.Actions).Dump();
                 if (run.Dump() != replayed) problems.Add($"{seed}: the replay of the action list ends in another state{Difference(run.Dump(), replayed)}");
+
+                // The act's own director gives the same run for the same actions: the two were written apart and hold each
+                // other. (Only the logs differ: the floor log is that director's, and it also writes an Unknown point's second
+                // roll to the run's log.)
+                try
+                {
+                    var byTheAct = ActRun.Replay(seed, RunMode.DrawAgain, run.Actions);
+                    if (WithoutLogs(byTheAct) != WithoutLogs(run)) problems.Add($"{seed}: the act's director ends the same actions in another state{Difference(WithoutLogs(run), WithoutLogs(byTheAct))}");
+                    compared++;
+                }
+                catch (InvalidOperationException refused)
+                {
+                    problems.Add($"{seed}: the act's director turns down an action of this walk: {refused.Message}");
+                }
                 if (halfway is not null)
                 {
                     foreach (var id in run.Actions.Skip(halfwayAt)) halfway.Execute(id);
@@ -680,7 +678,8 @@ public sealed class RealRunChecks : IArenaChecks
                 }
             }
 
-            c.Equal("", string.Join(" | ", problems.Take(6)), $"{seeds.Count} acts: every action the walker chose was accepted, no run ended in an error or as unrepresentable, every run replays and copies ({problems.Count} problems)");
+            c.Equal("", string.Join(" | ", problems.Take(6)), $"{seeds.Count} acts: every action the walker chose was accepted, no run ended in an error or as unrepresentable, every run replays and copies, and the act's own director ends the same actions in the same state ({problems.Count} problems)");
+            c.Equal(seeds.Count, compared, "every act was played again through the act's own director, action for action");
             c.Equal(seeds.Count, results.GetValueOrDefault(RunResult.Cleared) + results.GetValueOrDefault(RunResult.Died), $"every act ended cleared or with a death ({string.Join(", ", results.OrderBy(r => r.Key).Select(r => $"{r.Key} {r.Value}"))})");
             c.That(results.GetValueOrDefault(RunResult.Cleared) > 0, "some acts were cleared: the boss was beaten and its rewards' proceed ended the act");
             foreach (var screen in new[] { "map", "combat", "rewards", "card_reward", "card_select", "rest", "treasure", "shop", "event", "game_over" })

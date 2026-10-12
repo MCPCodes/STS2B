@@ -67,10 +67,10 @@ So to add a relic:
 
 ## Left out by name
 
-- The 131 relics of the list without a class: printed by `arena content` and at the top of the self-check, each with its chunk.
+- The relics of the list without a class (115 today: Neow's first 14 are in `NEOW-CORE.md`, the two swords of the events in `EVENTS.md`): printed by `arena content` and at the top of the self-check, each with its chunk.
 - Kaleidoscope, for good (see above).
 - A relic's tradability (the game's `IsTradable`, which is false for relics with a pickup effect: Strawberry, Pear, Mango, Lee's Waffle): only an act 2 event asks.
-- Relic counters shown on the relic (none of these 25 has one).
+- Relic counters shown on the relic (none of these 25 has one; the mod's snapshot has no field for one, so Sword of Stone, the first built relic that counts, says its count in its text: `EVENTS.md`).
 
 ## Checks
 

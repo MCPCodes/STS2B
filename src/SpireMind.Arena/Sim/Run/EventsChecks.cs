@@ -2130,8 +2130,12 @@ public sealed class EventsChecks : IArenaChecks
             c.Sequence([], row.Missing, "none is missing: each is registered or left out");
             c.Sequence([], Completeness.Problems().Where(problem => problem.Contains("Event", StringComparison.OrdinalIgnoreCase)), "and the table has no complaint about events");
 
-            if (registry.IsExcluded(ContentKind.Event, "ThisOrThat", out var why))
-                c.That(Thrown<KeyNotFoundException>(() => registry.NewEvent("ThisOrThat")).Contains(why, StringComparison.Ordinal), "making an event that is left out says why");
+            // Whichever event of the act is still left out (This or That was the example until it was built).
+            if (EventList.InAnOvergrowthAct.FirstOrDefault(name => registry.IsExcluded(ContentKind.Event, name, out _)) is { } leftOutEvent)
+            {
+                registry.IsExcluded(ContentKind.Event, leftOutEvent, out var why);
+                c.That(Thrown<KeyNotFoundException>(() => registry.NewEvent(leftOutEvent)).Contains(why, StringComparison.Ordinal), $"making an event that is left out says why ({leftOutEvent})");
+            }
             c.That(Thrown<KeyNotFoundException>(() => registry.NewEvent("NoSuchEvent")).Contains("no Event called 'NoSuchEvent'", StringComparison.Ordinal), "an unknown name is refused");
         });
     }

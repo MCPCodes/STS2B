@@ -5,6 +5,10 @@ using SpireMind.Arena;
 if (args.Length > 0 && args[0] == "values" && !args.Any(a => a is "--help" or "-h"))
     return ValuesCommand.Run(args[1..], TextWriter.Synchronized(Console.Out));
 
+// So has the baseline of whole runs (see RunBaselineCommand.Usage): the scripted run players on whole acts.
+if (args.Length > 0 && args[0] == "run-baseline" && !args.Any(a => a is "--help" or "-h"))
+    return RunBaselineCommand.Run(args[1..], TextWriter.Synchronized(Console.Out));
+
 ArenaOptions options;
 try
 {
@@ -14,6 +18,7 @@ catch (UsageException ex)
 {
     Console.Error.WriteLine(ex.Message);
     Console.Error.WriteLine(ArenaOptions.Usage);
+    Console.Error.WriteLine(RunBaselineCommand.Usage);
     Console.Error.WriteLine(ValuesCommand.Usage);
     return 2;
 }
@@ -21,6 +26,7 @@ catch (UsageException ex)
 if (options.Help)
 {
     Console.WriteLine(ArenaOptions.Usage);
+    Console.WriteLine(RunBaselineCommand.Usage);
     Console.WriteLine(ValuesCommand.Usage);
     return 0;
 }

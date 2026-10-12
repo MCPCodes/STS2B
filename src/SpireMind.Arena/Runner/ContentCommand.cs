@@ -41,8 +41,8 @@ public static class ContentCommand
         var registry = Content.Registry;
         output.WriteLine("Arena content, from the game's v0.107.1 data (Ironclad, ascension 0, act 1 \"Overgrowth\", single player):");
         output.WriteLine($"{registry.Cards.Count} cards, {registry.PowerNames.Count()} powers, {registry.MonsterNames.Count()} monsters, " +
-                         $"{registry.EncounterNames.Count()} encounters, {registry.Potions.Count} potions, {registry.RelicNames.Count()} relic, " +
-                         $"{registry.Afflictions.Count} afflictions.");
+                         $"{registry.EncounterNames.Count()} encounters, {registry.Potions.Count} potions, {registry.RelicNames.Count()} relics, " +
+                         $"{registry.EventNames.Count()} events, {registry.Afflictions.Count} afflictions.");
         output.WriteLine();
         Completeness.Write(output, names: true);
 

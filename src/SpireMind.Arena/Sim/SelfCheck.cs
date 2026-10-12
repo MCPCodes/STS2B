@@ -30,7 +30,7 @@ public static class SelfCheck
         var registry = Content.Registry;
         output.WriteLine($"Arena content: {registry.Cards.Count} cards, {registry.PowerNames.Count()} powers, {registry.MonsterNames.Count()} monsters, " +
                          $"{registry.EncounterNames.Count()} encounters, {registry.Potions.Count} potions, {registry.RelicNames.Count()} relics, " +
-                         $"{registry.Afflictions.Count} afflictions; {registry.Excluded.Count} left out on purpose");
+                         $"{registry.EventNames.Count()} events, {registry.Afflictions.Count} afflictions; {registry.Excluded.Count} left out on purpose");
         foreach (var ((kind, name), reason) in registry.Excluded.OrderBy(e => e.Key.Kind).ThenBy(e => e.Key.ClassName, StringComparer.Ordinal))
             output.WriteLine($"  left out: {kind} {name}: {reason}");
         foreach (var problem in registry.Problems) failures.Add($"registry: {problem}");

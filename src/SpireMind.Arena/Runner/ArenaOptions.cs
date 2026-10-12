@@ -14,7 +14,8 @@ public enum ArenaCommand { Baseline, Run, Position, Report, Compare, SelfCheck, 
 /// runs and <c>selfcheck</c> proves the simulator and the tool path still hold. <c>honesty</c>
 /// compares what the snapshots promise with what then happens, and <c>content</c> lists what
 /// the simulator holds of the game and what it leaves out. See docs/arena.md.
-/// (<c>values</c>, the card-value measurement, reads its own options: <see cref="ValuesCommand"/>.)
+/// (<c>values</c>, the card-value measurement, and <c>run-baseline</c>, the scripted players on
+/// whole acts, read their own options: <see cref="ValuesCommand"/>, <see cref="RunBaselineCommand"/>.)
 /// <para>
 /// <c>run</c> has switches for experiments (<c>--brief</c>, <c>--effort-by-tier</c>,
 /// <c>--forecast</c>). Each is off unless it is given, and with none given a batch is the batch
@@ -572,7 +573,7 @@ public sealed record ArenaOptions
     }
 
     // The commands, as the messages about a missing or unknown one list them.
-    private const string Commands = "baseline, run, position, report, compare, selfcheck, honesty, content, snapshot or values";
+    private const string Commands = "baseline, run, position, report, compare, selfcheck, honesty, content, snapshot, run-baseline or values";
 
     // An option used with a command it doesn't belong to.
     private static void Only(string option, ArenaCommand command, params ArenaCommand[] allowed)

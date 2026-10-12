@@ -1073,8 +1073,12 @@ public sealed class RunStateChecks : IArenaChecks
         {
             var game = new RunGame(new Run(new RunSetup(), new FixedFights(Dummy("Brute", 100, hit: 50)))) { ActionDelay = TimeSpan.Zero };
             c.That(!Wait(game.ExecuteAsync("play:9", none)).Ok, "an illegal id is refused");
+            var atTheStart = game.Copy();
+            c.Equal(game.Run.Dump(), atTheStart.Dump(), "a copy of the game's run is the run as it stands");
             c.That(Wait(game.ExecuteAsync("end_turn", none)).Ok && Wait(game.ExecuteAsync("end_turn", none)).Ok, "two turns");
             c.That(game.IsOver && !game.AtEnd && game.Result == RunResult.Died, "the player died");
+            c.That(!atTheStart.IsOver && atTheStart.Actions.Count == 0 && atTheStart.Hp == 80, "the copy did not move with the game: no action, 80 HP, not over");
+            c.That(atTheStart.Execute("end_turn").Ok && atTheStart.Hp == 30 && game.Actions.Count == 2, "and playing the copy does not move the game: the copy is at 30 HP after its one turn, the game's save still has two actions");
             c.Equal("game_over", Wait(game.CaptureAsync(none)).Screen, "game over");
             c.That(Wait(game.ExecuteAsync("continue", none)).Ok && game.AtEnd, "continue");
             var end = Wait(game.CaptureAsync(none));
@@ -1146,6 +1150,8 @@ public sealed class RunStateChecks : IArenaChecks
                         var snapshot = Wait(game.CaptureAsync(none));
                         if (snapshot.Actions.Count > 0) Wait(game.ExecuteAsync(Pick(snapshot), none));
                         Wait(game.DescribeDeckAsync(none));
+                        // A copy taken while the other threads act is whole: it can be dumped and is some state the run was in.
+                        if (n % 16 == 0 && game.Copy().Dump().Length == 0) Interlocked.Increment(ref errors);
                     }
                 }
                 catch

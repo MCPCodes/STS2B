@@ -48,9 +48,19 @@ public sealed class RunGame : IGameBridge
     /// <summary>
     /// The live run, for a scripted player: look, or copy it with <see cref="Run.Clone"/> (or its
     /// fight with <see cref="Fight.CloneDeterminized"/>) and play the copy. Never act on it
-    /// directly, and only touch it from the thread that drives this game.
+    /// directly, and only touch it from the thread that drives this game. Whoever shares the
+    /// game with other threads (a runner whose session calls the tools over HTTP) takes
+    /// <see cref="Copy"/> instead.
     /// </summary>
     public Run Run => _run;
+
+    /// <summary>
+    /// A copy of the run as it stands, taken under the game's lock: safe while tool calls arrive
+    /// on other threads, and its own run from then on (the game does not move it, and playing it
+    /// does not move the game). For a result line or a floor log while a session is live, and
+    /// for playing a fight on from where the game stands.
+    /// </summary>
+    public Run Copy() { lock (_gate) return _run.Clone(); }
 
     /// <summary>The run is decided (after a death the game over screen may still be up).</summary>
     public bool IsOver { get { lock (_gate) return _run.IsOver; } }

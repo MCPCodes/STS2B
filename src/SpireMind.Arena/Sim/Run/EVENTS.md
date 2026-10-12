@@ -4,7 +4,7 @@ The event room and its screen, which event an Event room holds, the Ancient's ro
 
 Everything here is the game's (v0.107.1, single player, ascension 0), read from its code: `MegaCrit.Sts2.Core.Models/EventModel.cs` and `AncientEventModel.cs`, `Core.Events/EventOption.cs`, `Core.Rooms/EventRoom.cs` and `RoomSet.cs`, `Core.Models/ActModel.cs` (PullNextEvent), `Core.Runs/RunManager.cs` (the room's creation), `Core.Models.Events/Neow.cs` and every event's own `IsAllowed`, `Core.Nodes.Rooms/NEventRoom.cs`. The screen is the mod's (`docs/screens.md`, "Event"; `src/SpireMind/Game/Screens/EventReader.cs`).
 
-No event of the game is built here except Neow, and none of Neow's relics. This is what events and Neow's relics are written against.
+This page is the room: what events and Neow's relics are written against. The only event in this folder is Neow; the first seven events of the act's list are in `../Content/EventsA.cs` (`../Content/EVENTS.md`), and the first 14 of Neow's relics in `../Content/NeowCore.cs` (`../Content/NEOW-CORE.md`).
 
 ## Files
 
@@ -42,13 +42,13 @@ room != RolledRoom.Event || EventList.CanHold(run)
 public sealed class ThisOrThat : RunEvent              // the class name is the game's
 {
     private int _gold;
-    public override string Title => "This or That";    // the game's English title
+    public override string Title => "This or That?";   // the game's English title, from its text table (not the class name)
     protected override void CalculateVars(Run run) => _gold = Rng.NextInt(41, 69);
     protected override string InitialDescription(Run run) => "...";            // our own words
     protected override IReadOnlyList<EventOption> GenerateInitialOptions(Run run) =>
     [
-        Option("PLAIN", "Plain", $"Lose 6 HP. Gain {_gold} Gold.", Plain).ThatDoesDamage(6),
-        Option("ORNATE", "Ornate", "Obtain a random Relic. Add Clumsy to your Deck.", Ornate).WithCards("Clumsy"),
+        Option("PLAIN", "This", $"Lose 6 HP. Gain {_gold} Gold.", Plain).ThatDoesDamage(6),      // key PLAIN, title "This"
+        Option("ORNATE", "That", "Obtain a random Relic. Add Clumsy to your Deck.", Ornate).WithCards("Clumsy"),
     ];
     private void Plain(Run run)
     {
@@ -62,7 +62,7 @@ public sealed class ThisOrThat : RunEvent              // the class name is the 
 ```
 
 - **The methods have the game's names**: `BeforeEventStarted`, `CalculateVars`, `GenerateInitialOptions`, `AfterEventStarted`, `OnEventFinished`, `SetEventState(text, options...)`, `SetEventFinished(text)`. Port an event method by method. `Rng` is the event's own stream.
-- **An option**: `Option(key, title, text, method)`. The key is the option's name in the game's text table (for logs). The title is the game's; the text is ours, with the live numbers. `LockedOption(key, title, text)` is an option whose requirement is not met (the game: an option with nothing to run).
+- **An option**: `Option(key, title, text, method)`. The key is the option's name in the game's text table (for logs; it is what the game's run records write). The title is the game's English text for that key, read from the game's pack: the key and the class name mislead (`PLAIN` is titled "This", `ORNATE` "That", the event "This or That?"; `../Content/EVENTS.md` has the seven that are built). The text is ours, with the live numbers. `LockedOption(key, title, text)` is an option whose requirement is not met (the game: an option with nothing to run).
 - **Deadly options**: `.ThatDoesDamage(n)` (would kill at or below n HP), `.ThatDecreasesMaxHp(n)`, `.ThatWillKillPlayerIf(method)`. They are asked every time the page is read. The mod never offers an option that says it would kill, so declare what the game declares, no more and no less.
 - **Tooltips** (a card named here must be built: it is looked up when the option is made): `.WithCards("Clumsy", "Bash+")`, `.WithCard(deckCard)`, `.WithRelicTip("SwordOfStone")` (the game's `HoverTipFactory.FromRelic`: the relic, then the cards its own tooltip shows), `.WithCardTipsOf(relic)` (`FromRelicExcludingItself`). The snapshot lists up to three different cards and one relic, as the mod does. A relic whose tooltip shows cards implements `ICardTips`.
 - **What an option runs is a method of the event**, taking the run (and the option, for `option.Argument` set with `.WithArgument(n)` on options made in a loop). A function that caught a local variable is refused when the option is made: an event is copied with its run, and the copy's options are bound to the copied event.
@@ -107,7 +107,7 @@ So a lock decided while the first page was made (gold below a price) stays when 
 - `EventList.IsAllowed` has every event's own condition, for the 31 entries of an Overgrowth act's list (13 of the act, 18 shared, 10 of which a first act never holds). The rules need nothing of the events themselves, so they are here for events that are not built too.
 - **The floor an event reads is one less than the room's.** The game's total floor is the number of map points it has recorded, and it records a point after the room is made. Slippery Bridge asks for "above 6": its room is on floor 8 at the earliest. `EventList.FloorsBehind(run)` is that number, the same while the map asks `CanHold` and when the room is made.
 
-**Events that are not built** (house rule, the plan's "draw again"). When the event the game takes is not built: a strict run (`LeftOutLog.Strict`) ends as unrepresentable; otherwise the event is passed over, noted in the run's `LeftOutLog` (kind `event`), and the walk goes on along the same lap for an entry that is allowed, unmet and built. When there is none the room cannot be an Event room: `EventList.CanHold(run)` says so while the map rolls the Unknown point, and the map rolls again with the Event barred (`MAP.md`). `EventList.Peek(run)` is the walk without any change, for that question and for screening seeds.
+**Events that are not built** (house rule, the plan's "draw again"). When the event the game takes is not built: a strict run (`LeftOutLog.Strict`) ends as unrepresentable; otherwise the event is passed over, noted in the run's `LeftOutLog` (kind `event`), and the walk goes on along the same lap for an entry that is allowed, unmet and built. When there is none the room cannot be an Event room: `EventList.CanHold(run)` says so while the map rolls the Unknown point, and the map rolls again with the Event barred (`MAP.md`); the director writes that second roll to the run's log with the event the game would have met (`EventList.Peek(run).GameEvent`), as `ActDirector` does. `EventList.Peek(run)` is the walk without any change, for that question and for screening seeds.
 
 ## Neow
 
@@ -147,7 +147,7 @@ Neow has no page text in the game's text table (there is no `NEOW.pages.*` key):
 - **Neow's offer**: the game's own record of nine offers (`sts2-notes/golden-saves/history`): five single-player runs of v0.107.1 (seeds 1BUSLN0FY5, 1CJXGGA4E5, 75F277YN2G, 3FBTGQ63TM, AG5XPLQQNY) and both players of two co-op runs (FS5LGNDZZ7, BQ4CE2FRRJ). All nine come out of the seed. With the folder on the machine (or `$ARENA_GOLDEN_SAVES`) every `history/*.run` of this build is compared too. The draw counts are worked out from the list lengths; the cases with relics left out are worked by hand from the first numbers of Neow's stream of seed 1BUSLN0FY5 and its shuffled list; and 600 seeds with random sets of built relics are held against a second reading of the rule written straight down.
 - **The list**: the event list of seed 1BUSLN0FY5 as the game saved it, walked by hand room after room with each event's own condition; the real run met This or That as its first event (entry 1) with the counters and `events_seen` of the later save. Seed 75F277YN2G's record agrees: its first event was entry 1 although entry 0 was This or That, which is always allowed. Every condition is checked at its boundary.
 - **The room and its screen**: events of the checks' own (two shaped like This or That and Tablet of Truth) on numbers set by hand, against `docs/screens.md` key for key: pages, locked and deadly options, tooltips, the leave option, refusals, potions, a card choice, a rewards screen, the order on entering, the clean-up, a death, the two guards, copies and replays.
-- **Neow's room** with relics of the checks under the game's class names (none of Neow's relics is built yet): the page of the real seed, the heal, the pick the real run made (Arcane Scroll gave Barricade from one number of `rewards`), a pickup that asks, strict mode, and a seed whose offer is not built.
+- **Neow's room** with relics of the checks under the game's class names (so that these checks do not depend on which of Neow's relics are built; the built ones have their own, `NeowCoreChecks`): the page of the real seed, the heal, the pick the real run made (Arcane Scroll gave Barricade from one number of `rewards`), a pickup that asks, strict mode, and a seed whose offer is not built.
 - **The real run's path**: from Neow over two rooms to the Unknown point of floor 4, which is an Event room and holds This or That; the same with no event built (a Monster room) and in a strict run (unrepresentable).
 
 A mutation pass over `Events.cs`, `EventList.cs` and `Neow.cs` (133 one-line changes, each run against `EventsChecks`) is how the checks were held to account: 130 were caught, and the other three change nothing that can show (the healed amount written as "what was missing"; an option's own relic read outside an Ancient's room, where no option has one; 70% of max HP worked out in whole numbers, which is the same test for a whole number of HP).

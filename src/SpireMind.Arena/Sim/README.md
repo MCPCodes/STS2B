@@ -17,6 +17,7 @@ Sources, in this order: the verified spec files in `/Users/mark/Projects/sts2-no
 | Elites, bosses | `Sim/Content/Elites.cs`, `Bosses.cs` | `ElitesChecks.cs`, `BossesChecks.cs` |
 | Potions | `Sim/Content/Potions.cs` | `PotionsChecks.cs` |
 | Run mode: the first relics, the curses and Neow's Fury, the first colorless cards | `Sim/Content/Relics1.cs`, `Curses.cs`, `ColorlessCore.cs` (pages `Sim/Content/RELICS.md`, `Sim/Run/CURSES.md`, `Sim/Run/COLORLESS.md`) | `Relics1Checks.cs`, `CursesChecks.cs`, `ColorlessCoreChecks.cs` |
+| Run mode: Neow's first 14 relics, the first seven events and their two relics | `Sim/Content/NeowCore.cs`, `EventsA.cs` (pages `Sim/Content/NEOW-CORE.md`, `Sim/Content/EVENTS.md`) | `NeowCoreChecks.cs`, `EventsAChecks.cs` |
 | Scenario generator | `Sim/Scenario.cs` | `Sim/ScenarioChecks.cs` |
 | Scripted players | `Policies/GreedyPolicy.cs`, `Policies/LookaheadPolicy.cs`, `Policies/RolloutPolicy.cs` | `Policies/PolicyChecks.cs`, `Policies/RolloutChecks.cs` |
 | Card values, measured (`scripts/arena.sh values`) | `Runner/ValuesCommand.cs` | (section 15) |
@@ -581,7 +582,7 @@ Left out on purpose (`r.Exclude`, printed by `scripts/arena.sh content`):
 
 The scenario generator rolls a drop again when it comes up with one of these two potions (2 of 48).
 
-Not in the simulator at all, because a single act-1 Ironclad fight never meets them: relics other than Burning Blood (the scenario fights have no other; run mode has 25 more, `Sim/Content/RELICS.md`), other characters' cards and powers, the Underdocks act, events' fights, enchantments, pets, orbs and stars, co-op.
+Not in the simulator at all, because a single act-1 Ironclad fight never meets them: relics other than Burning Blood (the scenario fights have no other; run mode has 41 more, `Sim/Content/RELICS.md`, `NEOW-CORE.md`, `EVENTS.md`), other characters' cards and powers, the Underdocks act, events' fights, enchantments, pets, orbs and stars, co-op.
 
 Known gaps in the engine, none of which shows in a snapshot today:
 
