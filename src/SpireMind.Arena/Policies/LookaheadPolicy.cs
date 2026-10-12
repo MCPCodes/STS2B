@@ -37,7 +37,7 @@ public sealed class LookaheadPolicy : IEnginePolicy
     public const int DefaultWorlds = 3;
 
     /// <summary>Actions deep at which a line stops branching, and at which it is cut off altogether.</summary>
-    private const int MaxDepth = 60, HardDepth = 400;
+    internal const int MaxDepth = 60, HardDepth = 400;
 
     // ---------- the evaluation; one point is one HP ----------
 
@@ -86,15 +86,15 @@ public sealed class LookaheadPolicy : IEnginePolicy
     private const double Horizon = 8;
 
     /// <summary>Taken off per action, so that of two lines worth the same the shorter is chosen and nothing is played for nothing.</summary>
-    private const double PerAction = 0.01;
+    internal const double PerAction = 0.01;
 
     /// <summary>Taken off per potion used, so that a potion is never used where the same result comes without it.</summary>
-    private const double PerPotion = 1;
+    internal const double PerPotion = 1;
 
     /// <summary>A line with a potion is taken when it is this much better than the best line
     /// without one: in any fight when it turns a death into survival or wins the fight this turn
     /// (in at least half the copies), and against an elite or a boss when it saves this many HP.</summary>
-    private const double Decisive = Win / 2, WorthAPotion = 10;
+    internal const double Decisive = Win / 2, WorthAPotion = 10;
 
     private readonly int _seed, _budget, _worlds;
     private readonly GreedyPolicy _withoutFight = new();
@@ -122,8 +122,18 @@ public sealed class LookaheadPolicy : IEnginePolicy
         if (offered.Count == 0) return "end_turn";
         if (offered.Count == 1 || fight.IsOver) return offered[0].Id;
 
+        return Decide(fight, Hash(snapshot)) is { } best && offered.Any(a => a.Id == best) ? best : _withoutFight.Choose(snapshot);
+    }
+
+    /// <summary>
+    /// The search's choice for a fight that awaits a decision, or null when it found none. For a
+    /// player that plays whole fights on copies (<see cref="RolloutPolicy"/>): no snapshot is
+    /// needed, <paramref name="shown"/> stands in for the hash of what the fight shows and seeds
+    /// the reshuffles.
+    /// </summary>
+    internal string? Decide(Fight fight, ulong shown)
+    {
         var measure = new Measure(fight);
-        var shown = Hash(snapshot);
         var hasPotion = fight.Potions.Any(p => p is { Usage: PotionUsage.CombatOnly or PotionUsage.AnyTime });
         var bigFight = fight.RoomType is RoomType.Elite or RoomType.Boss;
 
@@ -147,13 +157,13 @@ public sealed class LookaheadPolicy : IEnginePolicy
 
         var choice = plain.Best(worlds);
         if (hasPotion && withPotions.Best(worlds) is { } potionLine && PotionPays(potionLine, choice)) choice = potionLine;
-        return choice is { } best && offered.Any(a => a.Id == best.Id) ? best.Id : _withoutFight.Choose(snapshot);
+        return choice?.Id;
     }
 
     // ---------- copies that hide what the player cannot know ----------
 
     /// <summary>FNV-1a over what the snapshot shows, so that a reshuffle depends on nothing else.</summary>
-    private static ulong Hash(GameSnapshot snapshot)
+    internal static ulong Hash(GameSnapshot snapshot)
     {
         var hash = 14695981039346656037UL;
         foreach (var c in snapshot.Screen) hash = unchecked((hash ^ c) * 1099511628211UL);
@@ -175,7 +185,7 @@ public sealed class LookaheadPolicy : IEnginePolicy
     // ---------- adding up over copies ----------
 
     /// <summary>The value of every action of the decision, summed over the copies searched.</summary>
-    private sealed class Tally
+    internal sealed class Tally
     {
         private readonly List<string> _order = new();
         private readonly Dictionary<string, (double Sum, int Count)> _sums = new(StringComparer.Ordinal);
@@ -210,7 +220,7 @@ public sealed class LookaheadPolicy : IEnginePolicy
     /// <param name="Complete">Nothing below was cut short by the budget, so the values can be used again as they are.</param>
     private readonly record struct Rated(double Plain, double Potion, bool Complete);
 
-    private sealed class Search(Measure measure, int budget, bool usePotions)
+    internal sealed class Search(Measure measure, int budget, bool usePotions)
     {
         private readonly Dictionary<string, Rated> _seen = new(StringComparer.Ordinal);
         private int _spent, _stopAt;
@@ -313,16 +323,22 @@ public sealed class LookaheadPolicy : IEnginePolicy
             return result;
         }
 
+        private List<LegalAction> Candidates(Fight f) => Candidates(f, usePotions);
+
         /// <summary>
         /// The actions worth telling apart, the one that closes the turn or the choice first. Left
         /// out: throwing a potion away, taking a pick back (which could go round for ever), potions
-        /// when this search does without them, and a second copy of a card that reads the same as
-        /// one already listed.
+        /// when the search does without them, and a second copy of a card that reads the same as
+        /// one already listed. Static, so that another search of the turn lists the same
+        /// (<see cref="RolloutPolicy"/>).
         /// </summary>
-        private List<LegalAction> Candidates(Fight f)
+        internal static List<LegalAction> Candidates(Fight f, bool usePotions)
         {
             var list = new List<LegalAction>();
             var told = new HashSet<string>(StringComparer.Ordinal);
+            // A card that can be aimed at several enemies is listed once per enemy; how it reads is worked out once.
+            string?[]? looks = null;
+            string LooksAt(int index) => (looks ??= new string?[f.Hand.Count])[index] ??= Looks(f, f.Hand[index]);
             foreach (var action in f.LegalActions())
             {
                 var id = action.Id;
@@ -338,11 +354,11 @@ public sealed class LookaheadPolicy : IEnginePolicy
                 }
                 else if (TrySplit(id, "play:", out var i, out var target) && i < f.Hand.Count)
                 {
-                    same = "play:" + Looks(f, f.Hand[i]) + target;
+                    same = "play:" + LooksAt(i) + target;
                 }
                 else if (TrySplit(id, "select:", out var pick, out _) && pick < f.Hand.Count)
                 {
-                    same = "select:" + Looks(f, f.Hand[pick]);
+                    same = "select:" + LooksAt(pick);
                 }
                 if (!told.Add(same)) continue;
 
@@ -365,11 +381,11 @@ public sealed class LookaheadPolicy : IEnginePolicy
         }
 
         /// <summary>A hand card as the player reads it: two cards that read the same are played the same.</summary>
-        private static string Looks(Fight f, CardInstance card) =>
+        internal static string Looks(Fight f, CardInstance card) =>
             $"{card.Title}|{f.CostText(card)}|{Fight.CardText(f, card, PileType.Hand)}|{(card.ExhaustOnNextPlay ? 'x' : '-')}";
 
         /// <summary>Random numbers used so far, over all streams.</summary>
-        private static int Rolls(Fight f)
+        internal static int Rolls(Fight f)
         {
             var r = f.Rng;
             return r.Shuffle.Counter + r.MonsterAi.Counter + r.Niche.Counter + r.CombatTargets.Counter + r.CombatCardSelection.Counter
@@ -381,7 +397,7 @@ public sealed class LookaheadPolicy : IEnginePolicy
         /// the hand as a set, the other piles, the potions, and how much has happened. Inside one
         /// copy a card's id stands for the card.
         /// </summary>
-        private static string Key(Fight f)
+        internal static string Key(Fight f)
         {
             var key = new StringBuilder(256);
             var inv = CultureInfo.InvariantCulture;
@@ -435,7 +451,7 @@ public sealed class LookaheadPolicy : IEnginePolicy
     /// dangerous each enemy looks, and so what a point of damage on it is worth. Every position
     /// the search reaches at the end of the turn is measured against it.
     /// </summary>
-    private sealed class Measure
+    internal sealed class Measure
     {
         private readonly int _turn;
 

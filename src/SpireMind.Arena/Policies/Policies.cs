@@ -1,3 +1,4 @@
+using System.Globalization;
 using SpireMind.Core;
 
 namespace SpireMind.Arena;
@@ -52,6 +53,34 @@ public static class Policies
             return i < 0 ? Order.Length : i;
         }
         return found.OrderBy(Rank).ThenBy(p => p.Name, StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>The players that are too slow to play in every baseline and self-check, and so
+    /// play only where they are asked for by name: Rollout in its three settings.</summary>
+    public static IReadOnlyList<string> OnRequest { get; } =
+        ["Rollout", .. RolloutSetting.All.Select(s => "Rollout:" + s.Name)];
+
+    /// <summary>
+    /// A player by name, whatever the case of the letters: one of <see cref="All"/>, or one of
+    /// <see cref="OnRequest"/> ("Rollout" is "Rollout:normal"). Null for a name nobody has.
+    /// </summary>
+    public static IPolicy? ByName(string name)
+    {
+        if (All.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase)) is { } listed) return listed;
+        const string rollout = "Rollout";
+        if (string.Equals(name, rollout, StringComparison.OrdinalIgnoreCase)) return new RolloutPolicy(RolloutSetting.Normal);
+        if (!name.StartsWith(rollout + ":", StringComparison.OrdinalIgnoreCase)) return null;
+        var rest = name[(rollout.Length + 1)..];
+        if (RolloutSetting.Named(rest) is { } setting) return new RolloutPolicy(setting);
+
+        // A setting of one's own, "Rollout:24/6/60": play-outs a decision, lines compared, positions the inner player searches a turn.
+        var parts = rest.Split('/');
+        if (parts.Length == 3
+            && int.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out var playouts) && playouts is >= 0 and <= 10_000
+            && int.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var lines) && lines is >= 1 and <= 100
+            && int.TryParse(parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out var inner) && inner is >= 1 and <= 10_000)
+            return new RolloutPolicy(new RolloutSetting(string.Create(CultureInfo.InvariantCulture, $"{playouts}/{lines}/{inner}"), playouts, lines, inner));
+        return null;
     }
 }
 

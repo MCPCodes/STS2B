@@ -14,6 +14,7 @@ public enum ArenaCommand { Baseline, Run, Position, Report, Compare, SelfCheck, 
 /// runs and <c>selfcheck</c> proves the simulator and the tool path still hold. <c>honesty</c>
 /// compares what the snapshots promise with what then happens, and <c>content</c> lists what
 /// the simulator holds of the game and what it leaves out. See docs/arena.md.
+/// (<c>values</c>, the card-value measurement, reads its own options: <see cref="ValuesCommand"/>.)
 /// <para>
 /// <c>run</c> has switches for experiments (<c>--brief</c>, <c>--effort-by-tier</c>,
 /// <c>--forecast</c>). Each is off unless it is given, and with none given a batch is the batch
@@ -54,9 +55,12 @@ public sealed record ArenaOptions
 
     public const string Usage =
         "Usage:\n" +
-        "  scripts/arena.sh baseline [--scenarios N] [--seed S]\n" +
+        "  scripts/arena.sh baseline [--scenarios N] [--seed S] [--policies A,B] [--threads K]\n" +
         "      Play every scripted policy on N generated fights (default 30) and print who won with how\n" +
         "      much HP left, overall and by tier. Half a minute for 30 fights; costs nothing.\n" +
+        "      --policies names the players instead (Random,Greedy,Lookahead,Rollout): it is how the slow\n" +
+        "      ones play (Rollout, Rollout:fast, Rollout:strong take seconds a fight), and it adds the\n" +
+        "      seconds a fight took. --threads plays K fights at once (default 1, at most 8).\n" +
         "  scripts/arena.sh run --models a,b,c [--scenarios N] [--seed S] [--parallel K] [--effort LEVEL]\n" +
         "                       [--timeout-minutes M] [--grace-seconds G] [--stop-at-weekly F] [--out DIR]\n" +
         "                       [--claude PATH] [--repo DIR]\n" +
@@ -233,6 +237,12 @@ public sealed record ArenaOptions
     /// <summary>For <c>selfcheck --checks</c>: the check classes to run, and nothing else. Empty runs everything.</summary>
     public IReadOnlyList<string> Checks { get; init; } = [];
 
+    /// <summary>For <c>baseline --policies</c>: the players by name, in the order typed. Empty plays <see cref="Policies.All"/>.</summary>
+    public IReadOnlyList<string> PolicyNames { get; init; } = [];
+
+    /// <summary>For <c>baseline --threads</c>: how many fights are played at once.</summary>
+    public int Threads { get; init; } = 1;
+
     /// <summary>
     /// Reads the arguments: the command first, then its options in any order. Throws
     /// <see cref="UsageException"/> for an unknown command or option, a missing or bad value,
@@ -287,6 +297,14 @@ public sealed record ArenaOptions
                     Only(arg, command, ArenaCommand.SelfCheck);
                     options = options with { Checks = Value(args, ref i).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) };
                     if (options.Checks.Count == 0) throw new UsageException("--checks takes check class names separated by commas.");
+                    break;
+                case "--policies":
+                    Only(arg, command, ArenaCommand.Baseline);
+                    options = options with { PolicyNames = PolicyList(Value(args, ref i)) };
+                    break;
+                case "--threads":
+                    Only(arg, command, ArenaCommand.Baseline);
+                    options = options with { Threads = Whole(arg, Value(args, ref i), 1, MostParallel) };
                     break;
                 case "--models":
                     Only(arg, command, ArenaCommand.Run, ArenaCommand.Position);
@@ -428,7 +446,7 @@ public sealed record ArenaOptions
     }
 
     // The commands, as the messages about a missing or unknown one list them.
-    private const string Commands = "baseline, run, position, report, compare, selfcheck, honesty, content or snapshot";
+    private const string Commands = "baseline, run, position, report, compare, selfcheck, honesty, content, snapshot or values";
 
     // An option used with a command it doesn't belong to.
     private static void Only(string option, ArenaCommand command, params ArenaCommand[] allowed)
@@ -496,6 +514,20 @@ public sealed record ArenaOptions
                 throw new UsageException($"--effort-by-tier names {tier} twice.");
         }
         return efforts;
+    }
+
+    // The players of a baseline, by the names Policies.ByName knows.
+    private static List<string> PolicyList(string text)
+    {
+        var names = text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+        if (names.Count == 0)
+            throw new UsageException("--policies takes player names separated by commas.");
+        var known = string.Join(", ", Policies.All.Select(p => p.Name).Concat(Policies.OnRequest));
+        if (names.FirstOrDefault(n => Policies.ByName(n) is null) is { } unknown)
+            throw new UsageException($"There's no player called '{unknown}': use {known}.");
+        if (names.GroupBy(n => Policies.ByName(n)!.Name, StringComparer.Ordinal).FirstOrDefault(g => g.Count() > 1) is { } twice)
+            throw new UsageException($"--policies names {twice.Key} twice.");
+        return names;
     }
 
     // "a,b,c" as typed, without empty entries. A model named twice would only repeat its fights.
