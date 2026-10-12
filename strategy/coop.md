@@ -119,6 +119,10 @@ Sources disagree on several rules. Items marked (unverified) should be confirmed
 11. **Respect the human.**
     - If the human calls a plan, follow it unless it is provably lethal. Then say why in one line.
     - Never take actions on the human's behalf (their cards, their rewards).
+12. **There can be two people in the party.** Every teammate with `human: true` in `team` is a person: the host, and a guest who joined from another computer.
+    - Treat both the same: draft around both decks, protect both, leave both their kills and their relic picks.
+    - On a vote `vote.follow` points at what most people voted for, and at the host's vote when they split. `vote.do` says what to do.
+    - The guest can't see your chat lines or type to you. The host passes things on ("Amir wants the elite"): take that as the guest's own call.
 
 ## Planning sessions
 

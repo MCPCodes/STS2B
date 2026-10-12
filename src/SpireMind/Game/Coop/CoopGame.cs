@@ -79,6 +79,8 @@ internal static class CoopGame
         if (_started || role is null) return;
         _started = true;
 
+        // Where the host keeps the name of a guest (a person who joins from another computer).
+        Part("the guests' names", () => Guests.Start(role));
         // First, since in a bot copy it reads the launch arguments the lobby driver needs.
         Part("the bot copy's window and quitting", () => CoopBots.Start(role));
         Part("the co-op manners", () => Teammates.Start(role));

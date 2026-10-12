@@ -12,6 +12,11 @@
     <GameDir Condition="'$(GameDir)' == ''">$(HOME)/Library/Application Support/Steam/steamapps/common/Slay the Spire 2</GameDir>
     <GameArch Condition="'$(GameArch)' == ''">arm64</GameArch>
     <Sts2DataDir Condition="'$(Sts2DataDir)' == ''">$(GameDir)/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_$(GameArch)</Sts2DataDir>
+    <!--
+      The DLL also goes to a guest's computer (scripts/package-guest.sh). Without this it carries
+      the full path of this checkout, in the name of its symbol file. With it that reads /spiremind/...
+    -->
+    <PathMap>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/../..'))=/spiremind</PathMap>
   </PropertyGroup>
 
   <Target Name="CheckGameDir" BeforeTargets="ResolveAssemblyReferences">

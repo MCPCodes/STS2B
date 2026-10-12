@@ -4,6 +4,10 @@ using MegaCrit.Sts2.Core.Nodes.Multiplayer;
 using MegaCrit.Sts2.Core.Nodes.Screens.CustomRun;
 using MegaCrit.Sts2.Core.Platform.Null;
 using SpireMind.Game;
+// Aliases rather than the namespaces, so a game type of the same name in the global usings can
+// never make them ambiguous.
+using CoopSeats = SpireMind.Core.Coop.CoopSeats;
+using Guests = SpireMind.Game.Coop.Guests;
 
 namespace SpireMind.Patches;
 
@@ -32,6 +36,14 @@ namespace SpireMind.Patches;
 /// <see cref="Start"/>, never from the command line here; until it is told, a copy counts as
 /// the human's. Two bots on one character become "Ironclad" and "Ironclad 2", in the run's
 /// player order, which is the same on every copy.
+///
+/// A guest (docs/coop-guest.md) is a person who joined from another computer: any player who
+/// is neither the host nor one of the bots' ids (<see cref="CoopSeats"/>). The host's copy and
+/// the bot copies call that player by the name the host set (<see cref="Guests"/>; "Guest"
+/// without one), whatever character they play, and the bots keep their numbering among
+/// themselves. The guest's own
+/// copy (<see cref="StartGuest"/>) names its own player and the host from its launch options
+/// and each bot after its character.
 ///
 /// Inert outside a local co-op lobby or run: with no such session there are no names, the
 /// patch hands back what the game said, no label is touched and no game event is listened
@@ -62,6 +74,12 @@ internal static class CoopNames
 
     /// <summary>Whether this is a bot's copy, as <see cref="Start"/> was told; null until then, and such a copy counts as the human's.</summary>
     private static bool? _botCopy;
+
+    /// <summary>True in a guest's copy, as <see cref="StartGuest"/> was told: its host is a person too.</summary>
+    private static bool _guestCopy;
+
+    /// <summary>What a guest's copy calls the host.</summary>
+    private static string _hostName = "Host";
     private static bool _hooked;
     private static bool _off;
     private static bool _relabelOff;
@@ -123,6 +141,21 @@ internal static class CoopNames
         _botCopy = isBot;
         if (!string.IsNullOrWhiteSpace(humanName)) _human = humanName.Trim();
         ModEntry.Log($"coop: names: this copy is {(isBot ? "a bot's" : "the human's")}; in a local co-op game the human shows as {HumanName} and each bot as its character");
+    }
+
+    /// <summary>
+    /// Says that this is a guest's copy, once at mod load on the main thread: a friend's game
+    /// that joined the host's lobby from another computer. Its own player shows as
+    /// <paramref name="ownName"/>, the host as <paramref name="hostName"/> ("Host" without
+    /// one) and each bot as its character. Changes nothing by itself.
+    /// </summary>
+    public static void StartGuest(string? ownName, string? hostName)
+    {
+        _botCopy = false;
+        _guestCopy = true;
+        if (!string.IsNullOrWhiteSpace(ownName)) _human = ownName.Trim();
+        if (!string.IsNullOrWhiteSpace(hostName)) _hostName = hostName.Trim();
+        ModEntry.Log($"guest: names: this copy's own player shows as {HumanName}, the host as {_hostName} and each bot as its character");
     }
 
     /// <summary>The name this copy shows for a player, or null to leave the game's own. Any thread.</summary>
@@ -303,19 +336,33 @@ internal static class CoopNames
 
     /// <summary>
     /// The names for a session. The human is this copy's own player, or on a bot's copy the
-    /// host; everyone else is named after their character, numbered from the second one on
-    /// the same character. A player whose character can't be read keeps the game's name.
+    /// host; a guest's copy also names its host. A guest, a player who is neither the host,
+    /// this copy's own nor one of the bots' ids, goes by the name this copy has for guests.
+    /// Everyone else is a bot and is named after their character, numbered from the second
+    /// one on the same character. A bot whose character can't be read keeps the game's name.
+    /// With no guest in the session this is the rule as it was before guests existed.
     /// </summary>
     private static Dictionary<ulong, string> NamesFor(Session session)
     {
         ulong? human = IsBotCopy ? (session.Host != session.Local ? session.Host : null) : session.Local;
         var names = new Dictionary<ulong, string>();
         var count = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var guests = 0;
         foreach (var seat in session.Seats)
         {
             if (seat.NetId == human)
             {
                 names[seat.NetId] = HumanName;
+                continue;
+            }
+            if (_guestCopy && seat.NetId == session.Host)
+            {
+                names[seat.NetId] = _hostName;
+                continue;
+            }
+            if (seat.NetId != session.Local && CoopSeats.IsGuest(seat.NetId, session.Host))
+            {
+                names[seat.NetId] = Guests.Name(guests++);
                 continue;
             }
             var name = CharacterName(seat.Character);
@@ -349,6 +396,7 @@ internal static class CoopNames
         var copy = _botCopy switch
         {
             true => "a bot's",
+            false when _guestCopy => "a guest's",
             false => "the human's",
             null => "taken for the human's (RemoteBubbles.Start was never called)",
         };
