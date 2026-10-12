@@ -44,12 +44,12 @@ Players are told apart by their id alone, the same on every copy (`src/SpireMind
    ```
    ipconfig getifaddr en0
    ```
-   Four numbers with dots. It was 10.250.203.164 on the morning of 2026-10-12. It changes with the network and can change on the same network, so read it again right before you play. System Settings, Wi-Fi, Details shows the same.
+   Four numbers with dots. It was 10.250.203.164 on the morning of 2026-10-12. It changes with the network and can change on the same network, so read it again right before you play. `en0` is the Wi-Fi of a MacBook. System Settings, Wi-Fi, Details shows the same address, and on a cable System Settings, Network shows it.
 5. **Build the package**:
    ```
    scripts/package-guest.sh --address <your address> --guest-name Amir --host-name Mark
    ```
-   It writes `out/guest/SpireMind-guest.zip` and, beside it, the same `README.txt` that is in the zip. Send the zip (AirDrop is fine). Without `--address` the friend's line holds the word `HOSTS-ADDRESS` for them to replace. If your address changes later, tell the friend to change only the numbers after `--spiremind-host=`.
+   It writes `out/guest/SpireMind-guest.zip` and, beside it, the same `README.txt` that is in the zip. Send the zip (AirDrop is fine). Build it again after any change to the mod, so the friend gets the build with every fix in it; the friend then replaces the SpireMind folder in `mods`. Without `--address` the friend's line holds the word `HOSTS-ADDRESS` for them to replace. If your address changes later, tell the friend to change only the numbers after `--spiremind-host=`.
 6. **Compare the mods.** The join compares gameplay mods in both directions, by id and version text. Yours announces `BetterSpire2-v1.83.10`. The friend's Workshop copy must be exactly that.
    - Your game loads the copies in its own `mods/` folder (BaseLib v3.4.7, BetterSpire2 v1.83.10). When a mod is there and on the Workshop both, the `mods/` copy always wins, and the bot copies see no Workshop at all. The friend loads the Workshop copies. Steam updates those by itself; yours in `mods/` stay as they are. Today all four are the same.
    - BaseLib is not in the mod check, but it adds network message types. A different BaseLib can break the join with no clear message: the friend's Join screen hangs, or shows the version popup.
@@ -66,6 +66,7 @@ Players are told apart by their id alone, the same on every copy (`src/SpireMind
    - If the friend's are older, they restart Steam and let it update.
    - The friend switches off every other mod for the session. A mod that adds cards, relics or network messages on one side breaks the join.
 7. **The network.**
+   - With your lobby open, `lsof -nP -iUDP:33771` shows your game on `*:33771`: it listens on every network of the Mac. No line means the lobby is not open.
    - Your Mac's firewall is off (checked on 2026-10-12: "Firewall is disabled"). Nothing to do. If you ever switch it on: when your lobby opens, macOS asks whether Slay the Spire 2 may accept incoming connections. Allow it. The game then receives on UDP 33771. The switch is System Settings, Network, Firewall, Options.
    - System Settings, Privacy & Security, Local Network: Slay the Spire 2 and Steam must be on, on both Macs. Yours too: your game answers the friend's Mac, and macOS counts that as reaching a device on the local network. On the friend's Mac the question comes at their first join, and that first try can time out while they answer it.
    - Both Macs must be on a network that lets devices talk to each other. Guest, office, hotel and cafe networks often do not. Your address this morning starts with 10.250, which looks like such a network. The test: the friend types `ping -c 3 <your address>` in Terminal. No "64 bytes from" lines means the game cannot connect either. A phone hotspot both Macs join works; your address is then another one.
