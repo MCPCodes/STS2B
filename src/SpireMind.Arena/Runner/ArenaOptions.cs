@@ -83,6 +83,27 @@ public sealed record ArenaOptions
         "      effort, e.g. elite=high,boss=high; the other tiers use --effort. --forecast is a switch\n" +
         "      of the simulator, passed on to every fight. A fight is the same fight only with the same\n" +
         "      scenario, model, effort and label, so variants can share one DIR.\n" +
+        "  scripts/arena.sh run --brain api --yes-spend [--models a,b | --model M] [--scenarios N] [--seed S | --only ID,ID]\n" +
+        "                       [--max-usd D] [--effort LEVEL] [--elite-effort LEVEL] [--boss-effort LEVEL]\n" +
+        "                       [--after-fight N] [--parallel K] [--timeout-minutes M] [--out DIR] [--repo DIR]\n" +
+        "                       [--forecast]\n" +
+        "      The same fights played by the mod's own brain: the program that plays the real game, calling\n" +
+        "      the Claude API directly. This is billed to your API credit, so it needs --yes-spend, and\n" +
+        "      it says first how many fights it plays at most and on what budget. --max-usd is the budget\n" +
+        "      of the results folder in dollars (default 5), earlier runs with the same --out included:\n" +
+        "      no fight starts once its fights have cost that much, or when what is left is less than the\n" +
+        "      dearest fight so far, and a running fight is stopped when the budget is reached (the\n" +
+        "      request that reaches it is the last). The same command again gets no new budget: a higher\n" +
+        "      --max-usd spends more. --only plays just the named fights (ids as the reports print them,\n" +
+        "      e.g. elite-803170). The model and the efforts are the game's own settings\n" +
+        "      (config.json, else the mod's defaults) unless given: --effort is the normal effort, and\n" +
+        "      --elite-effort and --boss-effort the effort of those rooms (a level, same or default).\n" +
+        "      The brain raises the effort by the fight's room itself. --after-fight is how many more\n" +
+        "      requests the brain may send once the fight is over, to write its notes (default 1). The\n" +
+        "      notes it writes go to a throwaway copy and into the result line, never into the repo; your\n" +
+        "      monthly cap and spend record are not touched. --brain claude-code is the default.\n" +
+        "      position takes --brain api with the same options. --fake-api plays the batch against a\n" +
+        "      scripted stand-in for the API: it reads no key and costs nothing.\n" +
         "  scripts/arena.sh position RESULTS_DIR SCENARIO MODEL --turn N [--runs K] [--models a,b] [--effort LEVEL]\n" +
         "                       [--out DIR] [--label L] [--reshuffle] [--check] [--repo DIR] [--claude PATH]\n" +
         "                       [--parallel P] [--timeout-minutes M] [--grace-seconds G] [--stop-at-weekly F]\n" +
@@ -168,7 +189,50 @@ public sealed record ArenaOptions
 
     /// <summary>The run's label: the name a position test was given (<see cref="Label"/>), then
     /// the switches that are on, or <see cref="ExperimentLabel.Base"/> for nothing at all.</summary>
-    public string Experiment => ExperimentLabel.Of(Brief, Experiments, EffortByTier, Label);
+    public string Experiment => ExperimentLabel.Of(Brief, Experiments, EffortByTier, Label, Brain);
+
+    /// <summary><c>--brain</c>: what drives a fight (<see cref="Brains"/>): Claude Code headless on
+    /// the subscription, as ever and by default, or the mod's own brain on the API credit.</summary>
+    public string Brain { get; init; } = Brains.ClaudeCode;
+
+    /// <summary><c>--yes-spend</c>: the word a batch on the API credit doesn't start without.</summary>
+    public bool YesSpend { get; init; }
+
+    /// <summary><c>--fake-api</c>: the API brain plays against a scripted stand-in for the API
+    /// (<see cref="FakeApi"/>). No key is read and nothing is billed.</summary>
+    public bool FakeApiTransport { get; init; }
+
+    /// <summary><c>--max-usd</c>: what a batch on the API credit may cost in all, in dollars.</summary>
+    public decimal MaxUsd { get; init; } = DefaultMaxUsd;
+
+    public const decimal DefaultMaxUsd = 5m;
+
+    /// <summary>The most <c>--max-usd</c> takes, so a slip of the keyboard can't allow a fortune.</summary>
+    public const decimal MostMaxUsd = 200m;
+
+    /// <summary><c>--elite-effort</c> and <c>--boss-effort</c> under <c>--brain api</c>: what the
+    /// brain's settings take for those rooms (a level, "same" or "default"); null leaves the
+    /// game's own setting.</summary>
+    public string? EliteEffort { get; init; }
+
+    /// <inheritdoc cref="EliteEffort"/>
+    public string? BossEffort { get; init; }
+
+    /// <summary><c>--after-fight</c> under <c>--brain api</c>: how many more requests the brain
+    /// may send once the fight is over (to write its journal line and its lesson) before it is
+    /// stopped.</summary>
+    public int AfterFight { get; init; } = DefaultAfterFight;
+
+    public const int DefaultAfterFight = 1;
+
+    /// <summary><c>--only</c> under <c>--brain api</c>: the fights to play, by scenario id
+    /// ("elite-803170"), in the place of the first <c>--scenarios</c> fights of <c>--seed</c>. So
+    /// one fight of one kind can be played, and paid for, by itself. Empty for the usual list.</summary>
+    public IReadOnlyList<string> OnlyScenarios { get; init; } = [];
+
+    /// <summary>The options that were typed, by name ("--effort"): some defaults depend on the
+    /// brain, and some options only go with one of the two.</summary>
+    public IReadOnlySet<string> Given { get; init; } = new HashSet<string>();
 
     /// <summary><c>position</c>: the folder (or results.jsonl) of the run the recorded fight is in.</summary>
     public string? PositionSource { get; init; }
@@ -270,11 +334,57 @@ public sealed record ArenaOptions
             },
         };
 
+        var given = new HashSet<string>(StringComparer.Ordinal);
         for (var i = 1; i < args.Count; i++)
         {
             var arg = args[i];
+            if (arg.StartsWith("--", StringComparison.Ordinal))
+                given.Add(arg);
             switch (arg)
             {
+                case "--brain":
+                    Only(arg, command, ArenaCommand.Run, ArenaCommand.Position);
+                    var brain = Value(args, ref i);
+                    if (!Brains.All.Contains(brain))
+                        throw new UsageException($"--brain takes {string.Join(" or ", Brains.All)}, not '{brain}'.");
+                    options = options with { Brain = brain };
+                    break;
+                case "--yes-spend":
+                    Only(arg, command, ArenaCommand.Run, ArenaCommand.Position);
+                    options = options with { YesSpend = true };
+                    break;
+                case "--fake-api":
+                    Only(arg, command, ArenaCommand.Run, ArenaCommand.Position);
+                    options = options with { FakeApiTransport = true };
+                    break;
+                case "--max-usd":
+                    Only(arg, command, ArenaCommand.Run, ArenaCommand.Position);
+                    options = options with { MaxUsd = Dollars(arg, Value(args, ref i)) };
+                    break;
+                case "--elite-effort":
+                case "--boss-effort":
+                    Only(arg, command, ArenaCommand.Run, ArenaCommand.Position);
+                    var fightEffort = Value(args, ref i).Trim().ToLowerInvariant();
+                    if (!SpireMind.Core.Brain.BrainSettings.TryParseFightEffort(fightEffort, out _))
+                        throw new UsageException($"{arg} takes {string.Join(", ", Efforts)}, same (the normal effort) or default, not '{fightEffort}'.");
+                    options = arg == "--elite-effort" ? options with { EliteEffort = fightEffort } : options with { BossEffort = fightEffort };
+                    break;
+                case "--only":
+                    Only(arg, command, ArenaCommand.Run);
+                    var ids = Value(args, ref i).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Distinct(StringComparer.Ordinal).ToList();
+                    if (ids.Count == 0)
+                        throw new UsageException("--only takes scenario ids, e.g. --only elite-803170 or --only elite-803170,boss-878005.");
+                    foreach (var id in ids)
+                    {
+                        try { SpireMind.Arena.Scenarios.FromId(id); }
+                        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException) { throw new UsageException($"--only: {ex.Message}"); }
+                    }
+                    options = options with { OnlyScenarios = ids };
+                    break;
+                case "--after-fight":
+                    Only(arg, command, ArenaCommand.Run, ArenaCommand.Position);
+                    options = options with { AfterFight = Whole(arg, Value(args, ref i), 0, 3) };
+                    break;
                 case "--scenarios":
                     Only(arg, command, ArenaCommand.Baseline, ArenaCommand.Run, ArenaCommand.SelfCheck, ArenaCommand.Honesty);
                     options = options with { Scenarios = Whole(arg, Value(args, ref i), 1, MostScenarios) };
@@ -343,8 +453,11 @@ public sealed record ArenaOptions
                     options = options with { ByLabel = true };
                     break;
                 case "--model":
-                    Only(arg, command, ArenaCommand.Compare);
-                    options = options with { CompareModel = Value(args, ref i) };
+                    Only(arg, command, ArenaCommand.Compare, ArenaCommand.Run, ArenaCommand.Position);
+                    // For compare: the one model to compare. For run and position: the one model that plays.
+                    options = command == ArenaCommand.Compare
+                        ? options with { CompareModel = Value(args, ref i) }
+                        : options with { Models = ModelList(Value(args, ref i)) };
                     break;
                 case "--timeout-minutes":
                     Only(arg, command, ArenaCommand.Run, ArenaCommand.Position);
@@ -405,7 +518,20 @@ public sealed record ArenaOptions
             }
         }
 
-        if (command == ArenaCommand.Run && options.Models.Count == 0)
+        options = options with { Given = given };
+        if (given.Contains("--model") && given.Contains("--models") && command != ArenaCommand.Compare)
+            throw new UsageException("--model names the one model that plays and --models several: give one of the two.");
+        if (given.Contains("--only") && (given.Contains("--scenarios") || given.Contains("--seed")))
+            throw new UsageException("--only names the fights itself: leave out --scenarios and --seed.");
+        var api = options.Brain == Brains.Api;
+        // An option of one brain typed with the other would be ignored without a word; say so instead.
+        foreach (var option in api ? Brains.ClaudeCodeOnly : Brains.ApiOnly)
+            if (given.Contains(option))
+                throw new UsageException(api
+                    ? $"{option} doesn't go with --brain api: {Brains.WhyNot(option)}"
+                    : $"{option} only applies with --brain api.");
+        // The API brain plays with the game's own model unless one is named.
+        if (command == ArenaCommand.Run && options.Models.Count == 0 && !api)
             throw new UsageException("run needs --models, e.g. --models claude-haiku-5-5,claude-sonnet-5-5,claude-opus-5-5.");
         if (command == ArenaCommand.Position)
         {
@@ -463,6 +589,14 @@ public sealed record ArenaOptions
                 ? $"{option} takes a number from {min.ToString(CultureInfo.InvariantCulture)} to {max.ToString(CultureInfo.InvariantCulture)}, not '{text}'."
                 : $"{option} takes a number above 0, at most {max.ToString(CultureInfo.InvariantCulture)}, not '{text}'.");
         return n;
+    }
+
+    // Dollars and cents, above 0: "5", "0.50", "12.25".
+    private static decimal Dollars(string option, string text)
+    {
+        if (!decimal.TryParse(text, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var usd) || usd <= 0 || usd > MostMaxUsd)
+            throw new UsageException($"{option} takes dollars above 0, at most {MostMaxUsd.ToString(CultureInfo.InvariantCulture)} (5 or 0.50), not '{text}'.");
+        return usd;
     }
 
     // A share of the usage window, written as a fraction: 0.9 is 90%. A percentage is turned

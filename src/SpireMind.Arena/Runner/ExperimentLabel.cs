@@ -6,7 +6,8 @@ namespace SpireMind.Arena;
 /// run.json and shown in the report's header, and it is part of what makes two fights the same
 /// fight: scenario, model, the effort the fight was played at, and this.
 /// <para>
-/// The parts are joined by "+", always in the same order: <c>brief</c>, <c>forecast</c>, then
+/// The parts are joined by "+", always in the same order: <c>api</c> when the mod's own brain
+/// played (<c>--brain api</c>), <c>brief</c>, <c>forecast</c>, then
 /// one <c>tier=level</c> for each tier <c>--effort-by-tier</c> names, in the tiers' own order
 /// (weak, normal, elite, boss). So <c>--brief --effort-by-tier
 /// boss=high,elite=high</c> is <c>brief+elite=high+boss=high</c> however it was typed, and the
@@ -26,16 +27,27 @@ public static class ExperimentLabel
     public const string Brief = "brief";
     public const string Forecast = "forecast";
 
+    /// <summary>The part of a label that says the fights were played by the mod's own brain on
+    /// the API (<c>--brain api</c>, <see cref="Brains.Api"/>). A label without it is Claude
+    /// Code's, as every label was before there were two brains.</summary>
+    public const string Api = Brains.Api;
+
     private const char Join = '+';
 
     /// <summary>The label for these switches.</summary>
     /// <param name="effortByTier">What <c>--effort-by-tier</c> named: tier to effort level.</param>
     /// <param name="name">A name the batch was given (<c>arena position --label</c>), or null.
     /// "base" names nothing: it is what a batch without a name and without a switch is called.</param>
-    public static string Of(bool brief, ExperimentOptions simulator, IReadOnlyDictionary<string, string> effortByTier, string? name = null)
+    /// <param name="brain">What drove the fights (<see cref="Brains"/>). The API brain is part of
+    /// the label ("api", right after the name), so its fights are never pooled with, skipped
+    /// for or mistaken for Claude Code's on the same scenarios; Claude Code adds nothing, so its
+    /// labels are what they always were.</param>
+    public static string Of(bool brief, ExperimentOptions simulator, IReadOnlyDictionary<string, string> effortByTier, string? name = null,
+        string brain = Brains.ClaudeCode)
     {
         var parts = new List<string>();
         if (name is { Length: > 0 } && name != Base) parts.Add(name);
+        if (brain == Brains.Api) parts.Add(Api);
         if (brief) parts.Add(Brief);
         if (simulator.Forecast) parts.Add(Forecast);
         foreach (var tier in Scenarios.Tiers)
@@ -56,8 +68,14 @@ public static class ExperimentLabel
             return "a label is 1 to 40 letters, digits, '-', '_' or '.'";
         if (name is Brief or Forecast)
             return $"'{name}' is the name of a switch (--{name}); pick another label";
+        if (name == Api)
+            return $"'{name}' is what a label says under --brain {Brains.Api}; pick another label";
         return null;
     }
+
+    /// <summary>The brain a label names: <see cref="Brains.Api"/> when "api" is one of its
+    /// parts, else <see cref="Brains.ClaudeCode"/>.</summary>
+    public static string BrainOf(string label) => label.Split(Join).Contains(Api) ? Brains.Api : Brains.ClaudeCode;
 
     /// <summary>The simulator's switches that are on, as they are typed: "--forecast".</summary>
     public static IReadOnlyList<string> Switches(ExperimentOptions simulator) =>

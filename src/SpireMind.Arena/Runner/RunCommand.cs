@@ -39,6 +39,10 @@ public static class RunCommand
     /// usage) or couldn't start, 2 for a path that doesn't exist, 130 after Ctrl+C.</summary>
     public static async Task<int> RunAsync(ArenaOptions options, TextWriter output, IProcessLauncher? launcher = null)
     {
+        // The mod's own brain on the API credit: no Claude Code is looked for or started.
+        if (options.Brain == Brains.Api)
+            return await ApiRun.RunAsync(options, output, transport: options.FakeApiTransport ? new FakeApi() : null);
+
         launcher ??= ProcessLauncher.Instance;
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         if (Prepare(options, output, home, out var exitCode) is not { } setup)
