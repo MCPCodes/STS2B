@@ -23,6 +23,13 @@ public static class GuestAdvice
         return what.Length == 0 ? where : $"{where} {what}";
     }
 
+    /// <summary>
+    /// How to get past the game's popup for the failures it takes for bugs (fallen out of step,
+    /// an unknown or an internal error). That popup has one button, Report Bug, which closes
+    /// it and opens the feedback screen; Back there sends nothing.
+    /// </summary>
+    public const string LeaveBugPopup = "No bug report is needed, but this popup's only button is Report Bug: press it, then Back on the screen that opens, and send nothing.";
+
     /// <summary>What to do about one failure, or "" for a reason with nothing to add.</summary>
     public static string For(string? reason, GuestArgs args)
     {
@@ -46,8 +53,10 @@ public static class GuestAdvice
                 $"The lobby holds four players. {Host} has to send a bot away.",
             "RunInProgress" =>
                 $"{Host}'s run has already started or is not closed yet. Wait for the new lobby, then Back and Join.",
+            // The host's game lets go of a half-made join by itself after ten seconds; a player
+            // that stayed behind in its lobby (a ghost) only goes when the lobby is closed.
             "Kicked" =>
-                $"The lobby already holds a player {args.ClientId?.ToString() ?? "with your number"}. {Host} has to back out of the lobby and host again.",
+                $"The lobby already holds a player {args.ClientId?.ToString() ?? "with your number"}. Wait 15 seconds, then Back and Join. If it says this again, {host} has to back out of the lobby and host again.",
             "NotInSaveGame" =>
                 $"{Host} loaded a saved run that your player was not part of.",
             "Quit" =>
@@ -55,11 +64,11 @@ public static class GuestAdvice
             "HostAbandoned" =>
                 $"{Host} abandoned the run.",
             "StateDivergence" =>
-                $"Your game and {host}'s fell out of step, so you were dropped. This run can't be rejoined.",
+                $"Your game and {host}'s fell out of step, so you were dropped. This run can't be rejoined. {LeaveBugPopup}",
             "UnknownNetworkError" =>
-                $"The connection to {host}'s game was lost. No bug report is needed: close this, then Back and Join once {host} hosts again.",
+                $"The connection to {host}'s game was lost. {LeaveBugPopup} Then tell {host}.",
             "InternalError" =>
-                "Something failed while joining. Back, then Join. If it keeps happening, the log has the reason.",
+                $"Something failed while joining. {LeaveBugPopup} Then Back and Join. If it keeps happening, the log has the reason.",
             _ => "",
         };
     }

@@ -484,6 +484,26 @@ public class GuestArgsTests
         Assert.True(line.Length < 330, line);
     }
 
+    [Theory]
+    [InlineData("StateDivergence")]
+    [InlineData("UnknownNetworkError")]
+    [InlineData("InternalError")]
+    public void A_failure_whose_popup_has_only_Report_Bug_says_how_to_leave_it(string reason)
+    {
+        // NErrorPopup gives these reasons one button, Report Bug; the line must not say "close this".
+        var line = GuestAdvice.ForPopup(reason, GuestArgs.Parse(FriendLine));
+        Assert.Contains(GuestAdvice.LeaveBugPopup, line);
+        Assert.DoesNotContain("close this", line);
+    }
+
+    [Fact]
+    public void A_kicked_guest_is_told_to_wait_and_try_again_first()
+    {
+        var line = GuestAdvice.For("Kicked", GuestArgs.Parse(FriendLine));
+        Assert.True(line.IndexOf("Wait 15 seconds", StringComparison.Ordinal) < line.IndexOf("host again", StringComparison.Ordinal), line);
+        Assert.Contains("player 2000", line);
+    }
+
     [Fact]
     public void An_unknown_reason_still_says_where_this_copy_dialed()
     {
