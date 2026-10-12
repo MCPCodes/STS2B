@@ -582,7 +582,9 @@ public static class ValuesCommand
         var first = what.IndexOf(':');
         var last = what.LastIndexOf(':');
         if (first < 0 || last <= first) throw new UsageException("--trace takes context:change:player, as in elite-123:add:Bash:Lookahead.");
-        var scenario = Scenarios.FromId(what[..first]);
+        Scenario scenario;
+        try { scenario = Scenarios.FromId(what[..first]); }
+        catch (ArgumentException ex) { throw new UsageException(ex.Message); }
         var setup = Scenarios.Setup(scenario);
         // A player's own name may hold a colon (Rollout:fast): then the change is what stands between the first colon and the player.
         var policy = Policies.ByName(what[(last + 1)..]);
@@ -592,9 +594,25 @@ public static class ValuesCommand
             last = before;
         }
         if (policy is null) throw new UsageException($"There's no player called '{what[(last + 1)..]}'.");
-        var change = Change.FromId(what[(first + 1)..last]);
-        var deck = Apply(setup.Deck, change, scenario.Seed) ?? throw new UsageException($"{change.Id} cannot be made to the deck of {scenario.Id}.");
-        var game = new ArenaGame(scenario, setup with { Deck = deck }) { ActionDelay = TimeSpan.Zero };
+        // A change that is no change, or names a card the arena does not have, is a bad argument and not a crash.
+        const string form = "A change is base, add:Card, add:Card+, remove:Card or upgrade:Card, with the game's class names.";
+        var asked = what[(first + 1)..last];
+        if (asked != BaseId && asked.IndexOf(':') is var colon && (colon <= 0 || colon == asked.Length - 1))
+            throw new UsageException($"--trace: '{asked}' is not a change. {form}");
+        Change change;
+        List<DeckCard>? deck;
+        ArenaGame? made;
+        try
+        {
+            change = Change.FromId(asked);
+            deck = Apply(setup.Deck, change, scenario.Seed);
+            made = deck is null ? null : new ArenaGame(scenario, setup with { Deck = deck }) { ActionDelay = TimeSpan.Zero };
+        }
+        catch (Exception ex) when (ex is KeyNotFoundException or ArgumentException or FormatException or OverflowException)
+        {
+            throw new UsageException($"--trace: '{asked}' cannot be made ({ex.Message}). {form}");
+        }
+        if (deck is null || made is not { } game) throw new UsageException($"{change.Id} cannot be made to the deck of {scenario.Id}.");
         var fight = game.Fight;
         o.WriteLine($"{scenario.Id} {change.Id} {policy.Name}: {scenario.Summary}");
         o.WriteLine("deck: " + string.Join(' ', deck.Select(d => d.ToString())));
@@ -639,10 +657,27 @@ public static class ValuesCommand
 
     public static int Run(IReadOnlyList<string> args, TextWriter output)
     {
-        Options options;
+        // A bad argument, wherever it shows (an option, the name of a card or a player, a fight to
+        // trace, a folder nothing was run in), prints what is wrong and the usage and ends with 2.
         try
         {
-            options = Parse(args);
+            var options = Parse(args);
+            if (options.Trace.Length > 0) return Trace(options.Trace, output);
+            Directory.CreateDirectory(options.Out);
+            if (options.SummarizeOnly)
+            {
+                var settings = ReadSettings(options.Out) ?? throw new UsageException($"{options.Out} has no run.json: nothing was run there, so there is nothing to summarize.");
+                Configure(settings.Cards, settings.Aa, settings.Player, settings.Tiers, settings.OnlyAdds);
+                var contexts = BuildContexts(settings.Contexts, settings.Seed);
+                if (settings.OnlyAdds) SummarizeAdds(options.Out, contexts, LoadLogs(options.Out), settings, output);
+                else Summarize(options.Out, contexts, LoadLogs(options.Out), settings, output);
+                return 0;
+            }
+            Configure(options.Cards, options.Aa, options.Player, options.Tiers, options.OnlyAdds);
+            // The additions are listed now, so that a card --cards names wrongly stops the run here and not in its workers.
+            try { _ = FullChanges; }
+            catch (KeyNotFoundException ex) { throw new UsageException($"{ex.Message} --cards takes the game's class names, as in DemonForm,Bash+."); }
+            return options.ShardCount > 0 ? RunWorker(options) : RunParent(options, args, output);
         }
         catch (UsageException ex)
         {
@@ -650,20 +685,6 @@ public static class ValuesCommand
             Console.Error.WriteLine("Usage:\n" + Usage);
             return 2;
         }
-
-        if (options.Trace.Length > 0) return Trace(options.Trace, output);
-        Directory.CreateDirectory(options.Out);
-        if (options.SummarizeOnly)
-        {
-            var settings = ReadSettings(options.Out) ?? throw new InvalidOperationException($"{options.Out} has no run.json: nothing was run there.");
-            Configure(settings.Cards, settings.Aa, settings.Player, settings.Tiers, settings.OnlyAdds);
-            var contexts = BuildContexts(settings.Contexts, settings.Seed);
-            if (settings.OnlyAdds) SummarizeAdds(options.Out, contexts, LoadLogs(options.Out), settings, output);
-            else Summarize(options.Out, contexts, LoadLogs(options.Out), settings, output);
-            return 0;
-        }
-        Configure(options.Cards, options.Aa, options.Player, options.Tiers, options.OnlyAdds);
-        return options.ShardCount > 0 ? RunWorker(options) : RunParent(options, args, output);
     }
 
     /// <summary>The pilot's jobs: the same number per tier, drawn from the plan of the smallest design
