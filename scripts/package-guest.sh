@@ -69,6 +69,18 @@ command -v zip >/dev/null || die "zip is needed"
 staged="$REPO_ROOT/out/SpireMind"
 [ -f "$staged/SpireMind.dll" ] && [ -f "$staged/SpireMind.json" ] || die "no build in $staged; run without --no-build"
 
+# Which commit the package is built from, for the last lines of the output. The friend's copy
+# must hold every fix, so changes to the mod that are not committed yet get a warning.
+built_from="a folder without git"
+if command -v git >/dev/null && commit="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null)"; then
+  built_from="commit $commit"
+  if [ -n "$(git -C "$REPO_ROOT" status --short -- src 2>/dev/null || true)" ]; then
+    built_from="commit $commit and changes under src/ that are not committed"
+    echo "package-guest: WARN: src/ has changes that are not committed; the package holds them" >&2
+  fi
+fi
+[ "$build" = 1 ] || built_from="out/SpireMind as it was (--no-build)"
+
 # What the friend must match: the game's version, and the mods YOUR game loads. Your game loads
 # the copies in its own mods folder when a mod is there and on the Workshop both.
 version_of() { # <json file> -> its "version" text, or nothing
@@ -164,6 +176,7 @@ cp "$root/README.txt" "$(dirname "$zip_path")/README.txt"
 echo "Wrote $zip_path"
 unzip -l "$zip_path" | sed 's/^/  /'
 echo "  sha256 $(shasum -a 256 "$zip_path" | cut -d' ' -f1)"
+echo "Built from $built_from. Build it again after any change to the mod."
 echo "The friend's instructions are also beside it: $(dirname "$zip_path")/README.txt"
 echo "Their launch line: $launch_line"
 [ -n "$address" ] || echo "No --address given: tell the friend your address (ipconfig getifaddr en0), or run this again with --address."
