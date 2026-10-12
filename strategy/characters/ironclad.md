@@ -71,6 +71,7 @@
 ## Packages to count
 Count these in `player.deck` before every pick (general.md 12); upgraded copies count. Thresholds: general.md 12, unless a package sets its own.
 - strategy/wiki/cards/ironclad-pick-values.md measures each card in single fights with an average deck, and strategy/wiki/cards/ironclad-synergies.md what it gains with 2 or 4 pieces of its package: a guide to weigh, not a rule, until whole runs test them.
+- strategy/wiki/cards/ironclad-powers.md says when to play each Power in a fight and what to play before it, with the measured play rates; strategy/wiki/cards/ironclad-power-timing.md holds the measurements behind them.
 - **Strength**: Inflame, Demon Form, Dominate, Rupture, Brand, Fight Me; Brimstone, Red Skull, Ruined Helmet, Vajra, Shuriken. Setup Strike counts on its own turn only.
   - Payoffs: each Strength adds 1 to every hit. Hits: Twin Strike 2, Thrash 2, Fight Me 2, Sword Boomerang 3 (4), Conflagration 4 (5) to ALL, Whirlwind X to ALL, Spite 2 (3) after HP loss that turn, Dismantle 2 against Vulnerable, Tear Asunder 1 + 1 per HP loss, Fiend Fire 1 per card exhausted. One-Two Punch and Anger add hits.
   - At 4 Strength: Sword Boomerang 3 x 7 = 21, Twin Strike 2 x 9 = 18, Strike 10. Flat damage (Inferno, Juggernaut, Flame Barrier) ignores Strength; Perfected Strike, Ashen Strike and Body Slam add it once.

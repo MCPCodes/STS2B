@@ -17,7 +17,7 @@ How much more an Ironclad card is worth in simulated act 1 fights when the deck 
 ### How to use it at a card reward
 - Count the pieces of each package in your deck. Each heading below names the pieces; the starting Bash and Strikes are not pieces.
 - If a package has 2 or more, look the offered cards up in its table and add the synergy to the card's HP in `ironclad-pick-values.md`: With 2 minus Without for 2 or 3 pieces, Synergy at 4 for 4 or more. A card that is not in the table gets nothing added.
-- A figure marked (?) is yours to judge from the card texts and your deck: the script did not play the card or the pieces often enough to show it.
+- A figure marked (?) is yours to judge from the card texts and your deck: the script did not play the card or the pieces often enough to show it. A card marked (low) in `ironclad-pick-values.md` is worth more than its row there says.
 
 ### What it shows
 - Payoffs gain: with 4 pieces 28 of the 36 payoff rows have the whole interval above 0 and none below (19 of 36 with 2 pieces). The mean payoff gains +1.0 HP (Strength), +1.3 (Energy), +1.6 (Vulnerable), +2.1 (Strike cards), +2.4 (Self-damage), +2.6 (Exhaust), +3.0 (Block).
