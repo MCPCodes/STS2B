@@ -59,6 +59,10 @@ public static class ValuesCommand
 
     /// <summary>The share of the time budget the estimate may fill: the rest is for starting the workers, the tables, and a pilot that guessed low.</summary>
     private const double BudgetShare = 0.92;
+
+    /// <summary>Seconds a fight of a tier is taken to cost while the logs hold no timed fight of it: a Lookahead fight, roughly.
+    /// A slower player's first estimate is too low by as much as it is slower.</summary>
+    private const double UntimedSeconds = 0.3;
     private static string[] TierOrder = [Scenarios.NormalTier, Scenarios.EliteTier, Scenarios.BossTier];
 
     /// <summary>--only-adds: one more Strike and the additions named, on the fights that get additions, and nothing else.</summary>
@@ -758,7 +762,7 @@ public static class ValuesCommand
         }
 
         double SecondsFor(Dictionary<string, int> left, Dictionary<string, (double Seconds, int Count)> timing) =>
-            left.Sum(kv => kv.Value * (double.IsNaN(timing[kv.Key].Seconds) ? 0.3 : timing[kv.Key].Seconds)) / options.Workers;
+            left.Sum(kv => kv.Value * (double.IsNaN(timing[kv.Key].Seconds) ? UntimedSeconds : timing[kv.Key].Seconds)) / options.Workers;
 
         // Starts the worker processes for a phase and waits for them, printing how far they are.
         void RunPhase(string phase, int full, List<Job> jobs, string what)
@@ -840,13 +844,19 @@ public static class ValuesCommand
         var afterPilot = LoadLogs(options.Out);
         var timing = Timing(afterPilot);
         var doneKeys = afterPilot.Select(r => r.Key).ToHashSet(StringComparer.Ordinal);
-        output.WriteLine("One Lookahead fight takes: " +
-                         string.Join(", ", TierOrder.Select(t => string.Create(Inv, $"{t} {timing[t].Seconds:0.000} s ({timing[t].Count} timed)"))) + ".");
+        // The lean design has no pilot, so a new folder has nothing timed: say so instead of printing "NaN".
+        output.WriteLine($"One {LookaheadName} fight takes: " +
+                         string.Join(", ", TierOrder.Select(t => timing[t].Count > 0
+                             ? string.Create(Inv, $"{t} {timing[t].Seconds:0.000} s ({timing[t].Count} timed)")
+                             : $"{t} not timed yet")) + "." +
+                         (TierOrder.Any(t => timing[t].Count == 0)
+                             ? string.Create(Inv, $" A tier that is not timed yet is taken at {UntimedSeconds:0.0} s a fight, so the minutes below are a guess.")
+                             : ""));
 
         // ---- the size of the run: as many full contexts per tier as the budget allows, never below the floor ----
         var budgetLeft = options.BudgetMinutes * 60 - started.Elapsed.TotalSeconds;
         double Estimate(int k) => SecondsFor(LeftByTier(Plan(contexts, k, greedyAll: false), doneKeys), timing);
-        var table = new TextTable("additions on", "Lookahead fights left", "estimated minutes");
+        var table = new TextTable("additions on", $"{LookaheadName} fights left", "estimated minutes");
         foreach (var k in new[] { options.Full, (options.Full + options.MinFull) / 2, options.MinFull }.Distinct())
             table.Add($"{k} fights per tier", LeftByTier(Plan(contexts, k, greedyAll: false), doneKeys).Values.Sum().ToString(Inv), (Estimate(k) / 60).ToString("0.0", Inv));
         table.Write(output, "  ");

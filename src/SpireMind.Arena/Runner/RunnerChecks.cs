@@ -21,6 +21,8 @@ namespace SpireMind.Arena;
 /// and that nothing else changes, what each session of a fight is started with (through a
 /// launcher that starts nothing), when a fight counts as already played, and the numbers of
 /// <c>report --by-label</c> and <c>arena compare</c> on fights whose HP was chosen by hand.
+/// The baseline's own two options (<c>--policies</c>, <c>--threads</c>) are held to what they
+/// parse to, that a baseline names nobody unless asked, and that no other command takes them.
 /// </para>
 /// <para>
 /// Position tests (<c>arena position</c>) are checked in the file beside this one
@@ -51,6 +53,7 @@ public sealed partial class RunnerChecks : IArenaChecks
         check.Group("report", () => ReportColumns(check));
         check.Group("experiment label", () => Labels(check));
         check.Group("experiment switches", () => Switches(check));
+        check.Group("baseline players", () => BaselinePlayers(check));
         check.Group("brief", () => Brief(check));
         check.Group("brief in a fight", () => BriefFight(check));
         check.Group("same fight", () => SameFight(check));
@@ -548,6 +551,42 @@ public sealed partial class RunnerChecks : IArenaChecks
         check.Equal(null, ArenaOptions.Parse(["compare", "a", "b"]).CompareModel, "compare without --model takes every model");
         check.That(Refused(["compare", "a"]) && Refused(["compare"]) && Refused(["compare", "a", "b", "c"]), "compare takes exactly two folders");
         check.Equal(new ExperimentOptions(Forecast: true), ArenaOptions.Parse(["snapshot", "elite-1", "--forecast"]).Experiments, "snapshot takes the simulator's switches");
+
+        static bool Refused(string[] args)
+        {
+            try { ArenaOptions.Parse(args); }
+            catch (UsageException) { return true; }
+            return false;
+        }
+    }
+
+    // ---------- baseline --policies and --threads ----------
+
+    private static void BaselinePlayers(Check check)
+    {
+        // Nobody is named unless asked, so a baseline without the option plays Policies.All, as it always did.
+        var plain = ArenaOptions.Parse(["baseline", "--scenarios", "5"]);
+        check.That(plain.PolicyNames.Count == 0 && plain.Threads == 1, "a baseline names no player and plays one fight at a time unless asked");
+
+        var named = ArenaOptions.Parse(["baseline", "--policies", "Lookahead, rollout:fast,Rollout", "--threads", "4"]);
+        check.Sequence(["Lookahead", "rollout:fast", "Rollout"], named.PolicyNames, "the players as typed, in the order typed");
+        check.Sequence(["Lookahead", "Rollout:fast", "Rollout"], named.PolicyNames.Select(name => Policies.ByName(name)!.Name), "each name finds its player, whatever the case");
+        check.Equal(4, named.Threads, "--threads as parsed");
+
+        foreach (var bad in new[] { "Nobody", "Rollout:huge", "Lookahead,Nobody", ",", "Rollout,rollout:normal", "Greedy,greedy" })
+            check.That(Refused(["baseline", "--policies", bad]), $"--policies '{bad}' is refused");
+        check.That(Refused(["baseline", "--policies"]), "--policies without a value is refused");
+        foreach (var bad in new[] { "0", "9", "two", "-1" })
+            check.That(Refused(["baseline", "--threads", bad]), $"--threads '{bad}' is refused");
+
+        // The slow player plays in a baseline only: no other command takes the two options.
+        foreach (var (option, value) in new[] { ("--policies", "Rollout"), ("--threads", "2") })
+        {
+            check.That(Refused(["run", "--models", "claude-x", option, value]), $"{option} doesn't go with run");
+            foreach (var command in new[] { "selfcheck", "honesty", "content" })
+                check.That(Refused([command, option, value]), $"{option} doesn't go with {command}");
+            check.That(Refused(["report", "a", option, value]) && Refused(["snapshot", "elite-1", option, value]), $"{option} doesn't go with report or snapshot");
+        }
 
         static bool Refused(string[] args)
         {

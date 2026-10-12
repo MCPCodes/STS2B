@@ -473,7 +473,7 @@ public sealed class RolloutChecks : IArenaChecks
     /// hit for 30 and a rest, and after that it rests for good. The coin is tossed at the start
     /// of turn 2, on the fight's own monster stream.
     /// </summary>
-    public sealed class CheckCoinFlipper : Monster
+    private sealed class CheckCoinFlipper : Monster
     {
         public const string BigId = "BIG", RestId = "REST";
 
