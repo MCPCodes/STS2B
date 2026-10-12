@@ -82,6 +82,7 @@ public sealed record BrainSettings
     private readonly string? _sharedConfigDir;
     private readonly string? _eliteEffort;
     private readonly string? _bossEffort;
+    private readonly string? _turnPlanEffort;
 
     /// <summary>The folder holding config.json, api_key, spend.json and transcripts.</summary>
     public string ConfigDir { get; init; } = DefaultConfigDir;
@@ -138,6 +139,26 @@ public sealed record BrainSettings
     {
         get => _bossEffort;
         init => _bossEffort = CheckFightEffort(value, nameof(BossEffort));
+    }
+
+    /// <summary>Ask for a whole-turn plan at the start of each player turn in elite and boss rooms
+    /// (turn_plan_note in config.json): the user message with the turn's first snapshot gets a short
+    /// note asking for one before the first tool call. Off by default; it exists so the arena can
+    /// measure whether more deliberation wins more fights. See docs/brain.md.</summary>
+    public bool TurnPlanNote { get; init; }
+
+    /// <summary>The effort of the request that starts each player turn in elite and boss rooms
+    /// (turn_plan_effort in config.json): one of <see cref="Efforts"/>, used only when it is higher
+    /// than the room's effort and the model takes per-message effort, and lowered back to the room's
+    /// on the next request; or null (the default) for no raise. Other values throw
+    /// <see cref="ArgumentException"/>; check with <see cref="TryParseEffort"/> first. Like
+    /// <see cref="TurnPlanNote"/>, it exists for arena measurement.</summary>
+    public string? TurnPlanEffort
+    {
+        get => _turnPlanEffort;
+        init => _turnPlanEffort = value is null ? null
+            : TryParseEffort(value, out var effort) ? effort
+            : throw new ArgumentException($"TurnPlanEffort must be one of {string.Join(", ", Efforts)}, or null.", nameof(TurnPlanEffort));
     }
 
     /// <summary>The mod's own monthly cap in US dollars, compared against spend.json. Zero
@@ -250,8 +271,8 @@ public sealed record BrainSettings
     }
 
     /// <summary>
-    /// Writes config.json atomically. Keys the mod doesn't know are kept; repo, max_tokens and
-    /// claude_path are removed when null. A config.json that can't be parsed is first moved aside to
+    /// Writes config.json atomically. Keys the mod doesn't know are kept; repo, max_tokens,
+    /// claude_path and turn_plan_effort are removed when null, and turn_plan_note when false. A config.json that can't be parsed is first moved aside to
     /// config.json.bak so a hand edit with a typo isn't lost. Throws <see cref="IOException"/>
     /// or <see cref="UnauthorizedAccessException"/> when the file can't be written.
     ///
@@ -287,6 +308,9 @@ public sealed record BrainSettings
         else json.Remove("max_tokens");
         json["autostart"] = Autostart;
         SetOrRemove(json, "claude_path", ClaudePath);
+        if (TurnPlanNote) json["turn_plan_note"] = true;
+        else json.Remove("turn_plan_note");
+        SetOrRemove(json, "turn_plan_effort", TurnPlanEffort);
         ConfigFiles.WriteJson(path, json);
     }
 
@@ -397,6 +421,7 @@ public sealed record BrainSettings
             sb.Append(CultureInfo.InvariantCulture, $"SharedConfigDir = {SharedConfigDir}, ");
         sb.Append(CultureInfo.InvariantCulture, $"Model = {Model}, Effort = {Effort}, ");
         sb.Append(CultureInfo.InvariantCulture, $"EliteEffort = {EliteEffort ?? "default"}, BossEffort = {BossEffort ?? "default"}, ");
+        sb.Append(CultureInfo.InvariantCulture, $"TurnPlanNote = {TurnPlanNote}, TurnPlanEffort = {TurnPlanEffort ?? "off"}, ");
         sb.Append(CultureInfo.InvariantCulture, $"MonthlyBudgetUsd = {MonthlyBudgetUsd}, MaxTokens = {MaxTokens?.ToString(CultureInfo.InvariantCulture) ?? "by effort"}, Autostart = {Autostart}, ");
         sb.Append(CultureInfo.InvariantCulture, $"Repo = {Repo ?? "(none)"}, ClaudePath = {ClaudePath ?? "(none)"}, ApiKey = {key} }}");
         return sb.ToString();
@@ -468,6 +493,31 @@ public sealed record BrainSettings
                         fight = null;
                     }
                     s = name == "elite_effort" ? s with { EliteEffort = fight } : s with { BossEffort = fight };
+                    break;
+
+                case "turn_plan_note":
+                    // JSON null, like a left-out key, means off.
+                    if (node is JsonValue n && n.TryGetValue<bool>(out var note))
+                        s = s with { TurnPlanNote = note };
+                    else
+                    {
+                        if (node is not null)
+                            warnings.Add("turn_plan_note must be true or false; using false.");
+                        s = s with { TurnPlanNote = false };
+                    }
+                    break;
+
+                case "turn_plan_effort":
+                    // JSON null, like a left-out key, means no raise.
+                    if (node is null)
+                        s = s with { TurnPlanEffort = null };
+                    else if (node is JsonValue p && p.TryGetValue<string>(out var planText) && TryParseEffort(planText, out var planEffort))
+                        s = s with { TurnPlanEffort = planEffort };
+                    else
+                    {
+                        warnings.Add($"turn_plan_effort must be one of {string.Join(", ", Efforts)} or null; leaving it off.");
+                        s = s with { TurnPlanEffort = null };
+                    }
                     break;
 
                 case "monthly_budget_usd":

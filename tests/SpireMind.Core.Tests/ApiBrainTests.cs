@@ -1080,6 +1080,489 @@ public class ApiBrainTests
         }
     }
 
+    // ---- Turn plans (turn_plan_note and turn_plan_effort, for arena measurement) ----
+
+    /// <summary>A fight snapshot in <paramref name="room"/> at <paramref name="turn"/> and
+    /// <paramref name="round"/>: an awaiting one carries the board and offers end_turn, a waiting one
+    /// combat's small state.</summary>
+    private static JsonObject TurnSnap(string room, int turn, int round, string screen = "combat", bool awaiting = true)
+    {
+        var snap = Snap(screen, awaiting);
+        if (!awaiting)
+        {
+            snap["waiting"] = "enemy turn";
+            snap["state"] = new JsonObject { ["turn"] = turn, ["round"] = round, ["hp"] = 60, ["block"] = 0 };
+            return snap;
+        }
+        snap["state"] = new JsonObject
+        {
+            ["run"] = new JsonObject { ["act"] = 1, ["floor"] = 6, ["room"] = room },
+            ["turn"] = turn,
+            ["round"] = round,
+            ["me"] = new JsonObject { ["name"] = "The Ironclad", ["hp"] = 60, ["max_hp"] = 80 },
+            ["enemies"] = new JsonArray(new JsonObject { ["i"] = 0, ["name"] = "Gremlin Nob", ["hp"] = 80, ["max_hp"] = 82, ["intents"] = new JsonArray("attack 14") }),
+        };
+        snap["actions"] = new JsonArray(new JsonObject { ["id"] = "end_turn", ["label"] = "End turn" });
+        return snap;
+    }
+
+    /// <summary>A busy snapshot while a card resolves: the last screen's name and an empty state.</summary>
+    private static JsonObject BusySnap()
+    {
+        var snap = Snap("combat", false);
+        snap["waiting"] = "resolving Strike";
+        return snap;
+    }
+
+    /// <summary>An act_sequence result whose snapshot is under next.</summary>
+    private static JsonObject UnderNext(JsonObject snap) => new()
+    {
+        ["done"] = new JsonArray(new JsonObject { ["id"] = "end_turn", ["label"] = "End turn" }),
+        ["next"] = snap,
+    };
+
+    private static JsonArray LastContent(JsonObject request) => request["messages"]!.AsArray()[^1]!["content"]!.AsArray();
+
+    private static string[] BlockTypes(JsonArray content) => content.Select(b => b!["type"]!.GetValue<string>()).ToArray();
+
+    private static string? BlockText(JsonNode? block) => block?["text"] is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
+
+    /// <summary>The plan notes in the request's last user message.</summary>
+    private static int PlanNotes(JsonObject request) => LastContent(request).Count(b => BlockText(b) == ApiBrain.PlanTheTurn);
+
+    /// <summary>The plan notes in the whole conversation the request sends.</summary>
+    private static int AllPlanNotes(JsonObject request) =>
+        request["messages"]!.AsArray().Sum(m => m!["content"] is JsonArray c ? c.Count(b => BlockText(b) == ApiBrain.PlanTheTurn) : 0);
+
+    private static string? MessageEffort(JsonNode? message) => message?["output_config"]?["effort"]?.GetValue<string>();
+
+    private static JsonNode[] TranscriptLines(string dir) =>
+        File.ReadAllLines(Path.Combine(dir, "transcripts", "2026-10-10.jsonl")).Select(l => JsonNode.Parse(l)!).ToArray();
+
+    [Fact]
+    public async Task With_both_turn_plan_switches_off_an_elite_fight_is_sent_as_before()
+    {
+        using var rig = new Rig { UseTranscript = true };
+        rig.Settings = rig.Settings with { Effort = "medium" };
+        Assert.False(rig.Settings.TurnPlanNote);
+        Assert.Null(rig.Settings.TurnPlanEffort);
+        rig.Host.Handler = ActsReturn(TurnSnap("Elite", 1, 1), TurnSnap("Elite", 1, 1), TurnSnap("Elite", 2, 2), Snap("rewards", true), Snap("map", true));
+        rig.Api.Then(Act("toolu_1")).Then(Act("toolu_2")).Then(Act("toolu_3")).Then(Act("toolu_4")).Then(Act("toolu_5"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(6, rig.Api.Count);
+        // Entering the room starts a fresh conversation at high, as before: one text block, nothing after it.
+        var opening = Assert.Single(rig.Api[1]["messages"]!.AsArray())!;
+        Assert.StartsWith(ApiBrain.RoomEffortChanged, Text(opening));
+        for (var i = 1; i <= 4; i++)
+        {
+            var request = rig.Api[i];
+            var roles = Roles(request);
+            Assert.Equal(2 * i - 1, roles.Length);
+            Assert.DoesNotContain("system", roles);
+            // After the opening, each user turn holds its tool result and nothing else.
+            foreach (var message in request["messages"]!.AsArray().Skip(1).Where(m => m!["role"]!.GetValue<string>() == "user"))
+                Assert.Equal(["tool_result"], BlockTypes(message!["content"]!.AsArray()));
+            Assert.Equal("high", Effort(request));
+            Assert.Equal(32000, request["max_tokens"]!.GetValue<int>());
+            Assert.Null(request[ClaudeClient.BetasField]);
+        }
+        // The map lowers it with the room's own message and note, as before.
+        Assert.Equal("medium", MessageEffort(rig.Api[5]["messages"]!.AsArray()[^2]));
+        Assert.Equal(["tool_result", "text"], BlockTypes(LastContent(rig.Api[5])));
+        Assert.Equal(16000, rig.Api[5]["max_tokens"]!.GetValue<int>());
+        Assert.All(Enumerable.Range(0, 6), i => Assert.Equal(0, AllPlanNotes(rig.Api[i])));
+
+        var lines = TranscriptLines(rig.Dir);
+        Assert.Equal(["medium", "high", "high", "high", "high"], lines.Select(l => l["effort"]!.GetValue<string>()));
+        Assert.All(lines, l => Assert.False(l.AsObject().ContainsKey("turn_plan")));
+        Assert.DoesNotContain(rig.Logged, l => l.Contains("turn plan") || l.Contains("turn_plan"));
+    }
+
+    [Fact]
+    public async Task The_plan_note_goes_once_on_each_new_player_turn_in_an_elite_room()
+    {
+        using var rig = new Rig { UseTranscript = true };
+        rig.Settings = rig.Settings with { TurnPlanNote = true }; // effort high, as in elite rooms: no room switch
+        rig.Host.Handler = ActsReturn(
+            TurnSnap("Elite", 1, 1), // 1: the fight's first turn
+            TurnSnap("Elite", 1, 1), // 2: a card later, the same turn
+            TurnSnap("Elite", 1, 1, screen: "hand_select"), // 3: a pick from the hand mid-turn
+            BusySnap(), // 4: a card resolving
+            TurnSnap("Elite", 2, 2, awaiting: false), // 5: the enemy turn, already naming turn 2
+            TurnSnap("Elite", 2, 2), // 6: turn 2
+            TurnSnap("Elite", 3, 3, screen: "hand_select"), // 7: a choice at the start of turn 3
+            TurnSnap("Elite", 3, 3), // 8: turn 3's first combat snapshot
+            Snap("rewards", true), // 9
+            Snap("map", true)); // 10
+        for (var i = 1; i <= 10; i++)
+            rig.Api.Then(Act($"toolu_{i}"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(11, rig.Api.Count);
+        int[] expected = [0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0];
+        Assert.Equal(expected, Enumerable.Range(0, 11).Select(i => PlanNotes(rig.Api[i])));
+        // The note follows the tool result and stays where it was put: one conversation all along.
+        Assert.Equal(["tool_result", "text"], BlockTypes(LastContent(rig.Api[1])));
+        Assert.Equal(21, Roles(rig.Api[10]).Length);
+        Assert.Equal(3, AllPlanNotes(rig.Api[10]));
+        Assert.DoesNotContain("system", Roles(rig.Api[10]));
+        Assert.Null(rig.Api[10][ClaudeClient.BetasField]);
+        Assert.All(Enumerable.Range(0, 11), i => Assert.Equal(32000, rig.Api[i]["max_tokens"]!.GetValue<int>()));
+
+        // The transcript marks the planning requests.
+        var lines = TranscriptLines(rig.Dir);
+        Assert.Equal([1, 6, 8], lines.Select((l, i) => (l, i)).Where(x => x.l["turn_plan"]?.GetValue<bool>() == true).Select(x => x.i));
+        Assert.All(lines, l => Assert.Equal("high", l["effort"]!.GetValue<string>()));
+    }
+
+    [Fact]
+    public async Task The_plan_note_works_in_a_boss_room_on_snapshots_under_next_and_in_the_opening_of_a_fresh_conversation()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Effort = "medium", TurnPlanNote = true };
+        rig.Host.Handler = ActsReturn(UnderNext(TurnSnap("Boss", 1, 1)), UnderNext(TurnSnap("Boss", 1, 1)), UnderNext(TurnSnap("Boss", 2, 2)));
+        rig.Api.Then(Act("toolu_1")).Then(Act("toolu_2")).Then(Act("toolu_3"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        // Entering the boss room starts a fresh conversation; its opening carries the turn and the note.
+        var opening = Assert.Single(rig.Api[1]["messages"]!.AsArray())!["content"]!.AsArray();
+        Assert.Equal(["text", "text"], BlockTypes(opening));
+        Assert.StartsWith(ApiBrain.RoomEffortChanged, BlockText(opening[0]));
+        Assert.Equal(ApiBrain.PlanTheTurn, BlockText(opening[1]));
+        Assert.Equal("high", Effort(rig.Api[1]));
+        Assert.Equal(0, PlanNotes(rig.Api[2]));
+        Assert.Equal(1, PlanNotes(rig.Api[3]));
+        Assert.Equal(2, AllPlanNotes(rig.Api[3]));
+    }
+
+    [Theory]
+    [InlineData("Elite", "rewards,map")] // won, then the next elite
+    [InlineData("Elite", "map")] // fled (a Smoke Bomb): no rewards, then the next elite
+    [InlineData("Boss", "rewards")] // a second boss in the same room, after the first one's rewards
+    public async Task A_later_fight_gets_the_note_on_its_first_turn_again(string room, string between)
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { TurnPlanNote = true }; // effort high, as in elite and boss rooms: no room switch
+        // The first fight is won on turn 1, round 1, where the next one starts too.
+        var screens = between.Split(',');
+        rig.Host.Handler = ActsReturn([
+            TurnSnap(room, 1, 1),
+            .. screens.Select(s => Snap(s, true)),
+            TurnSnap(room, 1, 1),
+            TurnSnap(room, 1, 1)]);
+        var acts = screens.Length + 3;
+        for (var i = 1; i <= acts; i++)
+            rig.Api.Then(Act($"toolu_{i}"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(acts + 1, rig.Api.Count);
+        int[] expected = [0, 1, .. screens.Select(_ => 0), 1, 0];
+        Assert.Equal(expected, Enumerable.Range(0, acts + 1).Select(i => PlanNotes(rig.Api[i])));
+        Assert.DoesNotContain("system", Roles(rig.Api[acts]));
+    }
+
+    [Fact]
+    public async Task No_turn_plan_in_a_hallway_fight_an_event_fight_or_off_combat()
+    {
+        using var rig = new Rig { UseTranscript = true };
+        rig.Settings = rig.Settings with { TurnPlanNote = true, TurnPlanEffort = "max" };
+        rig.Host.Handler = ActsReturn(TurnSnap("Monster", 1, 1), TurnSnap("Monster", 2, 2), Snap("rewards", true), Snap("map", true), TurnSnap("Event", 1, 1), Snap("event", true));
+        for (var i = 1; i <= 6; i++)
+            rig.Api.Then(Act($"toolu_{i}"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(7, rig.Api.Count);
+        Assert.Equal(0, AllPlanNotes(rig.Api[6]));
+        Assert.DoesNotContain("system", Roles(rig.Api[6]));
+        Assert.All(Enumerable.Range(0, 7), i =>
+        {
+            Assert.Null(rig.Api[i][ClaudeClient.BetasField]);
+            Assert.Equal(32000, rig.Api[i]["max_tokens"]!.GetValue<int>());
+        });
+        Assert.All(TranscriptLines(rig.Dir), l => Assert.Null(l["turn_plan"]));
+    }
+
+    [Fact]
+    public async Task Turn_plan_effort_raises_each_turns_first_request_and_lowers_the_next()
+    {
+        using var rig = new Rig { UseTranscript = true, UseFightLog = true };
+        rig.Settings = rig.Settings with { TurnPlanEffort = "xhigh" }; // effort high, and high in elite rooms
+        rig.Host.Handler = ActsReturn(
+            TurnSnap("Elite", 1, 1), // 1: raised
+            TurnSnap("Elite", 1, 1), // 2: lowered
+            TurnSnap("Elite", 2, 2), // 3: raised
+            TurnSnap("Elite", 3, 3), // 4: the planning request ended its turn: the raise stays
+            Snap("rewards", true), // 5: lowered
+            Snap("map", true)); // 6: the room's effort is the normal one, so nothing changes
+        for (var i = 1; i <= 6; i++)
+            rig.Api.Then(Act($"toolu_{i}"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        // The raise: an effort-only system message just before the planning user turn, whose note
+        // after the tool result makes it new input. The top-level effort stays, so the cache holds.
+        var raise = rig.Api[1];
+        Assert.Equal(["user", "assistant", "system", "user"], Roles(raise));
+        Assert.Empty(raise["messages"]![2]!["content"]!.AsArray());
+        Assert.Equal("xhigh", MessageEffort(raise["messages"]![2]));
+        Assert.Equal(["tool_result", "text"], BlockTypes(LastContent(raise)));
+        Assert.Equal("(New turn: thinking effort is xhigh while you plan it.)", BlockText(LastContent(raise)[1]));
+        Assert.Equal("high", Effort(raise));
+        Assert.Equal(64000, raise["max_tokens"]!.GetValue<int>());
+        Assert.Equal(ApiBrain.PerMessageEffortBeta, Assert.Single(raise[ClaudeClient.BetasField]!.AsArray())!.GetValue<string>());
+        Assert.Equal(rig.Api[0]["messages"]![0]!.ToJsonString(), raise["messages"]![0]!.ToJsonString());
+
+        // The next request lowers it back the same way.
+        var lower = rig.Api[2];
+        Assert.Equal(["user", "assistant", "system", "user", "assistant", "system", "user"], Roles(lower));
+        Assert.Equal("high", MessageEffort(lower["messages"]![5]));
+        Assert.Equal(["tool_result", "text"], BlockTypes(LastContent(lower)));
+        Assert.Equal("(Turn planned; thinking effort back to high.)", BlockText(LastContent(lower)[1]));
+        Assert.Equal("high", Effort(lower));
+        Assert.Equal(32000, lower["max_tokens"]!.GetValue<int>());
+        for (var i = 0; i < 4; i++)
+            Assert.Equal(raise["messages"]![i]!.ToJsonString(), lower["messages"]![i]!.ToJsonString());
+
+        // Turn 2 raises again.
+        Assert.Equal(["system", "user"], Roles(rig.Api[3])[^2..]);
+        Assert.Equal("xhigh", MessageEffort(rig.Api[3]["messages"]!.AsArray()[^2]));
+        Assert.Equal(64000, rig.Api[3]["max_tokens"]!.GetValue<int>());
+
+        // Turn 3 came straight after it: the raise stays, with nothing added.
+        Assert.Equal(Roles(rig.Api[3]).Length + 2, Roles(rig.Api[4]).Length);
+        Assert.Equal(["assistant", "user"], Roles(rig.Api[4])[^2..]);
+        Assert.Equal(["tool_result"], BlockTypes(LastContent(rig.Api[4])));
+        Assert.Equal(64000, rig.Api[4]["max_tokens"]!.GetValue<int>());
+
+        // The rewards lower it; the map then changes nothing.
+        Assert.Equal("high", MessageEffort(rig.Api[5]["messages"]!.AsArray()[^2]));
+        Assert.Equal("(Turn planned; thinking effort back to high.)", BlockText(LastContent(rig.Api[5])[^1]));
+        Assert.Equal(32000, rig.Api[5]["max_tokens"]!.GetValue<int>());
+        Assert.Equal(["assistant", "user"], Roles(rig.Api[6])[^2..]);
+        Assert.Equal(["tool_result"], BlockTypes(LastContent(rig.Api[6])));
+        Assert.Equal(32000, rig.Api[6]["max_tokens"]!.GetValue<int>());
+
+        // One conversation: the raise is never taken for an /effort change or a room switch.
+        Assert.All(Enumerable.Range(1, 6), i => Assert.Equal(2 * i + 1 + Roles(rig.Api[i]).Count(r => r == "system"), Roles(rig.Api[i]).Length));
+        Assert.All(Enumerable.Range(0, 7), i => Assert.Equal("high", Effort(rig.Api[i])));
+        Assert.DoesNotContain(rig.Logged, l => l.Contains("fresh conversation") || l.Contains("model or effort changed"));
+
+        // The per-request records carry the effort each request was sent at.
+        var lines = TranscriptLines(rig.Dir);
+        Assert.Equal(["high", "xhigh", "high", "xhigh", "xhigh", "high"], lines.Select(l => l["effort"]!.GetValue<string>()));
+        Assert.Equal([1, 3, 4], lines.Select((l, i) => (l, i)).Where(x => x.l["turn_plan"]?.GetValue<bool>() == true).Select(x => x.i));
+        var fight = JsonNode.Parse(Assert.Single(File.ReadAllLines(Path.Combine(rig.Dir, FightLog.FileName))))!;
+        Assert.Equal(["xhigh", "high"], fight["effort"]!.AsArray().Select(e => e!.GetValue<string>()));
+        Assert.Equal(4, fight["requests"]!.GetValue<int>());
+    }
+
+    [Theory]
+    [InlineData("xhigh", null, true, 64000)]
+    [InlineData("max", null, true, 64000)]
+    [InlineData("max", 20000, true, 20000)]
+    [InlineData("high", null, false, 32000)] // not above the room's effort: no raise
+    [InlineData("low", null, false, 32000)]
+    public async Task A_turn_plan_raise_needs_a_higher_level_and_sizes_max_tokens_from_it(string level, int? maxTokens, bool raised, int expected)
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { TurnPlanEffort = level, MaxTokens = maxTokens };
+        rig.Host.Handler = ActsReturn(TurnSnap("Boss", 1, 1));
+        rig.Api.Then(Act("toolu_1"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(expected, rig.Api[1]["max_tokens"]!.GetValue<int>());
+        Assert.Equal(raised, Roles(rig.Api[1]).Contains("system"));
+        Assert.Equal(raised ? level : null, MessageEffort(rig.Api[1]["messages"]!.AsArray()[^2]));
+        Assert.Equal(raised, rig.Api[1][ClaudeClient.BetasField] is not null);
+    }
+
+    [Fact]
+    public async Task The_first_turn_of_an_elite_fight_raises_the_fresh_conversations_opening()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Effort = "medium", TurnPlanNote = true, TurnPlanEffort = "xhigh" };
+        rig.Host.Handler = ActsReturn(TurnSnap("Elite", 1, 1), TurnSnap("Elite", 1, 1), TurnSnap("Elite", 2, 2), Snap("map", true));
+        rig.Api.Then(Act("toolu_1")).Then(Act("toolu_2")).Then(Act("toolu_3")).Then(Act("toolu_4"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        // Entering: a fresh conversation at the room's high, its opening raised to xhigh by an effort
+        // message before it; with the note on, the note is the new input.
+        var first = rig.Api[1];
+        Assert.Equal(["system", "user"], Roles(first));
+        Assert.Equal("xhigh", MessageEffort(first["messages"]![0]));
+        var opening = first["messages"]![1]!["content"]!.AsArray();
+        Assert.StartsWith(ApiBrain.RoomEffortChanged, BlockText(opening[0]));
+        Assert.Equal([ApiBrain.PlanTheTurn], opening.Skip(1).Select(BlockText));
+        Assert.Equal("high", Effort(first));
+        Assert.Equal(64000, first["max_tokens"]!.GetValue<int>());
+        Assert.NotNull(first[ClaudeClient.BetasField]);
+
+        // Lowered on the next request, raised again on turn 2.
+        Assert.Equal(["system", "user", "assistant", "system", "user"], Roles(rig.Api[2]));
+        Assert.Equal("high", MessageEffort(rig.Api[2]["messages"]![3]));
+        Assert.Equal(32000, rig.Api[2]["max_tokens"]!.GetValue<int>());
+        Assert.Equal("xhigh", MessageEffort(rig.Api[3]["messages"]!.AsArray()[^2]));
+        Assert.Equal([ApiBrain.PlanTheTurn], LastContent(rig.Api[3]).Skip(1).Select(BlockText));
+
+        // Leaving while raised: the room switch alone lowers it, to the normal effort, in the conversation.
+        var left = rig.Api[4];
+        Assert.Equal(["system", "user"], Roles(left)[^2..]);
+        Assert.Equal("medium", MessageEffort(left["messages"]!.AsArray()[^2]));
+        Assert.Equal(["(You left the Elite room, so the thinking effort is back to medium.)"], LastContent(left).Skip(1).Select(BlockText));
+        Assert.Equal("high", Effort(left));
+        Assert.Equal(16000, left["max_tokens"]!.GetValue<int>());
+        Assert.Single(rig.Logged, l => l.Contains("starting a fresh conversation"));
+        Assert.Single(rig.Logged, l => l.Contains("left the Elite room; effort high to medium, keeping the conversation"));
+    }
+
+    [Fact]
+    public async Task Leaving_a_room_at_the_normal_effort_while_raised_lowers_it_back()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { EliteEffort = "same", TurnPlanEffort = "max" }; // effort high everywhere
+        rig.Host.Handler = ActsReturn(TurnSnap("Elite", 1, 1), Snap("map", true));
+        rig.Api.Then(Act("toolu_1")).Then(Act("toolu_2"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal("max", MessageEffort(rig.Api[1]["messages"]!.AsArray()[^2]));
+        Assert.Equal(64000, rig.Api[1]["max_tokens"]!.GetValue<int>());
+        Assert.Equal(["user", "assistant", "system", "user", "assistant", "system", "user"], Roles(rig.Api[2]));
+        Assert.Equal("high", MessageEffort(rig.Api[2]["messages"]![5]));
+        Assert.Equal("(Turn planned; thinking effort back to high.)", BlockText(LastContent(rig.Api[2])[^1]));
+        Assert.Equal(32000, rig.Api[2]["max_tokens"]!.GetValue<int>());
+        Assert.DoesNotContain(rig.Logged, l => l.Contains("fresh conversation"));
+    }
+
+    [Fact]
+    public async Task A_retry_of_a_raised_request_resends_it_unchanged()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { TurnPlanEffort = "xhigh" };
+        rig.Host.Handler = ActsReturn(TurnSnap("Elite", 1, 1));
+        rig.Api
+            .Then(Act("toolu_1"))
+            .Then(new ClaudeApiException(ClaudeErrorKind.Overloaded, 529, "overloaded_error", "Overloaded", "req_1", attempts: 5))
+            .Then(Act("toolu_2"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        // The raise isn't taken for an effort change while retrying.
+        Assert.Equal(rig.Api[1].ToJsonString(), rig.Api[2].ToJsonString());
+        Assert.Equal("xhigh", MessageEffort(rig.Api[2]["messages"]!.AsArray()[^2]));
+        Assert.DoesNotContain(rig.Logged, l => l.Contains("changed while retrying"));
+        Assert.Equal("high", MessageEffort(rig.Api[3]["messages"]!.AsArray()[^2]));
+    }
+
+    [Fact]
+    public async Task A_model_change_while_a_raised_opening_is_retried_builds_the_opening_again()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { TurnPlanNote = true, TurnPlanEffort = "xhigh" };
+        rig.Host.Handler = (_, _, _) => Task.FromResult(Outcome(TurnSnap("Boss", 1, 1)));
+        rig.Api.Then(() =>
+        {
+            rig.Settings = rig.Settings with { Model = "claude-fable-5" }; // /model while it retries
+            throw new ClaudeApiException(ClaudeErrorKind.RateLimited, 429, "rate_limit_error", "slow down", null, attempts: 5);
+        });
+        rig.Api.Then(Act("toolu_1"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        // Starting in a boss fight: the opening is raised by an effort message before it.
+        Assert.Equal(["system", "user"], Roles(rig.Api[0]));
+        Assert.Equal("xhigh", MessageEffort(rig.Api[0]["messages"]![0]));
+        // The new model can't take that: the opening is built again, with the note but no raise.
+        var opening = Assert.Single(rig.Api[1]["messages"]!.AsArray())!["content"]!.AsArray();
+        Assert.StartsWith(ApiBrain.ModelChanged, BlockText(opening[0]));
+        Assert.Equal([ApiBrain.PlanTheTurn], opening.Skip(1).Select(BlockText));
+        Assert.Equal("claude-fable-5", rig.Api[1]["model"]!.GetValue<string>());
+        Assert.Equal(32000, rig.Api[1]["max_tokens"]!.GetValue<int>());
+        Assert.Null(rig.Api[1][ClaudeClient.BetasField]);
+    }
+
+    [Fact]
+    public async Task A_model_without_per_message_effort_skips_the_raise_without_fresh_conversations()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Model = "claude-fable-5", TurnPlanEffort = "xhigh" };
+        rig.Host.Handler = ActsReturn(TurnSnap("Elite", 1, 1), TurnSnap("Elite", 1, 1), TurnSnap("Elite", 2, 2), TurnSnap("Elite", 3, 3));
+        for (var i = 1; i <= 4; i++)
+            rig.Api.Then(Act($"toolu_{i}"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.All(Enumerable.Range(1, 4), i =>
+        {
+            var request = rig.Api[i];
+            Assert.Equal(2 * i + 1, Roles(request).Length);
+            Assert.DoesNotContain("system", Roles(request));
+            Assert.Equal(["tool_result"], BlockTypes(LastContent(request)));
+            Assert.Equal("high", Effort(request));
+            Assert.Equal(32000, request["max_tokens"]!.GetValue<int>());
+            Assert.Null(request[ClaudeClient.BetasField]);
+        });
+        Assert.Single(rig.Logged, l => l.Contains("turn_plan_effort xhigh skipped: claude-fable-5 doesn't take per-message effort"));
+        Assert.DoesNotContain(rig.Logged, l => l.Contains("fresh conversation"));
+    }
+
+    [Fact]
+    public async Task A_refused_raise_costs_one_fresh_conversation_and_stops_further_raises()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { TurnPlanNote = true, TurnPlanEffort = "xhigh" };
+        rig.Host.Handler = ActsReturn(TurnSnap("Elite", 1, 1), TurnSnap("Elite", 2, 2), TurnSnap("Elite", 3, 3), TurnSnap("Elite", 3, 3));
+        rig.Api
+            .Then(Act("toolu_1"))
+            .Then(new ClaudeApiException(ClaudeErrorKind.InvalidRequest, 400, "invalid_request_error", "messages.2: unexpected role", "req_1"))
+            .Then(Act("toolu_2"))
+            .Then(Act("toolu_3"))
+            .Then(Act("toolu_4"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        // The raised request is refused.
+        Assert.Equal(["user", "assistant", "system", "user"], Roles(rig.Api[1]));
+        // One fresh conversation, whose opening still asks for the plan (the turn's request got no
+        // answer), without a raise.
+        var opening = Assert.Single(rig.Api[2]["messages"]!.AsArray())!["content"]!.AsArray();
+        Assert.StartsWith(ApiBrain.RoomEffortChanged, BlockText(opening[0]));
+        Assert.Equal([ApiBrain.PlanTheTurn], opening.Skip(1).Select(BlockText));
+        // Later turns get the note alone, in that same conversation.
+        Assert.Equal([1, 1, 0], new[] { 3, 4, 5 }.Select(i => PlanNotes(rig.Api[i])));
+        Assert.All(new[] { 2, 3, 4, 5 }, i =>
+        {
+            Assert.Equal(2 * (i - 2) + 1, Roles(rig.Api[i]).Length);
+            Assert.DoesNotContain("system", Roles(rig.Api[i]));
+            Assert.Null(rig.Api[i][ClaudeClient.BetasField]);
+            Assert.Equal(32000, rig.Api[i]["max_tokens"]!.GetValue<int>());
+        });
+        Assert.Equal([ApiBrain.PerMessageEffortRefused], rig.Announced);
+        Assert.Single(rig.Logged, l => l.Contains("turn_plan_effort xhigh skipped: the API refused per-message effort"));
+        Assert.True(rig.Brain.IsRunning);
+    }
+
     [Theory]
     [InlineData("claude-opus-5-5", true)]
     [InlineData("opus", true)]
@@ -1327,6 +1810,26 @@ public class ApiBrainTests
         Assert.Equal(BrainStopReason.Error, reason);
         Assert.Contains(rig.Announced, a => a.Contains("refusal"));
         Assert.Equal(2, rig.Api.Count);
+    }
+
+    [Fact]
+    public async Task A_refused_planning_request_hands_its_plan_note_to_the_fresh_opening()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { TurnPlanNote = true }; // effort high, as in elite rooms: no room switch
+        rig.Host.Handler = ActsReturn(TurnSnap("Elite", 1, 1), TurnSnap("Elite", 2, 2), TurnSnap("Elite", 2, 2));
+        rig.Api.Then(Act("toolu_1")).Then(Act("toolu_2")).Then(Reply("refusal", null)).Then(Act("toolu_3"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(5, rig.Api.Count);
+        // Turn 2's planning request is refused; the fresh conversation's opening carries turn 2's note.
+        Assert.Equal(1, PlanNotes(rig.Api[2]));
+        var opening = Assert.Single(rig.Api[3]["messages"]!.AsArray())!["content"]!.AsArray();
+        Assert.StartsWith(ApiBrain.Refreshed, BlockText(opening[0]));
+        Assert.Equal(1, PlanNotes(rig.Api[3]));
+        Assert.Equal(0, PlanNotes(rig.Api[4]));
     }
 
     [Fact]
