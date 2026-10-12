@@ -189,3 +189,24 @@ The result (the four cross-turn rules did not change the lines Opus takes, and i
 - The package-counting and setup-card rules (general.md 8.8 and 12) are prompt rules too, so the same caveat holds for them. The setup-card rule is the in-fight one; the forecast in the snapshot gives it the numbers it needs without lookups.
 - **Mark's rule for every test from here (2026-10-11 23:09 UTC):** run under the game's own conditions, even at more usage: the live effort per room (medium in hallways, high in elites and bosses; `--effort-by-tier` on), the same model, notes, tools and snapshot fields as the installed mod. The position arms above should be rerun that way before any of them decides what ships.
 - **Mark, 2026-10-11 23:10 UTC: tests run on the subscription only.** No API credit for tests, not even short confirmation runs on the mod's own brain loop. The gap between Claude Code and the mod's brain is accepted; the API credit is for real play.
+
+## 12. Why the in-game brain thinks so little at high effort (cloud, answer to the Mac's numbers)
+
+Mark's co-op log: boss room 48 calls, 17.8K output tokens (mean 371, max 5,054); elites mean 215; hallway medium mean 154. Claude Code headless at `--effort high` spent 25K to 66K over two or three boss turns.
+
+How `ApiBrain` sends effort today:
+- `output_config.effort` at the top level, fixed for a conversation by its first request. Entering an elite or boss room starts a fresh conversation at the room's effort (`BrainSettings.EffortFor`, high by default); leaving it lowers effort with an effort-only system message (beta `mid-conversation-output-config-2026-07-01`) where the model takes one, else a fresh conversation.
+- `thinking: {type: adaptive, display: summarized}` on the models that take summaries. The usage's `output_tokens` counts the full thinking billed, not the summary, so the 371 is real.
+- `max_tokens` 16,000 at low and medium, 32,000 at high, 64,000 at xhigh and max (a ceiling; unused tokens aren't billed). Nothing else caps thinking, and no prompt line asks for short thinking (the one "keep it short" line is about text outside `say`).
+
+So the low volume is adaptive thinking's own choice, not a cap. Likely causes:
+- Every tool call is its own request, and adaptive thinking decides per request. Most requests in a turn follow a tool result that changes little (the next `act` of a planned turn, a state read), so they think little; the mean hides that. The 5,054 max shows it can think hard when it judges a request needs it.
+- A model reading a history written with short thinking tends to keep it short (the same reason raising effort starts a fresh conversation, see the `SwitchRoomEffort` comment).
+- Claude Code's own wrapper and its tool loop differ, so its "high" isn't comparable.
+
+Switches for the arena's real-brain mode (both off by default, set through `BrainSettings` / config.json; being built on the cloud side now, landing on this branch shortly):
+- `turn_plan_note` (bool): in elite and boss rooms, the first actionable snapshot of each player turn gets a short note asking for the whole-turn plan before the first tool call.
+- `turn_plan_effort` (a level, e.g. `max`): in elite and boss rooms, the first request of each player turn runs at that effort (an effort-only system message raises it before that user message), and the next request lowers it back to the room's effort. Skipped on models without per-message effort or once the beta is refused. Transcript and fights.jsonl record the effort each request actually used, so tokens per effort can be compared.
+- The plain arm needs no code: `elite_effort` / `boss_effort` at `xhigh` or `max`.
+
+Suggested arms on the same positions, once Mark okays API credit (asked 2026-10-12 ~00:10 UTC, after his 23:10 "subscription only" pick, given that Claude Code's "high" doesn't match the game): game default (high); `boss_effort`/`elite_effort` max; `turn_plan_effort` max; `turn_plan_note` on. Report tokens out per turn next to wins, since a raised setting costs real-play money too.
