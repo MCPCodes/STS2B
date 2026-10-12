@@ -17,7 +17,8 @@ Sources, in this order: the verified spec files in `/Users/mark/Projects/sts2-no
 | Elites, bosses | `Sim/Content/Elites.cs`, `Bosses.cs` | `ElitesChecks.cs`, `BossesChecks.cs` |
 | Potions | `Sim/Content/Potions.cs` | `PotionsChecks.cs` |
 | Scenario generator | `Sim/Scenario.cs` | `Sim/ScenarioChecks.cs` |
-| Scripted players | `Policies/GreedyPolicy.cs`, `Policies/LookaheadPolicy.cs` | `Policies/PolicyChecks.cs` |
+| Scripted players | `Policies/GreedyPolicy.cs`, `Policies/LookaheadPolicy.cs`, `Policies/RolloutPolicy.cs` | `Policies/PolicyChecks.cs`, `Policies/RolloutChecks.cs` |
+| Card values, measured (`scripts/arena.sh values`) | `Runner/ValuesCommand.cs` | (section 15) |
 | The engine's rules | `Sim/Engine/*.cs` | `Sim/Content/Core*Checks.cs`, `Sim/Engine/EngineReviewChecks.cs`, `Sim/Engine/IntegrationChecks.cs` |
 | What the game has against what the registry has | `Sim/Completeness.cs` | (the self-check fails on a hole) |
 | Promise against outcome | `Sim/Honesty.cs`, `Sim/HonestyForecast.cs` | (`scripts/arena.sh honesty`) |
@@ -561,9 +562,10 @@ A check should be able to fail. After writing one, break the rule it checks in a
 ## 12. For the scenario generator and the scripted players
 
 - `Sim/Scenario.cs` must keep: `public sealed record Scenario(string Id, int Seed, string Tier, string Summary)`, `Scenarios.Generate(int count, int seed)`, `Scenarios.FromId(string id)` (throws `ArgumentException` for an id it did not make), and `internal static FightSetup Scenarios.Setup(Scenario scenario)`, which `ArenaGame` calls. `FightSetup(Deck, Hp, MaxHp, Potions, Encounter, Floor, Seed)` is in `Sim/Engine/FightState.cs`: deck entries are `DeckCard(className, upgraded)` in deck order, potions are class names by slot (null for empty; three slots), the encounter is a class name. Ask the registry what exists: `Content.Registry.Cards`, `IroncladPool`, `Potions`, `EncounterNames`, `Has(kind, name)`, `IsExcluded(kind, name, out reason)`; `Content.Registry.NewEncounter(name).RoomType` and `.IsWeak`. `Tuning.MaxTurns` is the arena's one house rule (a fight not won by the end of turn 40 is lost).
-- A scripted player implements `IPolicy` (`Name`, `Choose(GameSnapshot)`) and has a parameterless constructor; it is found by reflection. `Policies.All` lists "Random", "Greedy", "Lookahead" in that order, then any others by name. The snapshot it gets can be `combat`, `hand_select` or `card_select`; it must return one of its action ids. A player that searches implements `IEnginePolicy` and also gets the running `Fight`: it must not act on it; it copies it with `fight.CloneDeterminized(seed)` or `fight.Clone()` (exact), steps copies with `Execute(id)` / `LegalActions()`, and reads `IsOver`, `Won`, `Player.Hp`, `Enemies`, `IncomingDamage()` and so on. Copies work in the middle of a card choice too. A copy costs a few microseconds.
+- A scripted player implements `IPolicy` (`Name`, `Choose(GameSnapshot)`) and has a parameterless constructor; it is found by reflection. `Policies.All` lists "Random", "Greedy", "Lookahead" in that order, then any others by name. Every player in it plays every fight of `baseline`, `selfcheck`, `honesty` and the reports, so a player that takes seconds a fight stays out of it by having no parameterless constructor (Rollout, section 15). The snapshot it gets can be `combat`, `hand_select` or `card_select`; it must return one of its action ids. A player that searches implements `IEnginePolicy` and also gets the running `Fight`: it must not act on it; it copies it with `fight.CloneDeterminized(seed)` or `fight.Clone()` (exact), steps copies with `Execute(id)` / `LegalActions()`, and reads `IsOver`, `Won`, `Player.Hp`, `Enemies`, `IncomingDamage()` and so on. Copies work in the middle of a card choice too. A copy costs a few microseconds.
 - `CloneDeterminized(seed)` replaces what the player cannot know: every random number still to come, and the order of the draw pile (a card the player put on top stays there). The hidden cards are first sorted by what they look like, so the real order leaves no trace: two fights that show the same snapshot give the same copy for the same seed. In the middle of a card choice the copy forgets the future at the moment the choice is answered.
 - What the three players are: Random takes any legal action but ending the turn or throwing a potion away. Greedy goes one card at a time from the snapshot alone (kill, else block, else the most damage per energy) and uses its potions in elite and boss fights, at half HP, or when it would die this turn. Lookahead searches the turn on determinized copies. `docs/arena.md` has their numbers.
+- A fourth player, Rollout, plays the rest of the fight out after each line of the turn worth comparing. It is opt-in and made by name (`Policies.ByName("Rollout")`, `"Rollout:fast"`, `"Rollout:strong"`): section 15.
 
 ## 13. What is left out, and known gaps
 
@@ -638,3 +640,95 @@ It also checks, every time: that working a forecast out used no random number an
 - a random weight given as a function gets no chances.
 
 The mod's file must already say the same, or the source comparison fails.
+
+## 15. The Rollout player and the `values` command
+
+Two things that measure with the simulator and cost processor time: a fourth scripted player that plays the rest of the fight out, and a command that measures what a card is worth. Both are opt-in. Neither changes a fight that does not ask for them: `baseline` without `--policies` and `honesty` print what they printed before, byte for byte, and `selfcheck` prints one line more, for the new check class.
+
+### 15.1 Rollout (`Policies/RolloutPolicy.cs`, checks in `Policies/RolloutChecks.cs`)
+
+**What it is.** Lookahead searches the current turn and scores the position at the end of it with a fixed formula. It plans nothing across turns. Rollout lists the ways to play the turn with Lookahead's own search, picks a handful worth comparing, and after each of them plays the rest of the fight out on reshuffled copies with a small one-turn search as the player. It takes the line whose fights ended best: a win counts for more than any HP, then the HP left. `docs/arena.md` ("The scripted policies") says which lines are always compared.
+
+**It is opt-in.** A fight costs seconds, not milliseconds. So `RolloutPolicy` has no parameterless constructor on purpose, is not found by reflection and is not in `Policies.All`. It is made by name, `Policies.ByName("Rollout")`, and plays only where it is named: in `baseline --policies`, in `values --player`, and in its own checks.
+
+```bash
+scripts/arena.sh baseline --policies Lookahead,Rollout:fast,Rollout --threads 4
+scripts/arena.sh values --out DIR --tiers elite,boss --only-adds --player Rollout:fast --cards DemonForm,Barricade
+scripts/arena.sh selfcheck --checks RolloutChecks        # its checks alone, a few seconds
+```
+
+**The three settings** (`RolloutSetting`), and what a fight costs with each in processor seconds on one thread (Apple silicon; measured in the private copy the player was built in, b22cd06 plus Rollout):
+
+| Name | Play-outs a decision | Lines compared | Inner budget | Seconds an elite fight | Seconds a boss fight |
+| --- | --- | --- | --- | --- | --- |
+| `Rollout:fast` | 24 | 6 | 60 | 0.8 | 1.9 |
+| `Rollout` (`Rollout:normal`) | 64 | 8 | 60 | 1.95 | 4.98 |
+| `Rollout:strong` | 192 | 12 | 60 | about three times the normal setting (timed with the first version of the player only) | |
+
+Lookahead takes 0.09 and 0.17 there. `Rollout:24/6/60` is a setting of one's own (play-outs, lines, inner budget). The lines that are always compared are all compared, however many they are; the next best lines fill up to the number. `RolloutSetting.Inner` picks who plays the play-outs: `Planner` (the default: Lookahead's one-turn search, planning each turn once), `Lookahead` (searching again before every action) or `Greedy` (a seventh of the time, but it never follows a Power up, and two of the hand-built positions in the checks fail with it).
+
+**How it is put together.**
+
+- `TurnSearch` is Lookahead's search of the turn, kept as lines. It uses `LookaheadPolicy.Search.Candidates`, `Key` and `Rolls` and `LookaheadPolicy.Measure`, which are internal for it. A line stops at the first action that shows something hidden (a draw, a random roll, an offer) or at the end of the turn.
+- `Pick` chooses the lines to compare. `Compare` plays them out in two rounds on the same copies: every line for half the budget, then Lookahead's own choice and its one or two best challengers on the rest. Lookahead's choice is never dropped. A decision costs at most `Playouts` play-outs.
+- `Playout` copies the fight with `CloneDeterminized`, plays the line's last action and lets the inner player finish (`PlayOn`). A win scores 1000 plus the HP left, a loss up to 100 for the share of enemy HP removed.
+- Seeds: the copy number k of a decision is seeded from the player's seed, a hash of the snapshot (`LookaheadPolicy.Hash`) and k. Nothing else. So a fight played from its start is played the same way every time, with any number of threads.
+- The line it settled on is remembered per `Fight` object (a weak table) and followed while the snapshot's hash is what the line expected. It holds action ids, nothing of the fight.
+- `RolloutPolicy.Trace` writes every decision that was worked out: the lines compared, how often each won and with how much HP, and the one taken.
+- `Choose(snapshot)` without a fight decides as Greedy does. A decision it cannot work out is left to Lookahead and counted in `FellBack`; `PlayoutsFailed` counts play-outs that could not start. Both are 0 in a sound arena, and `RolloutChecks` holds them to 0 on generated fights.
+
+**What it may see.** No more than Lookahead. Every fight it steps is a copy made by `CloneDeterminized(seed)`: all random streams are new, and the hidden cards of the draw pile are sorted by how they look and then reshuffled. What it reads off the running fight is in the snapshot: enemy HP and visible powers, shown intents and their numbers, the exhaust count, max energy, the room type, the potion belt. An enemy's fixed follow-up is walked on the copy; a random branch draws from the copy's own new stream with the game's weights. `RolloutChecks` holds this with pairs of fights that show the same snapshot and differ in what is hidden: the real draw order, the random target to come, an enemy's coin for next turn (the check monster `CheckCoinFlipper`), next turn's hand, and the same from inside Headbutt's card choice. A build of the player with `Clone()` in place of `CloneDeterminized` fails 29 of the checks, some for each of those five: tried in the private copy, and again on the merged build.
+
+**Its one honesty limit.** There is no gate per monster that asks the forecast (section 14) whether an enemy's next step is certain: a copy walks every machine as it stands. That is right for the 29 monsters here. None keeps a number drawn in advance; the only private state is Slow's card count (shown) and Illusion's reviving flag (shown as 0 HP and a heal intent); the forecast's own tables say 22 fixed, 7 random with known odds, none conditional. A monster added later with a private counter, or a condition the snapshot does not show, would be walked exactly, and the player would know more than a model can. Close it in `Fight.CloneDeterminized` (or in the play-out) when such a monster comes.
+
+**After a change.**
+
+- To Lookahead's search or evaluation: it changes which lines Rollout compares and how its inner player plays. Run `selfcheck --checks PolicyChecks,RolloutChecks`.
+- To `RolloutPolicy`: run `selfcheck --checks RolloutChecks`, and see that `baseline --scenarios 100 --seed 11` still prints what it printed (Rollout must stay out of `Policies.All`).
+- `Fight.Execute` finds the option an action id names with `FindOption`, which builds only that card's or the belt's options: a third of an action's cost was listing every option twice. It must keep returning exactly what `CombatOptions()` lists under that id. The snapshot's action list still comes from `CombatOptions()`. It was held to that at the merge: 120 fights traced with every snapshot, every offered action tried on a copy and 19 bad ids refused, the same bytes before and after.
+
+**Measured.** The player was built and checked on 2026-10-11 in a private copy of the repo at commit b22cd06. The numbers here were measured there, on "b22cd06 plus Rollout", unless a line says "merged build". `docs/arena.md` ("What playing the fight out adds") has every table: the three seeds, Opus's 40 fights, when a Power is played, and the card values measured again.
+
+Rollout (normal) on 400 fights it had never met (seed 43, the first 100 of each tier). Wins, and in brackets the HP left with a loss as 0; a difference carries its 95% interval, either way, in brackets:
+
+| Tier | Greedy | Lookahead | Rollout | Rollout over Lookahead: wins | HP |
+| --- | --- | --- | --- | --- | --- |
+| weak | 100 (76.7) | 100 (77.8) | 100 (78.8) | 0 | +1.0 (0.4) |
+| normal | 88 (34.4) | 100 (45.5) | 100 (51.9) | 0 | +6.5 (1.5) |
+| elite | 54 (15.3) | 85 (34.5) | 92 (38.8) | 8 gained, 1 lost | +4.2 (2.2) |
+| boss | 24 (5.8) | 64 (16.9) | 72 (22.4) | 12 gained, 4 lost | +5.5 (2.3) |
+| all | 266 (33.0) | 349 (43.7) | 364 (48.0) | 20 gained, 5 lost | +4.3 (0.9) |
+
+Processor seconds a fight on one thread, the same fights:
+
+| Tier | Greedy | Lookahead | Rollout (normal) |
+| --- | --- | --- | --- |
+| weak | 0.00 | 0.02 | 0.32 |
+| normal | 0.00 | 0.11 | 0.98 |
+| elite | 0.00 | 0.09 | 1.95 |
+| boss | 0.00 | 0.17 | 4.98 |
+| all | 0.00 | 0.10 | 2.06 |
+
+- **Merged build (51f47e3 plus Rollout).** The first 200 fights of seed 43 were played again (`baseline --scenarios 200 --seed 43 --policies Lookahead,Rollout:fast,Rollout --threads 4`). All 200 of Lookahead's fights and all 200 of Rollout's ended exactly as in the private copy: the same result and the same HP left. The rest of the 400 was not played again; every fight played on both builds came out the same. `Rollout:fast`, which had not played those fights, won 181 with 47.6 HP left against Lookahead's 175 with 43.2; on the 40 bosses 26 against 21 (6 gained, 1 lost, sign test p = 0.13). One thread, the first 30 of those fights: 0.07 s a fight for Lookahead, 0.64 for `Rollout:fast`, 1.56 for Rollout. The results do not depend on `--threads`.
+- Over three seeds (11, 31, 43) the normal setting won 176 of 260 bosses against Lookahead's 160 (sign test p = 0.017) and 239 of 260 elites against 220 (p = 0.0002).
+- On the 40 fights of seed 7 that Opus played: Rollout 33 wins and 43.4 HP left, Opus at medium effort 33 and 43.5, Opus at high effort 36 and 45.4, Lookahead 30 and 38.1.
+- Card values with `Rollout:fast` as the player (`values --only-adds`, 300 elite and boss fights a card): Demon Form +7.1 HP over a Strike where Lookahead gave +3.9, Aggression +5.5 against +2.9, Unmovable +4.1 against +0.5. Barricade, Dark Embrace, Forgotten Ritual and Howl from Beyond are still left in the hand, so their numbers still say little.
+
+**Limits.**
+
+- `Rollout:fast` is not shown to beat Lookahead on bosses: 97 against 96 of 160 bosses (seeds 11 and 31). It is ahead on elites and in hallway HP. On one seed of three the normal setting did not beat Lookahead on bosses either (seed 31: 49 against 50 of 80).
+- It is only as good as its inner player. A plan that takes a better player than a one-turn search with a budget of 60 to carry out is played out badly and stays undervalued.
+- No per-monster forecast gate, as above: right for the 29 monsters of act 1 only.
+- `Rollout:strong` was measured with the first version of `Compare` only, and not again.
+
+### 15.2 `values` (`Runner/ValuesCommand.cs`)
+
+`scripts/arena.sh values --out DIR ...` measures what one card more, one card less or one upgrade is worth: every generated fight is played as it is and again with one change to the deck, by Lookahead and Greedy, and the differences are averaged. `docs/arena.md` ("values") explains every option; `scripts/arena.sh --help` lists them. For the maintainer:
+
+- `Program.cs` hands `values` and its arguments to `ValuesCommand.Run` before `ArenaOptions` reads anything: the command parses its own options (`ValuesCommand.Parse`) and prints its own usage.
+- Options: `--out DIR` (needed), `--seed S=1`, `--contexts N=300` (fights of each tier), `--full K=150` (fights of each tier that get every addition), `--min-full 100`, `--budget-minutes M=45` (sizes K, stops nothing), `--stop-after-minutes X`, `--workers W=6` (1 to 6), `--pilot-jobs P=200`, `--no-greedy-all`, `--cards A,B+` (only these additions), `--aa K=0` (the same deck in another order, K times), `--summarize` (tables only), `--player NAME=Lookahead` (any name `Policies.ByName` knows), `--tiers normal,elite,boss`, `--only-adds` (the lean design: one more Strike and the named additions on the first K fights of each tier, nothing else), and `--trace CONTEXT:CHANGE:PLAYER` (one fight again, decision by decision). `--shard i/n` and `--phase` are for the worker processes it starts.
+- It plays in worker processes, not threads: W copies of the arena, one thread each, each appending to its own `DIR/fights.<i>.csv`. Six threads in one process spend half their time waiting for the garbage collector. A fight is one row; a row the logs already hold is not played again, so the same command carries on.
+- A fight's row holds the outcome, how often the change's card was in the hand and played, and (six columns since Rollout) on what kind of turn it was held and played: `ValuesCommand.LargeDanger` (10) splits small from large. Logs of 23 columns from the first measurement are still read.
+- The fights: `BuildContexts` takes the first N normal, elite and boss fights of `Scenarios.Generate(N * 5, seed)` and puts elites and bosses in turns by enemy. A change to the generator changes the fights, as for every scenario id.
+- It builds a fight with a changed deck through `new ArenaGame(scenario, setup with { Deck = deck })`, so it follows every rule the arena has and writes nothing outside DIR.
+- Not checked by `selfcheck`: it has no check class. At the merge it was held to the logs of the private copy: 12 fights of the lean design, played again on the merged build with Lookahead and with `Rollout:fast`, gave the copy's rows in every column but the milliseconds. After a change to it, play a few fights of an old folder again into a new one and compare the rows.

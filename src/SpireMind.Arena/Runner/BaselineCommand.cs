@@ -14,8 +14,22 @@ public static class BaselineCommand
     public static int Run(ArenaOptions options, TextWriter output)
     {
         var scenarios = Scenarios.Generate(options.Scenarios, options.Seed);
-        var policies = Policies.All;
-        var rows = scenarios.Select(s => policies.Select(p => Baseline.Play(s, p)).ToArray()).ToArray();
+        // By name (--policies) is how the slow players get to play; then each fight is also timed.
+        var named = options.PolicyNames.Count > 0;
+        IReadOnlyList<IPolicy> policies = named ? options.PolicyNames.Select(n => Policies.ByName(n)!).ToList() : Policies.All;
+        var rows = new BaselineRow[scenarios.Count][];
+        var seconds = new double[scenarios.Count][];
+        Parallel.For(0, scenarios.Count, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, options.Threads) }, s =>
+        {
+            rows[s] = new BaselineRow[policies.Count];
+            seconds[s] = new double[policies.Count];
+            for (var p = 0; p < policies.Count; p++)
+            {
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+                rows[s][p] = Baseline.Play(scenarios[s], policies[p]);
+                seconds[s][p] = clock.Elapsed.TotalSeconds;
+            }
+        });
 
         output.WriteLine($"Arena baseline: {scenarios.Count} {(scenarios.Count == 1 ? "fight" : "fights")} from seed {options.Seed}, " +
                          $"played by {string.Join(", ", policies.Select(p => p.Name))}.");
@@ -28,12 +42,14 @@ public static class BaselineCommand
         fights.Write(output);
         output.WriteLine();
 
-        var totals = new TextTable("policy", "fights", "won", "win rate", "HP left on wins", "HP lost in wins", "turns", "turn limit", "refused");
+        string[] columns = ["policy", "fights", "won", "win rate", "HP left on wins", "HP lost in wins", "turns", "turn limit", "refused"];
+        var totals = new TextTable(named ? [.. columns, "HP left, a loss as 0", "seconds a fight"] : columns);
         for (var p = 0; p < policies.Count; p++)
         {
             var played = rows.Select(r => r[p]).ToList();
             var won = played.Where(r => r.Won).ToList();
-            totals.Add(
+            string[] cells =
+            [
                 policies[p].Name,
                 played.Count.ToString(CultureInfo.InvariantCulture),
                 won.Count.ToString(CultureInfo.InvariantCulture),
@@ -42,7 +58,12 @@ public static class BaselineCommand
                 Stats.Mean(won.Select(r => (double)r.DamageTaken)),
                 Stats.Mean(played.Select(r => (double)r.Turns)),
                 played.Count(r => r.TimedOut).ToString(CultureInfo.InvariantCulture),
-                played.Sum(r => r.Refused).ToString(CultureInfo.InvariantCulture));
+                played.Sum(r => r.Refused).ToString(CultureInfo.InvariantCulture),
+            ];
+            var index = p;
+            totals.Add(named
+                ? [.. cells, Stats.Mean(played.Select(r => r.Won ? (double)r.HpLeft : 0)), seconds.Average(t => t[index]).ToString("0.00", CultureInfo.InvariantCulture)]
+                : cells);
         }
         totals.Write(output);
         output.WriteLine("HP left on wins is what the next fight would start with: it includes Burning Blood's 6. HP lost is all HP the fight took, before any healing.");
@@ -65,6 +86,19 @@ public static class BaselineCommand
                     })]);
             }
             byTier.Write(output);
+
+            if (named)
+            {
+                output.WriteLine();
+                output.WriteLine("Seconds a fight, by tier.");
+                var time = new TextTable(["tier", .. policies.Select(p => p.Name)]);
+                foreach (var tier in tiers)
+                {
+                    var index = Enumerable.Range(0, scenarios.Count).Where(s => scenarios[s].Tier == tier).ToList();
+                    time.Add([tier, .. Enumerable.Range(0, policies.Count).Select(p => index.Average(s => seconds[s][p]).ToString("0.00", CultureInfo.InvariantCulture))]);
+                }
+                time.Write(output);
+            }
         }
 
         // A fight that hits the turn limit, or an action that was refused, is worth a look every time.

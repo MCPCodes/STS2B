@@ -16,6 +16,7 @@ It lives in `src/SpireMind.Arena`, a console project that only references `Spire
 ```bash
 scripts/arena.sh baseline                       # the scripted policies on 30 fights; half a minute, costs nothing
 scripts/arena.sh baseline --scenarios 100 --seed 7
+scripts/arena.sh baseline --policies Lookahead,Rollout:fast,Rollout --threads 4   # the slow player plays only when it is named
 scripts/arena.sh run --models claude-haiku-5-5,claude-sonnet-5-5,claude-opus-5-5
 scripts/arena.sh run --models claude-opus-5-5 --scenarios 12 --seed 2 --effort high --parallel 1
 scripts/arena.sh run --models claude-opus-5-5 --scenarios 40 --seed 7 --brief   # an experiment: one idea switched on
@@ -28,15 +29,18 @@ scripts/arena.sh selfcheck                      # the simulator and the tool pat
 scripts/arena.sh honesty                        # what the snapshots promise against what happens, on 300 fights
 scripts/arena.sh content                        # what the simulator holds of the game, what it leaves out, every card text
 scripts/arena.sh snapshot elite-880367          # a scenario's first snapshot, as a model gets it
+scripts/arena.sh values --out DIR --tiers elite,boss --only-adds --player Rollout:fast --cards DemonForm,Barricade   # what a card is worth, measured
 ```
 
 `scripts/arena.sh` builds the project (Release) and starts it directly, so Ctrl+C or `kill` reaches the arena itself and it stops its Claude Code sessions. Bad arguments print what is wrong and the usage, and exit with code 2.
 
 ### baseline
 
-`baseline [--scenarios N=30] [--seed S=1]` plays every policy in `Policies.All` (Random, Greedy, Lookahead) on every generated fight. It prints one row per fight (id, tier, each policy's `W <HP left>` or `L`, and the fight's one-line summary), then per policy the win rate, the mean HP left on wins, the mean HP the won fights cost and the mean turns, and by tier the wins with the mean HP left on them. It names every fight that was lost to the turn limit and every action a fight turned down; neither should happen, and the exit code is 1 when an action was turned down.
+`baseline [--scenarios N=30] [--seed S=1] [--policies A,B] [--threads K=1]` plays every policy in `Policies.All` (Random, Greedy, Lookahead) on every generated fight. It prints one row per fight (id, tier, each policy's `W <HP left>` or `L`, and the fight's one-line summary), then per policy the win rate, the mean HP left on wins, the mean HP the won fights cost and the mean turns, and by tier the wins with the mean HP left on them. It names every fight that was lost to the turn limit and every action a fight turned down; neither should happen, and the exit code is 1 when an action was turned down.
 
 Use it to look at the fights before spending anything: a fight every policy wins untouched tells the models apart no better than one nobody can win. Lookahead searches, so 100 fights take about a minute.
+
+`--policies A,B` names the players instead, in the order typed: any of Random, Greedy and Lookahead, and the player that is too slow to play in every baseline, `Rollout`, with its settings `Rollout:fast` and `Rollout:strong` (see [The scripted policies](#the-scripted-policies)). Rollout is opt-in: it plays nowhere unless it is named here or in `values --player`. With `--policies` the totals also show the mean HP left with a loss counted as 0 and the seconds a fight took, overall and by tier. `--threads K` (1 to 8, default 1) plays K fights at once. The results do not depend on it; the seconds a fight do when the machine is busy. Without `--policies` the output is what it was before the option existed, byte for byte.
 
 ### run
 
@@ -87,7 +91,7 @@ Position runs are compared apart from whole fights and paired by position, not b
 `selfcheck [--scenarios N=30] [--seed S=1] [--checks A,B]` ends with `PASSED` or `FAILED` (exit code 0 or 1). Run it after a change to the simulator or to `SpireMind.Core`, before a batch.
 
 1. **The content** (`Completeness`): every card of the Ironclad's pool, every status card, every Overgrowth encounter and every potion of the Ironclad's pool is either in the registry or left out by name with a reason; nothing is registered twice.
-2. **The scripted checks** (`IArenaChecks`, 20 classes, about 158,000 assertions; two of them, `RunStateChecks` and `RunStreamsChecks`, are run mode's, see [Run mode (in progress)](#run-mode-in-progress)): the engine's rules and every card, power, monster, encounter and potion against numbers worked out by hand from the game's code; the scenario generator against the game's odds; the scripted players; and the runner's own promises (`RunnerChecks`: the flags a session is started with, what the prompt's appendix says about the wiki, that prompt and Read rule name the same checkout, what the init line must list, how Read calls are counted; and for the experiments: the label, that every switch is off by default, the pages `--brief` gives and that the prompt is otherwise unchanged, what each session of a fight is started with, when a fight counts as played, and the numbers of `report --by-label` and `compare` on fights whose HP was chosen by hand; and for position tests: how a transcript is read, that a recorded fight is rebuilt to any of its turns and every difference from the recording is caught, that a game put at a position plays on exactly as the recorded fight did, what a reshuffle changes and what it leaves, what a run's line holds, and the numbers of the position report and of `compare`). `ForecastChecks` holds the forecast switch to the mod's own forecast (its note, its arithmetic, its tables and the powers that mark a number, read from the mod's source file), and puts every power the simulator has on the player and on an enemy to see that no number the forecast prints plain comes out different. `--checks Cards1Checks,PotionsChecks` runs only the named classes and nothing else, in a few seconds.
+2. **The scripted checks** (`IArenaChecks`, 21 classes, about 158,000 assertions; two of them, `RunStateChecks` and `RunStreamsChecks`, are run mode's, see [Run mode (in progress)](#run-mode-in-progress)): the engine's rules and every card, power, monster, encounter and potion against numbers worked out by hand from the game's code; the scenario generator against the game's odds; the scripted players (`RolloutChecks`, 247 checks, is the only place the self-check plays Rollout); and the runner's own promises (`RunnerChecks`: the flags a session is started with, what the prompt's appendix says about the wiki, that prompt and Read rule name the same checkout, what the init line must list, how Read calls are counted; and for the experiments: the label, that every switch is off by default, the pages `--brief` gives and that the prompt is otherwise unchanged, what each session of a fight is started with, when a fight counts as played, and the numbers of `report --by-label` and `compare` on fights whose HP was chosen by hand; and for position tests: how a transcript is read, that a recorded fight is rebuilt to any of its turns and every difference from the recording is caught, that a game put at a position plays on exactly as the recorded fight did, what a reshuffle changes and what it leaves, what a run's line holds, and the numbers of the position report and of `compare`). `ForecastChecks` holds the forecast switch to the mod's own forecast (its note, its arithmetic, its tables and the powers that mark a number, read from the mod's source file), and puts every power the simulator has on the player and on an enemy to see that no number the forecast prints plain comes out different. `--checks Cards1Checks,PotionsChecks` runs only the named classes and nothing else, in a few seconds.
 3. **The arena as a whole** (`SelfCheck`): every policy finishes every generated fight with no action turned down, each fight replays identically, ids rebuild their scenario through `Scenarios.FromId`, the combat snapshot has the game's keys, bad action ids are refused with a reason and change nothing, the snapshot is busy right after an action, a finished fight shows the end decision (`arena_over`, one action `done` that runs and changes nothing), and eight threads calling at once break nothing. The honesty check (below) runs on the same fights. It prints the policies' wins by tier.
 4. **The tool path** (`ToolPathCheck`): two fights are played over HTTP through a fight's own bridge, as a model plays them: the MCP handshake, `tools/list`, then `wait_for_decision`, `get_state`, `get_deck`, `get_persona`, `act` and whole turns as `act_sequence`. The first is one of the generated fights with Greedy choosing. The second is built by hand so that it is sure to open a hand selection and to use a potion: three Armaments in the deck and a Fire Potion in the belt, with a player that throws the potion and plays Armaments first. A turn's plan carries the picks for a hand selection its card opens (`select:<i>` by the card's index in the plan's snapshot, then `confirm`) and goes on after it, as the play prompt allows, so the second fight must answer at least one hand selection inside the `act_sequence` that opened it; the line it prints also counts upgraded cards played under their new name after their pick. A second game without a bridge gets the same actions, and every snapshot the tools return must equal that game's. It also checks what the tools must refuse (a stale version, an illegal id, an `act` without a version, `end_turn` before the last id) and that a sequence stops when its next card's target is dead and when the fight ends under it.
 5. **The end of the fight**, since a model that is told to wait there waits for ever. The fight's last action is played three more times, each on a new game one action short of the end: by `act`, by an `act_sequence` that ends on it, and by an `act_sequence` with an `end_turn` behind it. Each must hand back the end snapshot at once (well under the tools' 3 s settle time), with no `warning`, no "still busy" and no word about `wait_for_decision`; the third must stop with `The screen changed to arena_over.` A `wait_for_decision` after the end must come straight back with the same snapshot, `act end_turn` must be refused against it, and `act done` must succeed and leave the snapshot at the same version. The line it prints says how long each took.
@@ -99,6 +103,26 @@ Position runs are compared apart from whole fights and paired by position, not b
 ### content and snapshot
 
 `content` prints what the registry holds against the game's lists, every name left out with its reason, and every card and potion text as a model reads it. `snapshot SCENARIO-ID` prints a scenario's first snapshot; with `--forecast` it prints it as a fight started with that switch shows it (see [Experiments](#experiments)).
+
+### values
+
+`values --out DIR [--seed S=1] [--contexts N=300] [--full K=150] [--min-full 100] [--workers W=6] [--budget-minutes M=45] [--stop-after-minutes X] [--no-greedy-all] [--pilot-jobs P=200] [--cards A,B+] [--aa K=0] [--summarize] [--player NAME=Lookahead] [--tiers normal,elite,boss] [--only-adds]`
+
+`values --trace CONTEXT:CHANGE:PLAYER`
+
+It measures what one card more, one card less or one upgrade is worth in a fight. It takes fights from the generator, plays each as it is and again with one change to the deck and everything else the same, and averages the difference. An added card goes to the end of the deck list, so "plus card X" and "plus a Strike" start from the same shuffle with X where the Strike would be. The page made from it is `strategy/wiki/cards/ironclad-pick-values.md`. It costs nothing but processor time, and it writes nothing outside DIR.
+
+- **The fights** (`--seed`, `--contexts`). The first N normal, N elite and N boss fights the generator deals for the seed; weak fights are skipped. Elites and bosses are put in turns by enemy, so the fights that get every addition hold each enemy equally often.
+- **The changes** (`--full`, `--min-full`, `--budget-minutes`, `--cards`, `--aa`). Every fight gets the light ones: one more Strike, one more Defend, one Strike less, one Defend less, and one upgrade for every kind of card in its deck. The first K fights of each tier also get every addition: each card of the Ironclad's pool, plain and upgraded. K is cut, never below `--min-full`, so that the run fits in M minutes; the budget sizes the run and does not stop it. `--cards DemonForm,Barricade,Bash+` plays only the additions named (the game's class names, a `+` for the upgraded card). `--aa K` also plays every fight K times with the same deck in another order: a change that changes nothing but the draw, to measure the noise.
+- **The players** (`--player`, `--no-greedy-all`). Lookahead and Greedy both play. `--player NAME` puts another searching player in Lookahead's place: `Rollout`, `Rollout:fast`, `Rollout:strong`, or a setting of one's own as `Rollout:24/6/60` (play-outs a decision, lines compared, positions the inner player searches a turn). Its rows carry its name. Greedy alone also plays the additions on the fights beyond K, unless `--no-greedy-all` is given.
+- **The tiers** (`--tiers elite,boss`). Only the tiers named are played: any of normal, elite, boss.
+- **The lean design** (`--only-adds`), for a slow player. On the first K fights of each tier it plays one more Strike and each addition of `--cards`, and nothing else: no fight as it is, no removals, no upgrades, no Greedy, no pilot. It is played at the size asked for; `--stop-after-minutes` is its only limit. It prints each card against the Strike (win points and HP with 95% intervals, elites and bosses apart), in how many fights the card was played, and how often it was played of the turns it could be, by the kind of turn. It writes `adds_table.csv`.
+- **Processes and time** (`--workers`, `--pilot-jobs`, `--stop-after-minutes`, `--summarize`). The fights are played in W worker processes (1 to 6, default 6), one thread each; name fewer on a machine that is shared. A pilot of P jobs per tier times a fight of each tier first. `--stop-after-minutes X` ends the run after X minutes. Every fight is appended to `DIR/fights.<worker>.csv` when it ends, so the same command with the same DIR carries on after a stop, and `--summarize` only rewrites the tables from DIR's logs.
+- **What it writes**, all of it in DIR: the logs, `run.json` (the settings), `contexts.csv` (the fights), and the tables `report.txt`, `values_table.csv` (every addition against one more Strike, with the cards not to trust marked), `summary_changes.csv`, `summary_by_enemy.csv`, `play_rates.csv`, `baseline.csv` and `pairs.csv`. The lean design writes `adds_table.csv` in their place.
+- **The kind of turn.** Every fight's row also says on what kind of turn the added card was in the hand and playable, and on what kind it was played. The kind is the damage coming through the Block already there at the turn's first decision: none (0), small (under 10), large (10 or more).
+- **One fight again** (`--trace elite-123:add:Bash:Lookahead`). Plays one fight of the measurement again and prints every decision. The argument is the scenario id, the change (`base`, `add:Card`, `add:Card+`, `remove:Card`, `upgrade:Card`) and the player, with colons between.
+
+What a run costs: the lean design for 29 cards on 150 elite and 150 boss fights with `Rollout:fast` was 9,000 fights and took 64 minutes on 4 processes (measured in the private copy, b22cd06 plus Rollout). The same 9,000 fights with Lookahead took 5.5 minutes there.
 
 ## The simulator
 
@@ -216,6 +240,28 @@ The scripted policies (`src/SpireMind.Arena/Policies`) keep nothing between call
 - **Greedy** decides from the snapshot alone, as a model does, one card at a time with no plan: finish an enemy it can finish, else block while more is coming than it has Block, else the most damage per energy into the weakest enemy, then powers and free cards. It reads what a card does from its text and `vs`. It never sets up and never spends HP. Its potions go at once in an elite or boss fight, and in any fight once it is at half HP or would die this turn.
 - **Lookahead** searches the orders of plays the hand and the energy allow, through the enemy turn, on copies of the fight in which everything it cannot know is replaced (the draw order, the random numbers to come), and scores where each leaves it. It sees one turn only. It uses a potion when that wins the fight, saves its life, or is worth a lot in an elite or boss fight.
 
+A fourth player takes seconds a fight where the three above take milliseconds, so it is opt-in. It is not in `Policies.All`: `baseline`, `selfcheck`, `honesty` and the reports play the three above exactly as before, and it plays only where it is named (`baseline --policies Lookahead,Rollout`, `values --player Rollout:fast`).
+
+- **Rollout** judges a turn by how the fight ends after it.
+  - It lists the ways to play the turn with Lookahead's own search and evaluation. A way to play it, a line, runs to the end of the turn or to the first action that shows something the player could not know (a card drawn, a random target, an offer of cards). There it decides again.
+  - A line that wins the fight at once, with nothing left to chance, is taken.
+  - Otherwise it compares a handful of lines: Lookahead's own choice with and without a potion, the line with the most Block, the one that loses the least HP this turn, the one with the most damage and the one with the most on each enemy, and for every Power, every potion and every card that can be picked in a choice the best line with it and the one of those with the most Block. That last one is "Unmovable, then the one Defend".
+  - After each of them it plays the rest of the fight out on copies in which everything hidden is replaced. Every line meets the same copies, so the lines differ and not the luck. The player inside the play-outs is the same one-turn search with a budget of 60 positions; it plans each turn once and holds potions back as Lookahead does.
+  - Half the play-outs go to all the lines alike. The other half goes to Lookahead's own choice and the one or two lines that did best. Of those it keeps the one whose play-outs ended best: a win counts for more than any HP, then the HP left; of equals, Lookahead's choice. Lookahead's choice is never dropped.
+  - So a Power is played when the fights it is played in end better, a potion is kept when the fights it is kept in end better, and a race is started a turn early when that is what wins. Lookahead plans nothing across turns: a Power it has no rule for is worth a flat 1.2 points per expected turn to it.
+
+  **It sees what Lookahead sees and nothing more.** Every fight it steps is a copy made by `Fight.CloneDeterminized`: the draw order and every random number are the copy's own. The play-outs walk an enemy's fixed pattern as it is and draw its random choices afresh in every copy. The line it settles on is followed while the fight shows what that line expected, so a turn is worked out once, or once more after each card it draws. That line, a list of action ids kept per running fight, is the one thing a scripted policy keeps between calls. `RolloutChecks` (247 checks) holds it to positions worked out by hand, and to pairs of fights that show the same snapshot and hide something different: the draw order, a random target to come, an enemy's coin for its next move, the next hand, also from inside a card choice. A build of the player that copies the fight exactly, and so peeks, fails 29 of them: tried in the private copy, and again on the merged build.
+
+  **Three settings** bound what a decision costs. Processor seconds a fight are for one thread on Apple silicon, measured in the private copy the player was built in (b22cd06 plus Rollout); Lookahead takes 0.09 an elite and 0.17 a boss there.
+
+  | Setting | Play-outs a decision | Lines compared | Seconds an elite fight | Seconds a boss fight |
+  | --- | --- | --- | --- | --- |
+  | `Rollout:fast` | 24 | 6 | 0.8 | 1.9 |
+  | `Rollout` (normal) | 64 | 8 | 1.95 | 4.98 |
+  | `Rollout:strong` | 192 | 12 | about three times the normal setting (timed with the first version of the player only) | |
+
+  The lines that are always compared are all compared, however many they are; the next best lines fill up to the number. `Rollout:24/6/60` is a setting of one's own: play-outs, lines, and the positions the inner player searches a turn. `RolloutSetting` holds the three; `RolloutPolicy.Trace` writes every decision with the lines compared and how often each won. [What playing the fight out adds](#what-playing-the-fight-out-adds) has what it wins and what it does not show.
+
 ### How hard it is
 
 Over 500 generated fights (seed 11), with the game's numbers as they are:
@@ -238,6 +284,148 @@ Nothing was tuned to get these: the monsters' HP and damage and the cards' value
 - **A sample of 30 fights swings.** The tiers hold 12, 6, 6 and 6 fights of it; read the HP comparison, not the win counts.
 
 A change to the content or to the generator changes what a scenario id rebuilds, so results from before and after don't compare.
+
+### What playing the fight out adds
+
+**Where these numbers come from.** Rollout was built and checked on 2026-10-11 in a private copy of the repo at commit b22cd06, before it was merged. Every number in this section was measured there, on the build "b22cd06 plus Rollout", unless its line names another build. In a table of differences the number in brackets is the 95% interval of the paired difference, either way.
+
+**On the merged build.** The player was merged onto commit 51f47e3. On that build ("51f47e3 plus Rollout"):
+
+- **Nothing changed for whoever does not ask for it.** `baseline --scenarios 100 --seed 11`, `baseline --scenarios 30 --seed 1`, `honesty --scenarios 300`, the first snapshots of 60 scenarios with and without `--forecast`, and a trace of 120 fights (every snapshot, every action taken, and every offered action tried on a copy) came out the same bytes before the merge and after it. The full `selfcheck` prints one line more, the new `RolloutChecks`, and counts 21 check classes where it counted 20.
+- **The player is the one that was measured.** The first 200 fights of seed 43 (40 weak, 80 normal, 40 elite, 40 boss) were played again with `baseline --scenarios 200 --seed 43 --policies Lookahead,Rollout:fast,Rollout --threads 4`. Lookahead and Rollout (normal) had played them in the private copy, and all 200 fights of each ended exactly as they did there: the same result and the same HP left. What the repo gained between b22cd06 and the merge (the forecast switch, position tests, run mode) reached none of these fights, which are played without `--forecast`. The tables below were not all played again; every fight that was played on both builds came out the same, so they should hold for this build as they stand.
+- **`Rollout:fast` had not played those fights.** Wins, and in brackets the HP left with a loss as 0:
+
+| Tier | Fights | Lookahead | Rollout:fast | Rollout | Rollout:fast over Lookahead: wins | HP |
+| --- | --- | --- | --- | --- | --- | --- |
+| weak | 40 | 40 (78.6) | 40 (79.3) | 40 (79.7) | 0 | +0.7 (0.6) |
+| normal | 80 | 80 (45.8) | 80 (51.8) | 80 (51.8) | 0 | +6.0 (1.8) |
+| elite | 40 | 34 (35.0) | 35 (37.5) | 35 (37.9) | 2 gained, 1 lost | +2.5 (2.7) |
+| boss | 40 | 21 (10.7) | 26 (17.6) | 25 (15.6) | 6 gained, 1 lost | +7.0 (4.0) |
+| all | 200 | 175 (43.2) | 181 (47.6) | 180 (47.3) | 8 gained, 2 lost | +4.5 (1.2) |
+
+- **What that shows.** The player works on the merged build and is in the range the copy measured: more HP left than Lookahead in every tier, most of it in hallway fights. On these 40 bosses `Rollout:fast` won 26 against Lookahead's 21; with 6 fights gained and 1 lost that is a sign test of p = 0.13, so it does not change the finding below that the fast setting is not shown to beat Lookahead on bosses. No action was turned down and no fight ran into the turn limit.
+- **The `values` command gives the copy's rows.** Twelve fights of its lean design (seed 1, the first 2 elite and 2 boss fights, one more Strike, Demon Form and Barricade) were played again on the merged build with Lookahead and with `Rollout:fast`. Every row equals the row in the private copy's logs in every column but the milliseconds.
+- **Seconds a fight on the merged build.** With `--threads 4` on a busy machine: Lookahead 0.20, `Rollout:fast` 1.61, Rollout 4.09; a boss 0.38, 4.38 and 11.64. With `--threads 1` on the first 30 of those fights: 0.07, 0.64 and 1.56; a boss 0.09, 1.67 and 4.09 (6 bosses). So one thread gives about the figures of the cost table below, and several threads on a busy machine about twice that. The results were the same with 1 thread and with 4.
+
+**Strength.** Rollout (normal) against Lookahead and Greedy on 400 fights it had never met: seed 43, the first 100 of each tier, played once, after the player was final. Wins, and in brackets the HP left with a loss as 0:
+
+| Tier | Greedy | Lookahead | Rollout | Rollout over Lookahead: wins | HP | HP better / same / worse |
+| --- | --- | --- | --- | --- | --- | --- |
+| weak | 100 (76.7) | 100 (77.8) | 100 (78.8) | 0 | +1.0 (0.4) | 37 / 60 / 3 |
+| normal | 88 (34.4) | 100 (45.5) | 100 (51.9) | 0 | +6.5 (1.5) | 72 / 18 / 10 |
+| elite | 54 (15.3) | 85 (34.5) | 92 (38.8) | 8 gained, 1 lost: +7 points (5.8) | +4.2 (2.2) | 51 / 24 / 25 |
+| boss | 24 (5.8) | 64 (16.9) | 72 (22.4) | 12 gained, 4 lost: +8 points (7.8) | +5.5 (2.3) | 50 / 31 / 19 |
+| all | 266 (33.0) | 349 (43.7) | 364 (48.0) | 20 gained, 5 lost: +3.8 points (2.4) | +4.3 (0.9) | 210 / 133 / 57 |
+
+- Against Greedy: 99 fights gained and 1 lost, +24.5 points of wins (4.3), +15.0 HP (1.6).
+- **Is the gain on bosses real?** Over three seeds, yes; one seed of 80 bosses can show nothing. Normal setting against Lookahead: seed 11 bosses 55 against 46 of 80, seed 31 bosses 49 against 50 of 80, seed 43 bosses 72 against 64 of 100. Together 176 against 160 of 260 bosses (28 gained, 12 lost, sign test p = 0.017), and 239 against 220 of 260 elites (22 gained, 3 lost, p = 0.0002).
+- **The fast setting is not shown to beat Lookahead on bosses.** Over 320 elite and boss fights (seeds 11 and 31) `Rollout:fast` won 242, Lookahead 231 and Rollout 251. On the 160 bosses alone: 97 against Lookahead's 96. So `Rollout:fast` is ahead on elites and in hallway HP, and on bosses only the normal setting is shown to be ahead.
+- `Rollout:strong` was measured with the first version of the player only (see "How the lines are compared" below): 135 wins of 160 elite and boss fights of seed 11, where that version's normal setting won 127 and Lookahead 113. It was not measured again.
+
+**Against the models.** The 40 fights of seed 7 that Opus played in the arena. Wins by tier, and in brackets the HP left with a loss as 0:
+
+| Player | weak (8) | normal (16) | elite (8) | boss (8) | all 40 | HP left |
+| --- | --- | --- | --- | --- | --- | --- |
+| Greedy | 8 (77.8) | 16 (36.4) | 3 (10.8) | 0 (0.0) | 27 | 32.3 |
+| Lookahead | 8 (78.2) | 16 (45.1) | 4 (20.1) | 2 (1.9) | 30 | 38.1 |
+| Rollout (normal) | 8 (79.2) | 16 (51.6) | 5 (24.1) | 4 (10.6) | 33 | 43.4 |
+| Opus, medium effort | 8 (77.9) | 16 (51.7) | 6 (27.4) | 3 (8.6) | 33 | 43.5 |
+| Opus, medium effort, wiki readable | 8 (78.6) | 16 (51.0) | 6 (28.5) | 4 (13.1) | 34 | 44.5 |
+| Opus, high effort | 8 (77.6) | 16 (53.0) | 7 (29.0) | 5 (14.4) | 36 | 45.4 |
+
+- Rollout stands where Opus at medium effort stands: 33 wins each. Fight by fight it won 1 that Opus lost and lost 1 that Opus won; HP 0.0 (3.0).
+- Opus at high effort is ahead by 3 wins of 40 (Rollout won 2 that it lost and lost 5 that it won; HP -2.0 (3.5)), which 40 fights do not settle.
+- Against Lookahead on these 40: 3 gained, 0 lost; HP +5.3 (2.5).
+
+**What a fight costs**, in processor seconds on one thread (seed 43, Apple silicon):
+
+| Tier | Greedy | Lookahead | Rollout:fast | Rollout (normal) |
+| --- | --- | --- | --- | --- |
+| weak | 0.00 | 0.02 | | 0.32 |
+| normal | 0.00 | 0.11 | | 0.98 |
+| elite | 0.00 | 0.09 | 0.8 | 1.95 |
+| boss | 0.00 | 0.17 | 1.9 | 4.98 |
+| all | 0.00 | 0.10 | | 2.06 |
+
+(`Rollout:fast` was timed on seeds 11 and 31, elites and bosses only. In the card-value run, with its longer fights, it took 1.43 s a fight on average.) A boss fight is long, and every one of its turns is followed by play-outs of the rest of it; one boss fight of the card-value run took 30 seconds. With several threads on a busy machine a fight took about twice as long, so compare seconds from one thread.
+
+**How the lines are compared.** The first version halved the lines round by round on the sum of their scores, the first time after one copy each. A check with an enemy that tosses a coin for its next move showed what that costs: the line that keeps a Block potion for a hit that half the copies hold was 2 HP behind on a copy without the hit, and was thrown out before a copy with the hit was played. Now every line is played on the same copies for half the budget, and Lookahead's own choice and its one or two best challengers share the rest. In wins the two versions are alike: 160 elite and boss fights of seed 11 and of seed 31 gave 127 and 119 before and 130 and 121 after, where Lookahead won 113 and 118. Two other rules were tried and thrown away: dropping a line after one lost play-out (42 of the 80 bosses of seed 31, worse), and leaving Lookahead's choice only for a clear lead (490 wins against 493 without the rule, over two seeds and two settings).
+
+**Who plays the play-outs.** Measured with the first version, 24 play-outs a decision on 160 elite and boss fights of seed 11: Greedy inside won 124, Lookahead with a budget of 30 positions 124, the one-turn search that plans a turn at once with a budget of 60 (the one the settings use) 125; Lookahead alone won 113. With Greedy inside a fight took a seventh of the time. It is not the default because of what it cannot see: Greedy never follows a Power up, so a line that needs its Power used well later is played out badly and looks bad. Two of the hand-built positions in `RolloutChecks` show it: Barricade two turns before a hit of 30 (the only line that lives), and blocking a hit of 20 so that Demon Form can go down on the quiet turn after. `RolloutSetting.Inner` chooses the inner player for whoever wants the speed.
+
+**When a setup Power is played.** "Could be played" means the card was in the hand and affordable at a decision of that turn. The kind of turn is the damage coming through the Block already there at the turn's first decision. All Powers the generated decks hold, over the 780 fights of seeds 43, 7 and 31 that both played (Rollout at the normal setting): the share of the turns a Power could be played on which it was played.
+
+| Coming through at the start of the turn | Lookahead | Rollout |
+| --- | --- | --- |
+| 0 | 74% of 125 | 69% of 137 |
+| 1 to 9 | 73% of 89 | 59% of 112 |
+| 10 to 19 | 50% of 241 | 54% of 228 |
+| 20 or more | 49% of 59 | 48% of 58 |
+| as much as the HP left (would kill) | 38% of 13 | 0% of 14 |
+| all | 59% of 527 | 57% of 549 |
+
+- Both set up more on a quiet turn than under a hit. Lookahead does it too, because its formula weighs this turn's HP against a flat value for the Power.
+- The difference is the hit that would kill: Rollout played no Power into one (0 of 14 turns), Lookahead did on 5 of 13.
+- So Rollout does not set up more often than Lookahead in generated decks. It sets up different cards: Lookahead plays any Power it has no rule for, Rollout plays one when the fights with it end better.
+
+**Card values again, with Rollout as the player.** The 18 cards the measured page (`strategy/wiki/cards/ironclad-pick-values.md`) marks as not to trust were measured again with `Rollout:fast`, next to 10 cards whose numbers were trusted (the controls) and Stone Armor. The fights are the page's own: seed 1, the first 150 elite and 150 boss fights (the page used the first 140 of each), each played with one more Strike and again with the card in the Strike's place, same shuffle (`values --only-adds --tiers elite,boss --player Rollout:fast`). Lookahead played the same fights again and repeated the page (Break +13.8 against +13.5, Demon Form +4.0 against +3.9, Barricade -1.8 against -1.7). With one more Strike, `Rollout:fast` won 231 of the 300 fights with 26.0 HP left, Lookahead 215 with 24.0. No fight broke, no action was turned down, none hit the turn limit.
+
+How to read the table. HP is the HP left after the fight (a loss as 0) with the card, minus with a Strike in its place. "Change" is Rollout's value minus Lookahead's, fight by fight on the same 300 fights. The 10 controls went up by +1.1 HP (1.2) on average: every card gains that much with this player, so a card has moved against the others only when it moved by more. "Beyond the controls" is the change with the controls' average taken off, fight by fight. "Played" is the share of the turns the card could be played on which it was, Lookahead first and `Rollout:fast` second, over 300 elite and boss fights each; a dash where it was not counted.
+
+| Card | Page (Lookahead): HP, 95% interval | Rollout:fast: HP | Win points | Change | Beyond the controls | Played | Verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Crimson Mantle | +8.7 [+7.0, +10.4] | +11.0 (1.7) | +16.7 (4.5) | +2.2 (1.8) | +1.1 (1.3) | 71%, 82% | the old number stands |
+| Demon Form | +3.9 [+2.3, +5.6] | +7.1 (1.6) | +13.7 (4.2) | +3.1 (1.7) | +1.9 (1.3) | 49%, 56% | **better than the page says** |
+| Inferno | +4.0 [+2.4, +5.6] | +6.5 (1.7) | +12.0 (4.4) | +2.3 (1.7) | +1.1 (1.2) | 79%, 74% | the old number stands |
+| Aggression | +2.9 [+1.4, +4.4] | +5.5 (1.6) | +10.0 (4.5) | +2.6 (1.7) | +1.5 (1.4) | 47%, 67% | **better than the page says** |
+| Juggernaut | +2.1 [+0.6, +3.6] | +4.5 (1.7) | +8.0 (3.9) | +1.8 (1.9) | +0.6 (1.4) | 28%, 58% | the old number stands |
+| Unmovable | +0.5 [-0.9, +1.8] | +4.1 (1.6) | +6.7 (4.3) | +3.6 (1.9) | +2.5 (1.5) | 28%, 57% | **better than the page says** |
+| Pyre | +1.3 [-0.1, +2.6] | +3.0 (1.5) | +7.0 (4.5) | +1.5 (1.7) | +0.3 (1.4) | 26%, 50% | the old number stands |
+| Corruption | +0.4 [-1.1, +1.9] | +2.9 (1.6) | +3.3 (4.3) | +2.1 (1.7) | +0.9 (1.3) | 22%, 46% | the old number stands |
+| Hellraiser | +1.8 [+0.2, +3.4] | +2.7 (1.6) | +5.7 (4.2) | +0.9 (1.7) | -0.2 (1.3) | 63%, 60% | the old number stands |
+| Howl from Beyond | +0.9 [-0.5, +2.2] | +1.0 (1.3) | +1.3 (4.2) | 0.0 (1.7) | -1.1 (1.4) | -, 30% | still not shown |
+| Rupture | -0.3 [-1.6, +1.0] | -0.1 (1.4) | +0.0 (4.4) | +0.2 (1.8) | -1.0 (1.4) | 53%, 47% | the old number stands |
+| Feel No Pain | -1.5 [-2.9, -0.1] | -0.5 (1.4) | -2.3 (4.3) | +1.1 (1.7) | -0.1 (1.3) | 55%, 44% | the old number stands |
+| Juggling | -0.7 [-2.1, +0.6] | -0.5 (1.5) | +0.7 (3.8) | -0.1 (2.0) | -1.2 (1.6) | 49%, 40% | the old number stands |
+| Barricade | -1.7 [-3.2, -0.3] | -0.8 (1.5) | -1.3 (4.2) | +1.0 (1.8) | -0.1 (1.3) | 8%, 13% | still not shown |
+| Cruelty | -1.3 [-2.7, +0.1] | -0.8 (1.3) | +1.7 (4.1) | +0.4 (1.7) | -0.8 (1.4) | 53%, 49% | the old number stands |
+| Forgotten Ritual | -0.8 [-2.1, +0.5] | -0.9 (1.4) | -3.0 (4.3) | -0.1 (1.8) | -1.2 (1.3) | -, 27% | still not shown |
+| Vicious | -3.0 [-4.3, -1.6] | -2.0 (1.3) | -6.0 (4.1) | +0.7 (1.7) | -0.4 (1.5) | 49%, 35% | the old number stands |
+| Dark Embrace | -2.7 [-4.0, -1.4] | -2.4 (1.2) | -5.3 (4.3) | -0.1 (1.7) | -1.2 (1.3) | 17%, 16% | still not shown |
+
+- **Better than the page says (3):** Demon Form, Aggression, Unmovable. Each moved by more than its interval and by more than the controls did. Unmovable is where the play-outs change most: it is played twice as often, and most often on a turn with a small hit coming (80% of those turns). That is the "Unmovable, then the one Defend" line.
+- **Moved up by more than its own interval, but not by more than the controls (3):** Crimson Mantle, Inferno, Corruption. Their place among the cards stands. Corruption is now shown to be above a Strike (+2.9 (1.6)), which the page could not say.
+- **Still not shown (4):** Barricade, Dark Embrace, Forgotten Ritual, Howl from Beyond. Rollout leaves them in the hand as Lookahead does, so the number is still that of a card that is rarely played. Barricade is no longer shown to be worse than a Strike, and that is all.
+- **The old number stands (8 more):** Juggernaut, Pyre, Hellraiser, Rupture, Feel No Pain, Juggling, Cruelty, Vicious. Juggernaut and Pyre are played twice as often and gained with the controls, not beyond them.
+- **Nothing moved down.** Vicious stays below a Strike although Rollout plays it less: in a deck without Vulnerable it is a dead draw.
+- Demon Form is played on three quiet turns in four by both players and still stays in the hand in a third of the fights it is held in. Three energy is the whole turn.
+
+The 10 controls kept their order (rank agreement 0.96 between the page and Rollout; one swap, Bash above Pommel Strike and Shrug It Off):
+
+| Card | Page (Lookahead): HP, 95% interval | Rollout:fast: HP | Win points | Change | Beyond the controls |
+| --- | --- | --- | --- | --- | --- |
+| Break | +13.5 [+11.7, +15.2] | +16.9 (1.7) | +18.3 (4.4) | +3.1 (1.8) | +1.9 (1.2) |
+| Primal Force | +10.3 [+8.5, +12.1] | +11.8 (1.7) | +17.7 (4.4) | +1.4 (1.8) | +0.3 (1.2) |
+| Unrelenting | +6.2 [+4.7, +7.6] | +7.3 (1.5) | +10.7 (4.4) | +1.0 (1.7) | -0.1 (1.1) |
+| Anger | +5.4 [+4.0, +6.8] | +6.2 (1.5) | +8.0 (4.3) | +0.5 (1.6) | -0.6 (1.1) |
+| Inflame | +3.1 [+1.8, +4.5] | +5.2 (1.4) | +10.7 (4.1) | +2.0 (1.6) | +0.9 (1.2) |
+| Twin Strike | +3.1 [+1.9, +4.3] | +3.7 (1.2) | +6.7 (3.6) | +0.4 (1.6) | -0.8 (1.0) |
+| Bash | -0.5 [-1.9, +0.9] | +1.9 (1.4) | +2.0 (4.3) | +2.2 (1.7) | +1.1 (1.1) |
+| Pommel Strike | +1.9 [+0.6, +3.1] | +1.8 (1.3) | +3.7 (3.8) | -0.1 (1.5) | -1.2 (1.1) |
+| Shrug It Off | +0.6 [-0.8, +2.0] | +1.3 (1.3) | +2.7 (3.8) | +0.7 (1.8) | -0.4 (1.3) |
+| Defend | -2.5 [-3.8, -1.1] | -2.2 (1.4) | -5.0 (4.1) | +0.2 (1.7) | -1.0 (1.1) |
+| Stone Armor (not a control) | -0.7 [-2.0, +0.7] | +1.3 (1.3) | +0.0 (3.7) | +1.9 (1.8) | +0.7 (1.3) |
+
+**Limits. What these numbers are not.**
+
+- **The fast setting is not shown to beat Lookahead on bosses**, and the card values above were measured with it. The normal setting would have taken about two and a half hours for them. A stronger setting may value the setup cards differently again.
+- **On one seed of three the normal setting did not beat Lookahead on bosses either** (seed 31: 49 against 50 of 80).
+- **Rollout is only as good as its inner player.** The play-outs are played by a one-turn search with a small budget. A plan that takes a better player than that to carry out is still undervalued. Barricade and Dark Embrace may be such cards.
+- **Few play-outs.** With 24 play-outs a line of the last round is played on about 6 copies, which leaves a lot to chance in a fight that is won half the time. That is what the larger settings buy off.
+- **No gate per monster.** A copy walks every enemy's machine as it stands and draws every random branch afresh. Nothing asks the forecast whether an enemy's next step is certain. That is right for the 29 monsters of act 1 in the arena, none of which keeps a number drawn in advance: 22 are fixed, 7 random with known odds, none conditional. A later monster with a private counter, or with a condition the snapshot does not show, would be walked exactly. `Fight.CloneDeterminized` is the one place to close it, and `Sim/Forecast.cs` knows which steps are certain.
+- **Card values:** 300 fights a card give intervals of about 1.5 HP, so differences under 2 HP between two cards are not shown. The cards are added to decks that were not built for them: a deck built around Barricade or Dark Embrace is not measured.
+- **One try a fight**, and single fights: no run, no relics, generated decks. See [Reading the results honestly](#reading-the-results-honestly).
+- **No model should be asked to match Rollout.** It plays thousands of fights on copies for every fight it plays.
 
 ## Run mode (in progress)
 
@@ -712,7 +900,7 @@ A pair is dropped when either side didn't play its fight to the end, and that in
 - **HP left on the same fights is the sharper measure.** Every model plays the same seeded fights, so the comparison is paired: fight by fight, who came out with more HP. That cancels how hard each fight is, which is most of the noise in a win rate. Still, look at the sign test's p before believing a split: 5 against 3 is p = 0.73.
 - **One try per fight.** Models don't play the same fight the same way twice. A single upset on one scenario means little; a pattern across scenarios and seeds means more. To add evidence, run more scenarios or another `--seed` into another folder, not the same fights again.
 - **An abandoned fight counts against the model** (as not won, 0 HP), since stopping for good is its own doing; but it takes six sessions ending early to get there, so read `resumes` first, and the transcript when it is high. **Timeouts and errors don't count at all**: a slow service produces timeouts as well as a slow model, and the next run plays those fights again. If a model has many of either, read its transcripts before its numbers, and remember the paired table drops abandoned fights.
-- **The scripted policies are a yardstick, not a rival.** They cost nothing. Greedy sees exactly what a model sees; Lookahead also runs the engine on copies of the fight, which no model can. A model that matches Lookahead on HP is playing the turn's arithmetic about as well as it can be played; a model that loses fights Greedy wins is worth a look at its transcript.
+- **The scripted policies are a yardstick, not a rival.** They cost nothing. Greedy sees exactly what a model sees; Lookahead also runs the engine on copies of the fight, which no model can. A model that matches Lookahead on HP is playing the turn's arithmetic about as well as it can be played; a model that loses fights Greedy wins is worth a look at its transcript. Rollout plays whole fights out on copies, thousands of them a fight; where it beats Lookahead, the difference is what planning across turns is worth with these decks.
 - **Reading the wiki is part of what is measured.** The prompt asks for an enemy's page before an elite, a boss or an enemy the model doesn't know, and a model that follows it pays in time and tokens and may play better for it. So read HP and cost next to the `wiki pages` column: a model that opened no page played from the prompt alone. Results from before the sessions could read (no `wiki_hash`, another `prompt_hash`) are another experiment; don't put them in one table with these.
 - **It is the game's combat, and not a run.** The fights follow the game, so what a model knows about the game's cards and enemies applies, and the strategy notes fit. But the decks are not drafted, there are no relics, and the tiers are dealt 4:2:2:2 instead of as a run meets them, so a win rate here is no forecast of winning runs. The card texts are the arena's own wording: a model that plays from the snapshot is safe, one that plays from the remembered text of a card may misread a detail.
 - **The weak tier is nearly free, the boss tier is steep.** See [How hard it is](#how-hard-it-is). Weak fights separate models by HP only; boss fights mostly by who wins at all.

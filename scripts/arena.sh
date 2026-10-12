@@ -7,6 +7,7 @@
 #   scripts/arena.sh honesty [--scenarios N] [--seed S]          what snapshots promise against what happens
 #   scripts/arena.sh content                                     what the simulator holds of the game, and what not
 #   scripts/arena.sh snapshot SCENARIO-ID                        a scenario's first snapshot
+#   scripts/arena.sh values --out DIR [--player NAME] ...        what one card more is worth in a fight, measured
 # See docs/arena.md, or scripts/arena.sh --help.
 set -euo pipefail
 . "$(dirname "$0")/env.sh"

@@ -93,6 +93,32 @@ public sealed partial class Fight
         return options;
     }
 
+    /// <summary>
+    /// The one option with this id, or null: exactly what <see cref="CombatOptions"/> lists under
+    /// it, without working out the rest of the list. An id names its hand card or its belt slot,
+    /// so only that card's or the belt's options are built. For the players that step thousands
+    /// of copies, where listing every option twice per action was a third of an action's cost.
+    /// </summary>
+    private Option? FindOption(string actionId)
+    {
+        if (actionId == "end_turn") return new Option("end_turn", "End turn");
+        if (actionId.StartsWith("play:", StringComparison.Ordinal))
+        {
+            var arrow = actionId.IndexOf('>');
+            var digits = arrow < 0 ? actionId.AsSpan(5) : actionId.AsSpan(5, arrow - 5);
+            if (!int.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out var i) || i >= _s.Hand.Count) return null;
+            foreach (var option in PlayOptionsFor(i, _s.Hand[i], out _))
+                if (option.Id == actionId) return option;
+            return null;
+        }
+        if (actionId.StartsWith("potion:", StringComparison.Ordinal) || actionId.StartsWith("discard_potion:", StringComparison.Ordinal))
+        {
+            foreach (var option in PotionOptions())
+                if (option.Id == actionId) return option;
+        }
+        return null;
+    }
+
     /// <summary>Every action the player may take now, in the order the snapshot lists them.</summary>
     public IReadOnlyList<LegalAction> LegalActions()
     {
@@ -120,7 +146,7 @@ public sealed partial class Fight
         }
         if (_pending is not null) return ExecuteChoice(actionId);
 
-        var option = CombatOptions().FirstOrDefault(o => o.Id == actionId);
+        var option = FindOption(actionId);
         if (option is null)
         {
             return ActionResult.Fail(actionId.StartsWith("play:", StringComparison.Ordinal)
@@ -189,7 +215,7 @@ public sealed partial class Fight
         }
 
         // Ids are resolved against the state they were offered from (this also holds in a replay).
-        var option = CombatOptions().First(o => o.Id == actionId);
+        var option = FindOption(actionId) ?? throw new InvalidOperationException($"'{actionId}' is not offered by the state it is replayed on.");
         if (option.Discard) _s.Potions[option.Slot] = null;
         else if (option.Slot >= 0) UsePotion(option.Slot, option.Target);
         else PlayFromHand(option.Card!, option.Target);
