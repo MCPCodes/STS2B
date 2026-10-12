@@ -205,8 +205,10 @@ public sealed class RolloutChecks : IArenaChecks
             // two Strikes at 8, 10, 12 each: 16 + 20 + 24, with the 6 that is 66: dead on turn 5 before it
             // hits. 15 HP and 6: 21.
             // Demon Form first: 20 through, 5 HP. Two Strikes at 8, 10, 12 on turns 2, 3, 4: 60: dead on turn
-            // 4. 5 HP and 6: 11. Block first and no Demon Form at all: 6 + 12 + 12 + 12 = 42 by turn 4, the
-            // turn 5 hit costs 10 more: 5 HP and 6: 11.
+            // 4. 5 HP and 6: 11. No Demon Form at all: at best Strike, Strike, Defend on turn 1 (15 through,
+            // 10 HP), then two Strikes a turn: 60 on turn 5 before it hits: 10 HP and 6: 16. With both
+            // Defends on turn 1 it is 6 + 12 + 12 + 12 = 42 by turn 4 and the turn 5 hit costs 10 more:
+            // 5 HP and 6: 11.
             foreach (var player in Players())
             {
                 var f = FiveCards(["DemonForm", "DefendIronclad", "DefendIronclad", "StrikeIronclad", "StrikeIronclad"], 25,

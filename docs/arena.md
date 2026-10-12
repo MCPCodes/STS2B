@@ -361,11 +361,11 @@ A change to the content or to the generator changes what a scenario id rebuilds,
 | 1 to 9 | 73% of 89 | 59% of 112 |
 | 10 to 19 | 50% of 241 | 54% of 228 |
 | 20 or more | 49% of 59 | 48% of 58 |
-| as much as the HP left (would kill) | 38% of 13 | 0% of 14 |
+| as much as the HP left or more (it kills unless blocked) | 38% of 13 | 0% of 14 |
 | all | 59% of 527 | 57% of 549 |
 
 - Both set up more on a quiet turn than under a hit. Lookahead does it too, because its formula weighs this turn's HP against a flat value for the Power.
-- The difference is the hit that would kill: Rollout played no Power into one (0 of 14 turns), Lookahead did on 5 of 13.
+- The difference is the hit that kills unless it is blocked: Rollout played no Power into one (0 of 14 turns), Lookahead did on 5 of 13 (it lived through each of the five and won one of those fights). 13 and 14 turns are too few to say more.
 - So Rollout does not set up more often than Lookahead in generated decks. It sets up different cards: Lookahead plays any Power it has no rule for, Rollout plays one when the fights with it end better.
 
 **Card values again, with Rollout as the player.** The 18 cards the measured page (`strategy/wiki/cards/ironclad-pick-values.md`) marks as not to trust were measured again with `Rollout:fast`, next to 10 cards whose numbers were trusted (the controls) and Stone Armor. The fights are the page's own: seed 1, the first 150 elite and 150 boss fights (the page used the first 140 of each), each played with one more Strike and again with the card in the Strike's place, same shuffle (`values --only-adds --tiers elite,boss --player Rollout:fast`). Lookahead played the same fights again and repeated the page (Break +13.8 against +13.5, Demon Form +4.0 against +3.9, Barricade -1.8 against -1.7). With one more Strike, `Rollout:fast` won 231 of the 300 fights with 26.0 HP left, Lookahead 215 with 24.0. No fight broke, no action was turned down, none hit the turn limit.
