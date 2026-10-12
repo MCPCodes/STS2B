@@ -105,7 +105,7 @@ See `docs/chat.md` for the design and `docs/chat-and-persona.md` for what the ga
 
 ## Co-op with bots
 
-You host a local co-op lobby in your own copy of the game, and each bot is a second copy on the same Mac that joins it, started from your chat box. You talk to every bot from your own window: your lines and the commands reach them, and their lines come back into your chat log and as speech bubbles over their players, with a thought cloud while a bot decides. `docs/coop.md` walks through the first live test and what the bot sees; `docs/chat.md` (Co-op) has the relay's details.
+You host a local co-op lobby in your own copy of the game, and each bot is a second copy on the same Mac that joins it, started from your chat box. You talk to every bot from your own window: your lines and the commands reach them, and their lines come back into your chat log and as speech bubbles over their players, with a thought cloud while a bot decides. `docs/coop.md` walks through the first live test and what the bot sees; `docs/chat.md` (Co-op) has the relay's details. A friend on the same network can join the lobby from their own Mac as a guest: `docs/coop-guest.md` and `scripts/package-guest.sh`.
 
 - Once: Steam's launch options for the game get `--fastmp host_standard`, so your game opens a local lobby at every main menu. Both copies must load the same gameplay mods.
 - In your window:

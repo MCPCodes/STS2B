@@ -11,6 +11,7 @@ using InstanceInfo = SpireMind.Core.Coop.InstanceInfo;
 using PartyBot = SpireMind.Core.Coop.PartyBot;
 // The game side of co-op (src/SpireMind/Game/Coop/), by alias for the same reason.
 using CoopGame = SpireMind.Game.Coop.CoopGame;
+using GuestMode = SpireMind.Game.Coop.GuestMode;
 
 namespace SpireMind;
 
@@ -41,8 +42,24 @@ public static class ModEntry
     /// <summary>The chat box, for the input patches; null until Initialize builds it, or if that failed.</summary>
     internal static ChatOverlay? Overlay { get; private set; }
 
+    /// <summary>
+    /// A file of this name beside the DLL marks the package made for a guest
+    /// (scripts/package-guest.sh puts it there; scripts/install.sh never does). With it the mod
+    /// is a guest copy or does nothing at all: the bridge, the brain, the chat box and the bot
+    /// launcher can never start on a guest's computer, whatever its launch options say.
+    /// </summary>
+    internal const string GuestOnlyMarker = "guest-only.txt";
+
     public static void Initialize()
     {
+        // A friend's game that joins the host's lobby from another computer takes its own short
+        // path (docs/coop-guest.md): nothing below runs there. Should the check itself fail,
+        // the copy starts as it did before guests existed.
+        var asGuest = false;
+        try { asGuest = StartedAsGuest(); }
+        catch (Exception ex) { LogError($"role: the guest check failed, so this copy starts as the host's or a bot's: {ex.Message}"); }
+        if (asGuest) return;
+
         try
         {
             // Read-only observation patches (choice prompts and the like) and the chat box's
@@ -66,6 +83,13 @@ public static class ModEntry
             // (docs/game-api.md, section g). Each copy has its own port.
             var port = ResolvePort();
             var role = DetectRole(port);
+            if (role.IsGuest)
+            {
+                // StartedAsGuest takes every guest copy before this point; should one get here
+                // all the same, it must not start the host's machinery.
+                LogError("role: this is a guest copy whose own start-up did not run; the mod does nothing more in this session");
+                return;
+            }
             _instance = NewInstanceInfo(role);
             // A bot copy tells the relay where it stands and takes /bot stop and the lobby
             // nudge through its bridge; the human's copy is left as it is.
@@ -123,6 +147,67 @@ public static class ModEntry
         catch (Exception ex)
         {
             LogError($"failed to start: {ex}");
+        }
+    }
+
+    /// <summary>
+    /// True when this copy is a guest's and the mod's start-up is done with: a copy started
+    /// with --spiremind-host (the role says guest) gets <see cref="GuestMode"/> and nothing
+    /// else, and a copy that loaded the guest package without that option gets nothing at all.
+    /// False for the host's own copy and for a bot copy, which then start exactly as before.
+    /// Never throws. With the guest package, any failure here ends in "nothing at all".
+    /// </summary>
+    private static bool StartedAsGuest()
+    {
+        var guestPackage = IsGuestPackage();
+        InstanceRole? role = null;
+        try
+        {
+            role = InstanceRole.Detect(Godot.OS.GetCmdlineArgs(), ResolvePort(), System.Environment.GetEnvironmentVariable,
+                steamRunning: SteamRunning);
+        }
+        catch (Exception ex)
+        {
+            LogError($"role: couldn't tell whether this is a guest copy: {ex}");
+        }
+
+        if (role is { IsGuest: true })
+        {
+            try
+            {
+                Log($"role: {role}");
+                foreach (var warning in role.Warnings)
+                    LogError($"role: {warning}");
+                if (role.Guest is { } guest)
+                    GuestMode.Start(guest, ResolveHumanName());
+            }
+            catch (Exception ex)
+            {
+                LogError($"guest: failed to start; the game runs as it would without the mod: {ex}");
+            }
+            return true;
+        }
+
+        if (!guestPackage) return false;
+        Log($"role: this is the guest package ({GuestOnlyMarker} is beside the DLL) and the launch options do not ask to join a host " +
+            "(--spiremind-host=<address>), so the mod does nothing in this session");
+        return true;
+    }
+
+    /// <summary>Whether the DLL sits in the package made for a guest. A folder that can't be read counts as "no".</summary>
+    private static bool IsGuestPackage()
+    {
+        try
+        {
+            // The game loads mods with LoadFromAssemblyPath, so Location is the DLL's path.
+            var location = typeof(ModEntry).Assembly.Location;
+            return location.Length > 0
+                   && System.IO.Path.GetDirectoryName(location) is { Length: > 0 } dir
+                   && System.IO.File.Exists(System.IO.Path.Combine(dir, GuestOnlyMarker));
+        }
+        catch
+        {
+            return false;
         }
     }
 

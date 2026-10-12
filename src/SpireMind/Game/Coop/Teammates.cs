@@ -2,6 +2,7 @@ using System.Text.Json.Nodes;
 // An alias rather than the namespace, so a game type of the same name in the global usings can
 // never make it ambiguous.
 using InstanceRole = SpireMind.Core.Brain.InstanceRole;
+using CoopSeats = SpireMind.Core.Coop.CoopSeats;
 
 namespace SpireMind.Game.Coop;
 
@@ -121,15 +122,22 @@ internal static class Teammates
             var host = HostNetId();
             var enet = IsEnet();
             var players = ctx.Run!.Players;
+            var guests = 0;
             for (var slot = 0; slot < players.Count; slot++)
             {
                 var p = players[slot];
                 var me = LocalContext.IsMe(p);
                 var isHost = host == p.NetId;
-                // An ENet session is local to this Mac: its host is the human's own game and every
-                // other player is a bot copy (players.md 1.1). Over Steam the others are people.
-                var human = !me && (!enet || isHost);
-                mates.Add(new Mate(slot, p, NameOf(p, isHost, enet), CharacterName(p), me, isHost, human));
+                // An ENet session's host is the human's own game, and the players with the bots'
+                // ids (1000 to 1002) are bot copies on the host's Mac (players.md 1.1). Anyone
+                // else joined from another computer and is a person too: a guest
+                // (docs/coop-guest.md). Over Steam the others are people.
+                var guest = enet && host is { } hostId && !me && CoopSeats.IsGuest(p.NetId, hostId);
+                var human = !me && (!enet || isHost || guest);
+                // A guest is named by seat, as the nameplates name them (CoopNames), and never
+                // by what the game calls that player.
+                var name = guest ? Guests.Name(guests++) : NameOf(p, isHost, enet);
+                mates.Add(new Mate(slot, p, name, CharacterName(p), me, isHost, human));
             }
         }
 

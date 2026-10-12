@@ -21,7 +21,7 @@ Does not work yet:
 - `/botstop` stops all copies, not one, and is not yet `/bot stop`. For one copy: `kill -TERM <pid>` (it leaves cleanly) or Quit on its Dock icon. A bot that left a run can't come back into it.
 - No thought cloud over a bot on your screen.
 - After a run a bot finds your next lobby by trying, which can take a minute or two.
-- A Custom or Daily lobby: the bot joins but does not pick or ready. A friend can't join over Steam; the lobby is local to the Mac.
+- A Custom or Daily lobby: the bot joins but does not pick or ready. A friend can't join over Steam; the lobby is local. A friend on the same network can join it from their own Mac with the guest package: `docs/coop-guest.md`.
 - A bot copy that crashes or is killed (`kill -9`) stays in your lobby or run as a ghost. Back out and host again.
 - A bot can't play a character you have not unlocked; it picks another and says so.
 - Both copies share the game's data folder for mods' own files (`betterspire2_*.json`).
@@ -140,14 +140,14 @@ Your log: `~/Library/Application Support/SlayTheSpire2/logs/godot.log`. The bot'
 
 Code: `src/SpireMind/Game/Coop/Teammates.cs` (the players), `CoopManners.cs` (the rules, pure functions) and the co-op parts of the screen readers. Game facts: `sts2-notes/coop-api-v0.107.1/votes.md`, `players.md`. All of it shows only in a multiplayer run with more than one player; a solo snapshot is unchanged except for reviving enemies (below).
 
-**Who is followed.** A bot copy follows the human's votes; your own copy follows nobody. In a local session the human is the host. `SPIREMIND_COOP_WAIT` sets how many seconds the bot waits for your vote (default 30; 0 never waits, `never` always waits).
+**Who is followed.** A bot copy follows the humans' votes; your own copy follows nobody. In a local session the humans are the host and any guest: a player whose id is not a bot's 1000 to 1002 (`docs/coop-guest.md`). `SPIREMIND_COOP_WAIT` sets how many seconds the bot waits for your vote (default 30; 0 never waits, `never` always waits).
 
 **`team` on every screen**: the other players in slot order.
 
 | Field | Meaning |
 |---|---|
 | `id` | `p0`, `p1`...: the slot, the same on every copy; in a fight the target id |
-| `name`, `character`, `net_id` | "Mark", "Ironclad", 1 for the host, 1000 and up for bots |
+| `name`, `character`, `net_id` | "Mark", "Ironclad", 1 for the host, 1000 to 1002 for bots, another number (2000) for a guest |
 | `hp`, `max_hp`, `block`, `dead`, `host`, `human` | `block` only above 0; the flags only when true |
 | `ended_turn` / `map_vote` | in a fight / outside one, once cast: `(col,row)` |
 | `powers`, `incoming` | in a fight: their powers, and what the shown intents deal to them before Block |

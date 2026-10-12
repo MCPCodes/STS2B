@@ -1,11 +1,13 @@
 // The mod compiles Core with global usings for Godot and the game, and Godot has its own Environment.
 // This alias keeps the .NET one there.
 using Environment = System.Environment;
+using GuestArgs = SpireMind.Core.Coop.GuestArgs;
 
 namespace SpireMind.Core.Brain;
 
-/// <summary>Which kind of copy of the game this is: Mark's own, or a bot copy he plays co-op with.</summary>
-public enum InstanceKind { Human, Bot }
+/// <summary>Which kind of copy of the game this is: Mark's own, a bot copy he plays co-op with,
+/// or a friend's game on another computer that joins his lobby as a guest.</summary>
+public enum InstanceKind { Human, Bot, Guest }
 
 /// <summary>
 /// What this copy of the game is in co-op, and where it keeps its files. Mark plays in his own
@@ -14,6 +16,12 @@ public enum InstanceKind { Human, Bot }
 /// a co-op run. A copy that runs with Steam is always the human copy, whatever its command line
 /// says, so a stray <c>--sts2bot=1</c> in Steam's launch options can't turn Mark's own game into
 /// a bot copy.
+///
+/// A third kind is the guest copy: a friend's own game on another computer, started with
+/// <c>--spiremind-host=&lt;address&gt;</c>, that joins the host's lobby (docs/coop-guest.md). It
+/// runs no brain, no bridge and no bot copies and never touches the folders below. Only that
+/// launch option makes one, and never in a copy that hosts (<c>--fastmp host...</c>), so the
+/// host's own game cannot turn into a guest.
 /// <list type="bullet">
 /// <item><see cref="ConfigDir"/> holds this copy's config.json, transcripts and autostart flag.
 /// <see cref="SharedConfigDir"/> (<c>~/.config/spiremind</c>) holds what every copy shares:
@@ -57,11 +65,21 @@ public sealed record InstanceRole
     /// <summary>Problems found by <see cref="Detect"/>, one sentence each, for the log.</summary>
     public IReadOnlyList<string> Warnings { get; init; } = [];
 
+    /// <summary>The launch options of a guest copy; null in any other copy.</summary>
+    public GuestArgs? Guest { get; init; }
+
     public bool IsBot => Kind == InstanceKind.Bot;
 
-    /// <summary>"bot-17773" for a bot copy, "main" for the human copy. Names this copy's
-    /// in-flight request in spend.json.</summary>
-    public string InstanceId => IsBot ? $"bot-{Port}" : "main";
+    /// <summary>True for a friend's game that joins the host's lobby from another computer.
+    /// Such a copy starts nothing of the mod but the join and the names.</summary>
+    public bool IsGuest => Kind == InstanceKind.Guest;
+
+    /// <summary>"bot-17773" for a bot copy, "main" for the human copy, "guest" for a guest
+    /// copy. Names this copy's in-flight request in spend.json (a guest copy has none).</summary>
+    public string InstanceId => IsBot ? $"bot-{Port}" : IsGuest ? "guest" : "main";
+
+    /// <summary>Why no brain ever plays in a guest copy.</summary>
+    public const string GuestLine = "This copy is a guest in someone else's game: no brain runs here.";
 
     /// <summary>Where this copy keeps its run journal under the notes root. The notes tools
     /// still call it runs/current.md (see <see cref="NotesOptions.JournalFile"/>).</summary>
@@ -107,6 +125,23 @@ public sealed record InstanceRole
             warnings.Add($"{BotArg}=1 is on the command line, but {why}, so the flag is ignored and this copy runs as the human copy. " +
                          "A bot copy is started without Steam (--force-steam=off).");
         }
+
+        // A guest copy: only by its own launch option, never a bot copy, never a copy that hosts.
+        GuestArgs? guest = null;
+        var asked = GuestArgs.Parse(args);
+        if (asked.Asked)
+        {
+            if (kind == InstanceKind.Bot)
+                warnings.Add($"--{GuestArgs.HostFlag} is on the command line of a bot copy and is ignored: a bot copy joins the lobby on its own machine.");
+            else if (asked.Hosting)
+                warnings.Add($"--{GuestArgs.HostFlag} (or another --{GuestArgs.OwnPrefix} option) is on the command line, but so is --{GuestArgs.FastMpFlag} for hosting, " +
+                             "so it is ignored and this copy runs as the human copy. A guest copy joins: --fastmp=join.");
+            else
+            {
+                kind = InstanceKind.Guest;
+                guest = asked;
+            }
+        }
         var shared = Path.Combine(home, ".config", "spiremind");
         var fallback = kind == InstanceKind.Bot ? Path.Combine(shared, $"bot-{port}") : shared;
 
@@ -138,6 +173,7 @@ public sealed record InstanceRole
             ConfigDir = configDir,
             SharedConfigDir = shared,
             Warnings = warnings,
+            Guest = guest,
         };
     }
 
@@ -151,14 +187,19 @@ public sealed record InstanceRole
     /// <param name="botsExist">This copy has found a bot copy on this machine; picks the line.</param>
     public string? BrainBlockedReason(bool inCoopRun, bool botsExist)
     {
+        if (IsGuest)
+            return GuestLine;
         if (IsBot || !inCoopRun)
             return null;
         return botsExist ? HumanCoopLine : HumanCoopNoBotsLine;
     }
 
     /// <summary>The role in one line for the log.</summary>
-    public override string ToString() =>
-        $"{(IsBot ? "bot copy" : "human copy")} {InstanceId} on port {Port}; config in {ConfigDir}; shared {SharedConfigDir}";
+    public override string ToString() => IsGuest
+        ? Guest is { CanDial: true } guest
+            ? $"guest copy; joins {guest.Address}:{guest.Port} as player {guest.ClientId}; no brain, no bridge, no bot copies, no files"
+            : $"guest copy; NOT joining, the launch options have {Guest?.Problems.Count ?? 0} problem(s); no brain, no bridge, no bot copies, no files"
+        : $"{(IsBot ? "bot copy" : "human copy")} {InstanceId} on port {Port}; config in {ConfigDir}; shared {SharedConfigDir}";
 
     // Why the bot flag can't count (this copy runs with Steam, or that can't be told), or null
     // when it can.
