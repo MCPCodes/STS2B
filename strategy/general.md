@@ -291,7 +291,7 @@ Rules 2.6 and 2.7 say when to commit. This is how to run it, with the plan writt
     - Twin Strike and Bludgeon also measure the same (HP +3.1): at Strength 4 Twin Strike deals 2 x (5 + 4) = 18 per energy, Bludgeon (32 + 4) / 3 = 12 (with no Strength, 10 against 10.7). Take the multi-hit.
   - A package with payoffs but too few pieces wants pieces next, not more payoffs.
   - Relic choices: one that feeds a package of 2+ pieces beats a generic relic of similar strength.
-  - Measured values come from single simulated fights by a one-turn scripted player in random decks, not from whole runs: weigh them, don't follow them as rules. Their numbers for setup cards (marked (?)) are not to be trusted either way (judge those from your deck), and a payoff's number is what it does without its package.
+  - Measured values come from single simulated fights by a one-turn scripted player in random decks, not from whole runs: weigh them, don't follow them as rules. Cards marked (?) aren't shown either way (judge those from your deck), cards marked (low) are worth more than their row says, and a payoff's number is what it does without its package.
   - Co-op: a teammate's role in the party plan can count toward a package (a teammate who applies Vulnerable feeds your Vulnerable payoffs). Ask in party chat when unsure.
 - **Act 1: flexible power first, until a package reaches 3 pieces (or your character file's count).** Take cards that are good in any deck (front-loaded damage, efficient block, draw) over narrow payoffs.
   - An on-lane card wins a close call. A payoff whose package has 0-1 pieces does not.
