@@ -130,6 +130,19 @@ public class GuestArgsTests
     }
 
     [Theory]
+    [InlineData]
+    [InlineData("--fastmp=join", "--clientId=2000")]
+    [InlineData("--force-steam=off", "--clientId=1000", "--fastmp=join", "--sts2bot=1")]
+    public void No_environment_variable_makes_a_guest_of_a_line_that_does_not_host(params string[] args)
+    {
+        // Every variable set, whatever its name: a copy that joins (a bot copy's own line) must not turn into a guest over one.
+        var role = InstanceRole.Detect(args, 17773, _ => "192.168.1.23", Home);
+        Assert.NotEqual(InstanceKind.Guest, role.Kind);
+        Assert.False(role.IsGuest);
+        Assert.Null(role.Guest);
+    }
+
+    [Theory]
     [InlineData("host_standard")]
     [InlineData("host")]
     [InlineData("host_custom")]

@@ -28,10 +28,13 @@ namespace SpireMind.Game.Coop;
 /// <item>The popups. The game's "Disconnected" popup gets one more line: where this copy
 /// dialed and what to do (<see cref="GuestAdvice"/>). When the launch options can't be used,
 /// one popup on the main menu says what is wrong, and nothing is dialed.</item>
-/// <item>The guest's own saved co-op run. With <c>--fastmp</c> set, Load in the Multiplayer
-/// menu looks for the <c>--clientId</c> player in the save, does not find it in a run the guest
-/// hosted over Steam, and renames that save to ".corrupt". A prefix keeps Load from running
-/// while the option is set and says why.</item>
+/// <item>The guest's own saved co-op run. With <c>--fastmp</c> set the game reads a saved
+/// co-op run as the <c>--clientId</c> player, does not find that player in a run the guest
+/// hosted over Steam, and renames the save to ".corrupt". Load in the Multiplayer menu does
+/// that, and so does BaseLib, which reads the save the same way every time the Multiplayer
+/// menu asks whether there is one: with <c>--fastmp=join</c> that is the first main menu,
+/// with no button pressed. Two prefixes: the rename itself never runs while the option is
+/// set, and Load does nothing but say why.</item>
 /// </list>
 /// Every entry point catches, logs one line starting with "guest:" and leaves the game as it
 /// is. The patches are applied by hand, here only, so the host's copy and the bot copies run
@@ -57,6 +60,10 @@ internal static class GuestMode
     private static bool _popupFailed;
     private static bool _problemsFailed;
     private static bool _loadFailed;
+    private static bool _saveGuardFailed;
+
+    /// <summary>The rename of the guest's own saved co-op run was kept from running at least once; said once in the log.</summary>
+    private static bool _saveKeptLogged;
 
     /// <summary>Load was pressed and kept from running: the frame tick owes the player the popup that says why.</summary>
     private static bool _loadNoteDue;
@@ -102,9 +109,12 @@ internal static class GuestMode
             CoopNames.StartGuest(args.Name ?? ownName, args.HostName);
             harmony.CreateClassProcessor(typeof(CoopNamePatch)).Patch();
         });
+        // First: with --fastmp=join the very first main menu opens the Multiplayer menu, and
+        // that is when the saved run is at risk.
+        Part("the guard that keeps this player's own saved co-op run from being renamed", () => PatchSaveRename(harmony));
         Part("the join to the host's address", () => PatchJoin(harmony));
         Part("the line on the game's network error popup", () => PatchPopup(harmony));
-        Part("the guard on this player's own saved co-op run", () => PatchLoad(harmony));
+        Part("the guard on Load in the Multiplayer menu", () => PatchLoad(harmony));
         Part("the frame tick", () =>
         {
             var tree = (SceneTree)Engine.GetMainLoop();
@@ -256,6 +266,54 @@ internal static class GuestMode
 
     // ---------- the guest's own saved co-op run ----------
 
+    private static void PatchSaveRename(Harmony harmony)
+    {
+        // The one place the game sets a saved co-op run aside as broken; its only caller is
+        // RunSaveManager.LoadAndCanonicalizeMultiplayerRunSave. Recheck after a game update.
+        var rename = AccessTools.DeclaredMethod(typeof(RunSaveManager), nameof(RunSaveManager.RenameBrokenMultiplayerRunSave), [typeof(ReadSaveStatus)])
+            ?? throw new MissingMethodException(nameof(RunSaveManager), nameof(RunSaveManager.RenameBrokenMultiplayerRunSave));
+        harmony.Patch(rename, prefix: new HarmonyMethod(AccessTools.DeclaredMethod(typeof(GuestMode), nameof(BeforeSaveRename))));
+        ModEntry.Log("guest: harmony: this player's own saved co-op run can't be renamed to .corrupt while --fastmp is set");
+    }
+
+    /// <summary>
+    /// Prefix on RunSaveManager.RenameBrokenMultiplayerRunSave. The game calls it when a saved
+    /// co-op run does not hold the player it was read for. While <c>--fastmp</c> is on the
+    /// command line that player is the <c>--clientId</c> one, who is in no run this player
+    /// hosted over Steam, so a sound save would be renamed to ".corrupt". Not only Load asks:
+    /// BaseLib reads the save the same way each time the Multiplayer menu looks whether one
+    /// exists, which with <c>--fastmp=join</c> is at the first main menu. In a guest copy the
+    /// rename therefore never runs while the option is set: the file stays where it is, and
+    /// the game goes on as after a failed read. Without the option the game's own rename runs.
+    /// </summary>
+    private static bool BeforeSaveRename()
+    {
+        var risky = true;
+        try
+        {
+            if (_args is null) return true;
+            risky = CommandLineHelper.HasArg(GuestArgs.FastMpFlag);
+            if (!risky) return true;
+            if (!_saveKeptLogged)
+            {
+                _saveKeptLogged = true;
+                ModEntry.Log("guest: this player has a saved co-op run of their own, and the game read it as the --clientId player and was about to rename it to .corrupt; " +
+                             "the rename was not run and the save is as it was (the 'validation failed' error above it in the log is that read, and comes again each time the Multiplayer menu looks)");
+            }
+            return false;
+        }
+        catch (Exception ex)
+        {
+            if (!_saveGuardFailed)
+            {
+                _saveGuardFailed = true;
+                ModEntry.LogError($"guest: guarding this player's own saved co-op run failed: {ex.Message}");
+            }
+            // With the option set, not renaming is the safe side.
+            return !risky;
+        }
+    }
+
     private static void PatchLoad(Harmony harmony)
     {
         // Private: the Multiplayer menu's Load button. Recheck after a game update.
@@ -269,7 +327,8 @@ internal static class GuestMode
     /// game reads a saved co-op run as the <c>--clientId</c> player. A run this player hosted
     /// over Steam does not hold that id, so the game takes the save for broken and renames it.
     /// In a guest copy Load therefore does nothing but say so; without the option the game's
-    /// own Load runs.
+    /// own Load runs. (<see cref="BeforeSaveRename"/> already keeps the file from being
+    /// renamed; this keeps the game from calling a sound save broken and greying out Load.)
     /// </summary>
     private static bool BeforeLoad()
     {

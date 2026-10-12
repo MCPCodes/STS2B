@@ -54,10 +54,17 @@ public static class ModEntry
     {
         // A friend's game that joins the host's lobby from another computer takes its own short
         // path (docs/coop-guest.md): nothing below runs there. Should the check itself fail,
-        // the copy starts as it did before guests existed.
+        // the copy starts as it did before guests existed, unless it loaded the guest package:
+        // on a guest's computer the mod then does nothing at all.
         var asGuest = false;
         try { asGuest = StartedAsGuest(); }
-        catch (Exception ex) { LogError($"role: the guest check failed, so this copy starts as the host's or a bot's: {ex.Message}"); }
+        catch (Exception ex)
+        {
+            asGuest = IsGuestPackage();
+            LogError(asGuest
+                ? $"role: the guest check failed and this is the guest package, so the mod does nothing in this session: {ex.Message}"
+                : $"role: the guest check failed, so this copy starts as the host's or a bot's: {ex.Message}");
+        }
         if (asGuest) return;
 
         try
