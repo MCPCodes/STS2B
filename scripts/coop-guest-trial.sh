@@ -95,6 +95,12 @@ case "$log_file" in
 esac
 log_dir="$(dirname "$log_file")"
 console_log="$log_file.out"
+# The log path is the one place a caller can aim what this script and the copy write. Keep it
+# out of the game's data (your own saves are under it), the game itself and the brain's folder.
+case "$log_file" in
+  "$STS2_USER_DIR"/* | "$GAME_DIR"/* | "$HOME/.config/spiremind"/*)
+    die "--log must not be inside the game's folders or ~/.config/spiremind; use a folder of its own, like ~/sts2bot" ;;
+esac
 
 # ---------------------------------------------------------------------------------------------
 step "1. The address"
