@@ -1813,6 +1813,26 @@ public class ApiBrainTests
     }
 
     [Fact]
+    public async Task A_refused_planning_request_hands_its_plan_note_to_the_fresh_opening()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { TurnPlanNote = true }; // effort high, as in elite rooms: no room switch
+        rig.Host.Handler = ActsReturn(TurnSnap("Elite", 1, 1), TurnSnap("Elite", 2, 2), TurnSnap("Elite", 2, 2));
+        rig.Api.Then(Act("toolu_1")).Then(Act("toolu_2")).Then(Reply("refusal", null)).Then(Act("toolu_3"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(5, rig.Api.Count);
+        // Turn 2's planning request is refused; the fresh conversation's opening carries turn 2's note.
+        Assert.Equal(1, PlanNotes(rig.Api[2]));
+        var opening = Assert.Single(rig.Api[3]["messages"]!.AsArray())!["content"]!.AsArray();
+        Assert.StartsWith(ApiBrain.Refreshed, BlockText(opening[0]));
+        Assert.Equal(1, PlanNotes(rig.Api[3]));
+        Assert.Equal(0, PlanNotes(rig.Api[4]));
+    }
+
+    [Fact]
     public async Task One_refusal_starts_a_fresh_conversation_and_play_goes_on()
     {
         using var rig = new Rig();

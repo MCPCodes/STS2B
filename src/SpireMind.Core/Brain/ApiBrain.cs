@@ -670,9 +670,6 @@ public sealed class ApiBrain : IPlayBrain
             return;
         }
         var receivedAt = _clock();
-        // A turn plan this request carried has its answer; one it didn't send yet goes in the next.
-        _planPending = false;
-        _planSent = false;
 
         var billedModel = response.Model ?? model;
         var cost = response.Cost(model);
@@ -709,6 +706,10 @@ public sealed class ApiBrain : IPlayBrain
         }
 
         _refusalsInRow = 0;
+        // A turn plan this request carried has its answer; one it didn't send yet goes in the next.
+        // A refused or overflowing reply (above) is thrown away, so its plan goes in the fresh opening.
+        _planPending = false;
+        _planSent = false;
 
         // Counted across fresh conversations too: a refresh doesn't make the next reply fit.
         if (stopReason == "max_tokens")

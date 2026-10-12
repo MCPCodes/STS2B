@@ -496,10 +496,15 @@ public sealed record BrainSettings
                     break;
 
                 case "turn_plan_note":
+                    // JSON null, like a left-out key, means off.
                     if (node is JsonValue n && n.TryGetValue<bool>(out var note))
                         s = s with { TurnPlanNote = note };
-                    else if (node is not null)
-                        warnings.Add("turn_plan_note must be true or false; using false.");
+                    else
+                    {
+                        if (node is not null)
+                            warnings.Add("turn_plan_note must be true or false; using false.");
+                        s = s with { TurnPlanNote = false };
+                    }
                     break;
 
                 case "turn_plan_effort":
