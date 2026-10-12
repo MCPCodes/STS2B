@@ -183,6 +183,13 @@ public sealed record BrainSettings
     /// <summary>Start the brain by itself when a run is in progress. /start sets it, /stop clears it.</summary>
     public bool Autostart { get; init; }
 
+    /// <summary>Ask the API for its fast mode (/fast on): every request of the API brain carries
+    /// <c>"speed": "fast"</c> while the model takes it (<see cref="ModelPrices.SupportsFast"/>),
+    /// for up to 2.5 times the output speed at twice the price. Unlike every other setting it is
+    /// never read from config.json and never saved: it is off whenever the game starts and lasts
+    /// until /fast off or the game closes. See docs/brain.md, Fast mode.</summary>
+    public bool Fast { get; init; }
+
     /// <summary>The Claude Code binary for the subscription fallback, when it isn't in one of
     /// the usual places. Null when not configured.</summary>
     public string? ClaudePath { get; init; }
@@ -275,6 +282,7 @@ public sealed record BrainSettings
     /// claude_path and turn_plan_effort are removed when null, and turn_plan_note when false. A config.json that can't be parsed is first moved aside to
     /// config.json.bak so a hand edit with a typo isn't lost. Throws <see cref="IOException"/>
     /// or <see cref="UnauthorizedAccessException"/> when the file can't be written.
+    /// <see cref="Fast"/> is never written, by either kind of copy: fast mode is off at every start.
     ///
     /// An instance writes only what the chat commands change (model, effort, elite_effort,
     /// boss_effort and autostart) into its own config.json, keeping every other key there, and
@@ -420,6 +428,8 @@ public sealed record BrainSettings
         if (IsInstance)
             sb.Append(CultureInfo.InvariantCulture, $"SharedConfigDir = {SharedConfigDir}, ");
         sb.Append(CultureInfo.InvariantCulture, $"Model = {Model}, Effort = {Effort}, ");
+        if (Fast)
+            sb.Append("Fast = True, ");
         sb.Append(CultureInfo.InvariantCulture, $"EliteEffort = {EliteEffort ?? "default"}, BossEffort = {BossEffort ?? "default"}, ");
         sb.Append(CultureInfo.InvariantCulture, $"TurnPlanNote = {TurnPlanNote}, TurnPlanEffort = {TurnPlanEffort ?? "off"}, ");
         sb.Append(CultureInfo.InvariantCulture, $"MonthlyBudgetUsd = {MonthlyBudgetUsd}, MaxTokens = {MaxTokens?.ToString(CultureInfo.InvariantCulture) ?? "by effort"}, Autostart = {Autostart}, ");
@@ -543,6 +553,11 @@ public sealed record BrainSettings
 
                 case "claude_path":
                     s = s with { ClaudePath = Text(node, name, warnings) is { } claude ? ConfigFiles.ExpandHome(claude) : null };
+                    break;
+
+                case "fast":
+                    // Never a setting: fast mode costs twice as much, so it is off at every start.
+                    warnings.Add($"'fast' in {label} is ignored: fast mode is off whenever the game starts; type /fast on in the chat.");
                     break;
 
                 default:

@@ -13,7 +13,7 @@ Built, never run live:
 - It joins by itself and keeps trying, picks the asked character, readies, and readies again if anything takes that back. After a run it returns to its menu and joins your next lobby.
 - Its brain starts by itself once the run is in progress. Your own copy's brain stays off while bots exist or the run is co-op.
 - It follows your map, shared event and chest votes, can Mend you, and sees the team on every screen (last section).
-- Your lines and `/start`, `/stop`, `/pause`, `/resume`, `/budget`, `/model`, `/effort` reach the bots. Their lines come into your chat log and show as speech bubbles over their figures. Nameplates read your name and the bot's character.
+- Your lines and `/start`, `/stop`, `/pause`, `/resume`, `/budget`, `/model`, `/effort`, `/fast` reach the bots. `/fast on` (answers up to 2.5 times faster at twice the price) only reaches the bots running when you type it and is never saved, so type it again after adding or relaunching a bot. Their lines come into your chat log and show as speech bubbles over their figures. Nameplates read your name and the bot's character.
 - A bot that is stuck in a way only you can fix says so in your chat: "Silent: Can't join your lobby, and trying again won't fix it: ...".
 - `/botstop` asks every copy your game started to leave the lobby or run and quit. Quitting your game does the same, and a copy also quits by itself when your game is gone.
 

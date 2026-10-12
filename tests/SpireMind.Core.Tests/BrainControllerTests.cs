@@ -917,6 +917,207 @@ public class BrainControllerTests
         Assert.Contains("/budget shows the API spend and what's playing", help);
         Assert.Contains("/model [opus|sonnet|haiku|fable] shows or switches the model", help);
         Assert.Contains("/effort [low|medium|high|xhigh|max] or elite|boss [level|same|default] shows or sets the thinking effort", help);
+        Assert.Contains("/fast [on|off] shows or switches fast mode (answers up to 2.5x faster at twice the price)", help);
+    }
+
+    // ---- /fast ----
+
+    private const string FastPitch = "answers come up to 2.5x faster at twice the price ($8 / $40 per million tokens on Opus 5.5)";
+    private const string FastOn = "Fast mode on: " + FastPitch + ". /fast off to go back.";
+    private const string FastOnly = "Fast mode works on Opus 5.5, Opus 5 and Opus 4.8 only";
+
+    [Fact]
+    public async Task Fast_mode_is_off_at_the_start_and_shows_switches_and_is_never_saved()
+    {
+        using var rig = new Rig();
+        // Whatever the settings file's loader hands over, fast mode starts off.
+        rig.Config = rig.Config with { Fast = true };
+        await rig.Init();
+        Assert.False(rig.Controller.Settings.Fast);
+
+        Assert.Equal("Fast mode is off. /fast on makes " + FastPitch + ".", rig.Post("/fast"));
+        Assert.Equal(FastOn, rig.Post("/fast on"));
+        Assert.True(rig.Controller.Settings.Fast);
+        Assert.Equal("Fast mode is on: " + FastPitch + ". /fast off to go back.", rig.Post("/fast"));
+        Assert.Equal("Fast mode is on already.", rig.Post("/fast ON"));
+        Assert.Equal("Fast mode off: back to normal speed and price.", rig.Post("/fast  Off "));
+        Assert.False(rig.Controller.Settings.Fast);
+        Assert.Equal("Fast mode is off already.", rig.Post("/fast off"));
+        Assert.Equal("\"maybe\" isn't on or off. /fast shows whether fast mode is on; /fast on and /fast off switch it.", rig.Post("/fast maybe"));
+        Assert.False(rig.Controller.Settings.Fast);
+
+        // No form of it writes config.json.
+        Assert.Empty(rig.Saved);
+        Assert.Contains("brain: fast mode switched on by Mark", rig.Logged);
+        Assert.Contains("brain: fast mode switched off by Mark", rig.Logged);
+    }
+
+    [Fact]
+    public async Task Fast_mode_reaches_the_running_brain_through_the_settings_it_reads()
+    {
+        using var rig = new Rig();
+        await rig.Init();
+        rig.Post("/start");
+        var saves = rig.Saved.Length;
+
+        Assert.Equal(FastOn, rig.Post("/fast on"));
+
+        // The same brain plays on (it reads the controller's settings before every request).
+        var brain = Assert.Single(rig.ApiBrains);
+        Assert.True(brain.IsRunning);
+        Assert.Equal(1, brain.Starts);
+        Assert.True(rig.Controller.Settings.Fast);
+        Assert.Equal(BrainKind.Api, rig.Controller.Playing);
+        Assert.Equal(saves, rig.Saved.Length);
+    }
+
+    [Theory]
+    [InlineData("sonnet", "Sonnet 5.5")]
+    [InlineData("haiku", "Haiku 5.5")]
+    [InlineData("fable", "Fable 5.1")]
+    [InlineData("claude-opus-4-7", "Opus 4.7")]
+    public async Task Fast_mode_stays_off_on_a_model_that_does_not_take_it(string model, string name)
+    {
+        using var rig = new Rig();
+        rig.Config = rig.Config with { Model = model };
+        await rig.Init();
+
+        Assert.Equal($"{FastOnly}, and the model is {name}. It stays off.", rig.Post("/fast on"));
+        Assert.False(rig.Controller.Settings.Fast);
+        Assert.Equal($"Fast mode is off. {FastOnly}, and the model is {name}.", rig.Post("/fast"));
+        Assert.Equal("Fast mode is off already.", rig.Post("/fast off"));
+    }
+
+    [Theory]
+    [InlineData("claude-opus-5-5-20261001", "$8 / $40 per million tokens on Opus 5.5")]
+    [InlineData("claude-opus-5", "$10 / $50 per million tokens on Opus 5")]
+    [InlineData("claude-opus-4-8", "$10 / $50 per million tokens on Opus 4.8")]
+    public async Task Fast_mode_says_the_price_of_the_model_in_use(string model, string price)
+    {
+        using var rig = new Rig();
+        rig.Config = rig.Config with { Model = model };
+        await rig.Init();
+
+        Assert.Equal($"Fast mode on: answers come up to 2.5x faster at twice the price ({price}). /fast off to go back.", rig.Post("/fast on"));
+        Assert.True(rig.Controller.Settings.Fast);
+    }
+
+    [Fact]
+    public async Task A_model_change_to_one_that_does_not_take_fast_mode_switches_it_off_and_says_why()
+    {
+        using var rig = new Rig();
+        await rig.Init();
+        rig.Post("/start");
+        rig.Post("/fast on");
+
+        // A dated snapshot of the same model still takes it.
+        Assert.Equal("Model set to Opus 5.5. It applies from the next request. Fast mode stays on ($8 / $40 per million tokens).", rig.Post("/model claude-opus-5-5-20261001"));
+        Assert.True(rig.Controller.Settings.Fast);
+
+        Assert.Equal("Model set to Sonnet 5.5. It applies from the next request. Fast mode is off now: it works on Opus 5.5, Opus 5 and Opus 4.8 only.", rig.Post("/model sonnet"));
+        Assert.False(rig.Controller.Settings.Fast);
+        Assert.Equal("claude-sonnet-5-5", rig.Controller.Settings.Model);
+        Assert.Contains("brain: model set to claude-sonnet-5-5 by Mark; fast mode switched off, since it doesn't take it", rig.Logged);
+
+        // Back on a model that takes it, it stays off until it is asked for again.
+        Assert.Equal("Model set to Opus 5.5. It applies from the next request.", rig.Post("/model opus"));
+        Assert.False(rig.Controller.Settings.Fast);
+        Assert.Equal("Fast mode is off. /fast on makes " + FastPitch + ".", rig.Post("/fast"));
+    }
+
+    [Fact]
+    public async Task Fast_mode_lasts_through_the_commands_that_read_config_json_again_and_a_new_run()
+    {
+        using var rig = new Rig();
+        await rig.Init();
+        rig.Post("/fast on");
+
+        rig.Post("/effort max");
+        rig.Post("/effort boss xhigh");
+        rig.Post("/stop");
+        rig.Post("/start");
+        Assert.True(rig.Controller.Settings.Fast);
+        Assert.Equal("max", rig.Controller.Settings.Effort);
+
+        // A run starts: config.json and the key are read again, and it is still on.
+        await rig.Poll("combat");
+        Assert.True(rig.Controller.Settings.Fast);
+
+        // Off stays off the same way.
+        rig.Post("/fast off");
+        rig.Post("/effort low");
+        await rig.Poll("menu");
+        await rig.Poll("map");
+        Assert.False(rig.Controller.Settings.Fast);
+    }
+
+    [Fact]
+    public async Task A_config_json_edited_to_a_model_without_fast_mode_switches_it_off_with_a_line()
+    {
+        using var rig = new Rig();
+        await rig.Init();
+        rig.Post("/fast on");
+        rig.Config = rig.Config with { Model = "sonnet" }; // a hand edit of config.json
+        var mark = rig.Mark();
+
+        rig.Post("/effort low"); // reads config.json again
+
+        Assert.False(rig.Controller.Settings.Fast);
+        Assert.Equal("claude-sonnet-5-5", rig.Controller.Settings.Model);
+        Assert.Contains("Fast mode is off now: it works on Opus 5.5, Opus 5 and Opus 4.8 only, and the model is now Sonnet 5.5.", rig.LinesSince(mark));
+    }
+
+    [Fact]
+    public async Task The_api_turning_fast_mode_down_switches_the_setting_off()
+    {
+        using var rig = new Rig();
+        await rig.Init();
+        rig.Controller.FastDeclined(); // off already: nothing happens
+        Assert.DoesNotContain(rig.Logged, l => l.Contains("the API turned it down"));
+        rig.Post("/start");
+        rig.Post("/fast on");
+        var mark = rig.Mark();
+
+        rig.Controller.FastDeclined();
+
+        Assert.False(rig.Controller.Settings.Fast);
+        Assert.Single(rig.Logged, l => l == "brain: fast mode switched off, since the API turned it down");
+        Assert.Empty(rig.LinesSince(mark)); // the brain says why in the chat; the controller adds nothing
+        Assert.Equal("Fast mode is off. /fast on makes " + FastPitch + ".", rig.Post("/fast"));
+        Assert.True(Assert.Single(rig.ApiBrains).IsRunning);
+        // /fast on is a new try.
+        Assert.Equal(FastOn, rig.Post("/fast on"));
+        Assert.True(rig.Controller.Settings.Fast);
+    }
+
+    [Fact]
+    public async Task Budget_and_the_line_that_says_who_plays_mention_fast_mode_while_it_is_on()
+    {
+        using var rig = new Rig();
+        await rig.Init();
+        Assert.Contains("Opus 5.5, high effort.\n", rig.Post("/budget"));
+
+        rig.Post("/fast on");
+        Assert.Contains("Opus 5.5, high effort, fast mode.\n", rig.Post("/budget"));
+        Assert.Equal("Ironclad is playing on your API credit (Opus 5.5, high effort, fast mode, $0.00 of $200 spent this month). /stop to take over.", rig.Post("/start"));
+        rig.Post("/effort medium");
+        Assert.Contains("Opus 5.5, medium effort, high in elite and boss rooms, fast mode.\n", rig.Post("/budget"));
+
+        rig.Post("/fast off");
+        Assert.Contains("Opus 5.5, medium effort, high in elite and boss rooms.\n", rig.Post("/budget"));
+    }
+
+    [Fact]
+    public async Task Fast_mode_says_that_only_the_api_brain_uses_it_while_claude_code_plays()
+    {
+        using var rig = new Rig { Key = null };
+        await rig.Init();
+        await rig.Poll("combat");
+        rig.Post("/start");
+        Assert.Equal(BrainKind.Subscription, rig.Controller.Playing);
+
+        Assert.Equal(FastOn + " Only the API brain uses it, so Claude Code playing now isn't affected.", rig.Post("/fast on"));
+        Assert.True(rig.Controller.Settings.Fast);
     }
 
     [Theory]

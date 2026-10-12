@@ -215,6 +215,7 @@ public sealed class DevCoopTests : IDisposable
 
         Assert.Equal("(dev host) /model sonnet", chat.PostFromHuman("Mark", "/model sonnet").Reply);
         Assert.Equal("(dev host) /effort high", chat.PostFromHuman("Mark", "/effort high").Reply);
+        Assert.Equal("(dev host) /fast on", chat.PostFromHuman("Mark", "/fast on").Reply);
         Assert.Equal("(dev host) /start", chat.PostFromHuman("Mark", "/start").Reply);
         Assert.Equal("(dev host) /stop", chat.PostFromHuman("Mark", "/stop").Reply);
         Assert.Equal("(dev host) /budget", chat.PostFromHuman("Mark", "/budget").Reply);

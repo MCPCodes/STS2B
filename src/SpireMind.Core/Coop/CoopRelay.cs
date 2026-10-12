@@ -14,7 +14,7 @@ namespace SpireMind.Core.Coop;
 /// <summary>
 /// The human's side of co-op chat: lets Mark talk to the bot copies from his own window. It
 /// finds bot copies on localhost (GET /coop/info), sends them what he types and the commands
-/// that belong to them (/start, /pause, /model and the rest, answered with each bot's name in
+/// that belong to them (/start, /pause, /model, /fast and the rest, answered with each bot's name in
 /// front), reads their chat logs (GET /chat?since=) into his log and onto their players as
 /// speech bubbles (<see cref="ICoopBots.ShowLine"/>) with a thought cloud while a bot decides,
 /// and passes each bot's lines to the other bots as party chat. It adds /bots, /bot add,
@@ -41,7 +41,7 @@ public sealed partial class CoopRelay : IDisposable
     /// <summary>The commands typed in the human's window that go to the bot copies in co-op
     /// while any exist (and, in co-op or not, any of them or /help with a linked bot's name).</summary>
     public static IReadOnlyList<string> ForwardedCommands { get; } =
-        ["start", "stop", "pause", "resume", "budget", "model", "effort"];
+        ["start", "stop", "pause", "resume", "budget", "model", "effort", "fast"];
 
     /// <summary>What /bot add accepts, with or without "The".</summary>
     public static IReadOnlyList<string> CharacterChoices { get; } =
@@ -49,7 +49,7 @@ public sealed partial class CoopRelay : IDisposable
 
     /// <summary>The end of /help while bot copies exist.</summary>
     public const string CoopHelpNote =
-        "In co-op, /start, /stop, /pause, /resume, /budget, /model and /effort go to every bot; put a bot's name first to send to one (/model Silent sonnet, /help Silent).";
+        "In co-op, /start, /stop, /pause, /resume, /budget, /model, /effort and /fast go to every bot; put a bot's name first to send to one (/model Silent sonnet, /help Silent).";
 
     private const string NotAnsweringYet = "No bot copy is answering yet; try again in a moment.";
     private const string BotUsage = "Use /bot add [Ironclad|Silent|Defect|Regent|Necrobinder|Random] or /bot stop [name].";

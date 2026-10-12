@@ -68,9 +68,17 @@ public sealed class ClaudeResponse
         ["content"] = Content.DeepClone(),
     };
 
+    /// <summary>The speed the response says it ran at, <c>usage.speed</c>: "fast" or "standard".
+    /// Null when the usage doesn't say.</summary>
+    public string? Speed => ModelPrices.SpeedOf(UsageJson);
+
     /// <summary>The cost of this response, priced as <see cref="Model"/> when the response names
-    /// one, else as <paramref name="requestedModel"/>.</summary>
-    public UsageCost Cost(string requestedModel) => ModelPrices.Cost(Model ?? requestedModel, UsageJson);
+    /// one, else as <paramref name="requestedModel"/>, and at the speed its usage reports
+    /// (<see cref="Speed"/>): the fast-mode rates for "fast", the standard ones for "standard".
+    /// Only when the usage names no speed at all does <paramref name="requestedFast"/> decide,
+    /// so a fast request whose response leaves the field out is not counted at half its price.</summary>
+    public UsageCost Cost(string requestedModel, bool requestedFast = false) =>
+        ModelPrices.Cost(Model ?? requestedModel, Usage, Speed is null ? requestedFast : ModelPrices.IsFast(UsageJson));
 
     private static string? Str(JsonNode? node) => node is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
 }

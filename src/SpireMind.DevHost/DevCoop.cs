@@ -14,7 +14,7 @@ namespace SpireMind.DevHost;
 public static class DevCoop
 {
     /// <summary>The commands a bot copy's brain owns, which the fake bot answers with a stub line.</summary>
-    public static IReadOnlyList<string> StubCommands { get; } = ["start", "stop", "budget", "model", "effort"];
+    public static IReadOnlyList<string> StubCommands { get; } = ["start", "stop", "budget", "model", "effort", "fast"];
 
     /// <summary>How often the echo looks for messages to answer.</summary>
     public static readonly TimeSpan EchoInterval = TimeSpan.FromMilliseconds(200);
@@ -92,13 +92,13 @@ public static class DevCoop
         return 0;
     }
 
-    /// <summary>Adds /start, /stop, /budget, /model and /effort, each answering
+    /// <summary>Adds /start, /stop, /budget, /model, /effort and /fast, each answering
     /// "(dev host) /name args", since the dev host has no brain.</summary>
     public static void AddStubCommands(ChatHub chat)
     {
         foreach (var name in StubCommands)
         {
-            var usage = name switch { "model" => "[name]", "effort" => "[level]", _ => "" };
+            var usage = name switch { "model" => "[name]", "effort" => "[level]", "fast" => "[on|off]", _ => "" };
             chat.AddCommand(name, usage, "a stub: the dev host has no brain",
                 (_, args) => args.Length > 0 ? $"(dev host) /{name} {args}" : $"(dev host) /{name}");
         }

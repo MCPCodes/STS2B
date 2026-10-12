@@ -2405,6 +2405,692 @@ public class ApiBrainTests
         Assert.Equal(34, payload["next"]!["state"]!["enemies"]![0]!["hp"]!.GetValue<int>());
     }
 
+    // ---- Fast mode (/fast) ----
+
+    private static readonly string[] FastOnly = [ModelPrices.FastModeBeta];
+
+    private static string? Speed(JsonObject request) => request["speed"]?.GetValue<string>();
+
+    private static string[] Betas(JsonObject request) =>
+        request[ClaudeClient.BetasField] is JsonArray betas ? betas.Select(b => b!.GetValue<string>()).ToArray() : [];
+
+    /// <summary>The request as it would have been built with fast mode off: no speed field, no fast beta.</summary>
+    private static string WithoutFast(JsonObject request)
+    {
+        var copy = (JsonObject)request.DeepClone();
+        copy.Remove("speed");
+        if (copy[ClaudeClient.BetasField] is JsonArray betas)
+        {
+            var kept = betas.Select(b => b!.GetValue<string>()).Where(b => b != ModelPrices.FastModeBeta).ToArray();
+            copy.Remove(ClaudeClient.BetasField);
+            if (kept.Length > 0)
+                copy[ClaudeClient.BetasField] = new JsonArray(kept.Select(b => (JsonNode)b!).ToArray());
+        }
+        return copy.ToJsonString();
+    }
+
+    private static JsonObject FastUsage(int input = 100, int output = 50, int cacheRead = 0, int cacheWrite = 0, string? speed = "fast")
+    {
+        var usage = Usage(input, output, cacheRead, cacheWrite);
+        if (speed is not null)
+            usage["speed"] = speed;
+        return usage;
+    }
+
+    private static ClaudeApiException RateLimit() =>
+        new(ClaudeErrorKind.RateLimited, 429, "rate_limit_error", "This request would exceed your organization's fast mode rate limit", "req_429", attempts: 5);
+
+    [Fact]
+    public async Task With_fast_mode_off_the_request_is_what_it_always_was()
+    {
+        using var off = new Rig();
+        using var on = new Rig();
+        on.Settings = on.Settings with { Fast = true };
+
+        off.Brain.Start();
+        on.Brain.Start();
+        await off.Api.Exhausted.Task.WaitAsync(Guard);
+        await on.Api.Exhausted.Task.WaitAsync(Guard);
+
+        // Off (the default): the fields the brain has always sent, in their order, and nothing about speed.
+        Assert.False(new BrainSettings().Fast);
+        Assert.Equal(["model", "max_tokens", "system", "tools", "messages", "cache_control", "output_config", "thinking"], off.Api[0].Select(p => p.Key));
+        Assert.DoesNotContain("speed", off.Api[0].ToJsonString());
+        Assert.DoesNotContain(ModelPrices.FastModeBeta, off.Api[0].ToJsonString());
+        Assert.DoesNotContain(ClaudeClient.BetasField, off.Api[0].ToJsonString());
+
+        // On: the same request to the byte, plus the speed field and the beta flag.
+        Assert.Equal("fast", Speed(on.Api[0]));
+        Assert.Equal(FastOnly, Betas(on.Api[0]));
+        Assert.Equal(off.Api[0].ToJsonString(), WithoutFast(on.Api[0]));
+        Assert.Equal(off.Api[0].Select(p => p.Key).Concat(["speed", ClaudeClient.BetasField]), on.Api[0].Select(p => p.Key));
+    }
+
+    [Fact]
+    public async Task Fast_mode_goes_on_every_request_and_joins_the_betas_already_sent()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Effort = "medium", Fast = true };
+        // The elite room starts a fresh conversation; the map lowers effort with an effort message, which has a beta of its own.
+        rig.Host.Handler = ActsReturn(RoomSnap("combat", "Elite"), Snap("map", true), Snap("map", true));
+        rig.Api
+            .Then(Reply("tool_use", FastUsage(), ToolUse("toolu_1", "act", new JsonObject { ["action_id"] = "map:0" })))
+            .Then(Reply("tool_use", FastUsage(), ToolUse("toolu_2", "act", new JsonObject { ["action_id"] = "map:0" })))
+            .Then(Reply("tool_use", FastUsage(), ToolUse("toolu_3", "act", new JsonObject { ["action_id"] = "map:0" })));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(4, rig.Api.Count);
+        Assert.All(Enumerable.Range(0, 4), i => Assert.Equal("fast", Speed(rig.Api[i])));
+        Assert.Equal(FastOnly, Betas(rig.Api[0]));
+        Assert.Equal(FastOnly, Betas(rig.Api[1]));
+        // With an effort message in the conversation both betas go, the effort one first as before.
+        Assert.Equal("system", Roles(rig.Api[2])[^2]);
+        Assert.Equal([ApiBrain.PerMessageEffortBeta, ModelPrices.FastModeBeta], Betas(rig.Api[2]));
+        Assert.Equal([ApiBrain.PerMessageEffortBeta, ModelPrices.FastModeBeta], Betas(rig.Api[3]));
+        Assert.Empty(rig.Announced);
+        Assert.Equal(0, rig.FastDeclinedCalls);
+    }
+
+    [Theory]
+    [InlineData("claude-opus-5-5", true)]
+    [InlineData("opus", true)]
+    [InlineData("claude-opus-5-5-20261001", true)]
+    [InlineData("claude-opus-5-5[1m]", true)]
+    [InlineData("claude-opus-5", true)]
+    [InlineData("claude-opus-5-20260601", true)]
+    [InlineData("claude-opus-4-8", true)]
+    [InlineData("claude-opus-4-8-20260801", true)]
+    [InlineData("claude-opus-4-7", false)]
+    [InlineData("claude-opus-4-6", false)]
+    [InlineData("claude-opus-4-80", false)]
+    [InlineData("claude-opus-5-55", false)]
+    [InlineData("claude-opus-6", false)]
+    [InlineData("claude-sonnet-5-5", false)]
+    [InlineData("sonnet", false)]
+    [InlineData("claude-sonnet-5", false)]
+    [InlineData("claude-haiku-5-5", false)]
+    [InlineData("haiku", false)]
+    [InlineData("claude-fable-5-1", false)]
+    [InlineData("fable", false)]
+    [InlineData("claude-fable-5", false)]
+    [InlineData("claude-mythos-5", false)]
+    public async Task Only_the_models_that_take_fast_mode_are_asked_for_it(string model, bool takes)
+    {
+        Assert.Equal(takes, ModelPrices.SupportsFast(model));
+
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Model = model, Fast = true };
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(takes ? "fast" : null, Speed(rig.Api[0]));
+        Assert.Equal(takes ? FastOnly : [], Betas(rig.Api[0]));
+        Assert.Equal(takes, rig.Api[0].ToJsonString().Contains("speed"));
+    }
+
+    [Fact]
+    public void An_empty_model_does_not_take_fast_mode_by_name()
+    {
+        // No model given means the default one, which is asked through its id.
+        Assert.False(ModelPrices.SupportsFast(null));
+        Assert.False(ModelPrices.SupportsFast(" "));
+        Assert.True(ModelPrices.SupportsFast(BrainSettings.DefaultModel));
+    }
+
+    [Fact]
+    public async Task Switching_fast_mode_keeps_the_conversation_and_changes_only_the_speed()
+    {
+        using var rig = new Rig { UseTranscript = true };
+        rig.Api
+            .Then(() =>
+            {
+                rig.Settings = rig.Settings with { Fast = true }; // /fast on while the first request is out
+                return Reply("tool_use", Usage(), ToolUse("toolu_1", "get_state"));
+            })
+            .Then(Reply("tool_use", FastUsage(), ToolUse("toolu_2", "get_state")))
+            .Then(() =>
+            {
+                rig.Settings = rig.Settings with { Fast = false }; // /fast off
+                return Reply("tool_use", FastUsage(), ToolUse("toolu_3", "get_state"));
+            })
+            .Then(Reply("tool_use", Usage(), ToolUse("toolu_4", "get_state")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal([null, "fast", "fast", null, null], Enumerable.Range(0, 5).Select(i => Speed(rig.Api[i])));
+        // One conversation all the way: each request holds the last one's messages and two more.
+        Assert.All(Enumerable.Range(0, 5), i => Assert.Equal(2 * i + 1, rig.Api[i]["messages"]!.AsArray().Count));
+        for (var i = 1; i < 5; i++)
+            for (var m = 0; m < 2 * i - 1; m++)
+                Assert.Equal(rig.Api[i - 1]["messages"]![m]!.ToJsonString(), rig.Api[i]["messages"]![m]!.ToJsonString());
+        // Nothing but the speed differs: the system text, tools, model, effort and max_tokens are the same.
+        foreach (var field in new[] { "model", "max_tokens", "system", "tools", "cache_control", "output_config", "thinking" })
+            Assert.All(Enumerable.Range(1, 4), i => Assert.Equal(rig.Api[0][field]!.ToJsonString(), rig.Api[i][field]!.ToJsonString()));
+        Assert.DoesNotContain(rig.Logged, l => l.Contains("fresh conversation") || l.Contains("model or effort changed"));
+        Assert.Empty(rig.Announced);
+
+        // The transcript says the speed of each request next to its effort.
+        var lines = TranscriptLines(rig.Dir);
+        Assert.Equal(["standard", "fast", "fast", "standard"], lines.Select(l => l["speed"]!.GetValue<string>()));
+        Assert.All(lines, l => Assert.Equal("high", l["effort"]!.GetValue<string>()));
+        Assert.Equal("fast", lines[1]["usage"]!["speed"]!.GetValue<string>());
+    }
+
+    /// <summary>The elite fight of the turn plan test (effort messages, raises and lowerings), with
+    /// fast mode switched by <paramref name="fastFrom"/> and <paramref name="fastUntil"/> (request indexes).</summary>
+    private static async Task<JsonObject[]> EliteFightRequests(int? fastFrom, int? fastUntil)
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Effort = "medium", TurnPlanEffort = "xhigh", TurnPlanNote = true };
+        rig.Host.Handler = ActsReturn(
+            TurnSnap("Elite", 1, 1), // a fresh conversation at high, raised for the turn plan
+            TurnSnap("Elite", 1, 1), // lowered
+            TurnSnap("Elite", 2, 2), // raised
+            Snap("rewards", true), // lowered
+            Snap("map", true), // the room is left: effort lowered to medium inside the conversation
+            Snap("map", true));
+        for (var i = 0; i < 6; i++)
+        {
+            var index = i;
+            rig.Api.Then(() =>
+            {
+                // What is typed while request `index` is out applies from the next one.
+                if (index + 1 == fastFrom) rig.Settings = rig.Settings with { Fast = true };
+                if (index + 1 == fastUntil) rig.Settings = rig.Settings with { Fast = false };
+                return Reply("tool_use", null, ToolUse($"toolu_{index}", "act", new JsonObject { ["action_id"] = "map:0" }));
+            });
+        }
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+        Assert.Empty(rig.Announced);
+        return Enumerable.Range(0, rig.Api.Count).Select(i => rig.Api[i]).ToArray();
+    }
+
+    [Fact]
+    public async Task Fast_mode_switched_during_an_elite_fight_leaves_the_effort_and_turn_plan_handling_alone()
+    {
+        var plain = await EliteFightRequests(null, null);
+        var switched = await EliteFightRequests(fastFrom: 2, fastUntil: 5);
+
+        // The scenario does what it is meant to: effort messages, raises and lowerings, one beta.
+        Assert.Equal(7, plain.Length);
+        Assert.Contains(plain, r => Roles(r).Count(role => role == "system") >= 3);
+        Assert.Contains(plain, r => r["max_tokens"]!.GetValue<int>() == 64000);
+        Assert.All(plain, r => Assert.Null(Speed(r)));
+
+        // With fast mode on for requests 2 to 4, every request is the same but for the speed field and its beta.
+        Assert.Equal(plain.Length, switched.Length);
+        Assert.Equal([null, null, "fast", "fast", "fast", null, null], switched.Select(Speed));
+        for (var i = 0; i < plain.Length; i++)
+        {
+            Assert.Equal(plain[i].ToJsonString(), WithoutFast(switched[i]));
+            Assert.Equal(Speed(switched[i]) == "fast" ? [.. Betas(plain[i]), ModelPrices.FastModeBeta] : Betas(plain[i]), Betas(switched[i]));
+        }
+    }
+
+    [Fact]
+    public async Task A_fast_request_still_rate_limited_goes_again_at_standard_speed_and_fast_mode_goes_off()
+    {
+        using var rig = new Rig { UseTranscript = true };
+        rig.Settings = rig.Settings with { Fast = true };
+        rig.Api
+            .Then(Reply("tool_use", FastUsage(), ToolUse("toolu_1", "get_state")))
+            .Then(RateLimit())
+            .Then(Reply("tool_use", Usage(), ToolUse("toolu_2", "get_state")))
+            .Then(Reply("tool_use", Usage(), ToolUse("toolu_3", "get_state")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(["fast", "fast", null, null, null], Enumerable.Range(0, 5).Select(i => Speed(rig.Api[i])));
+        // The turn isn't lost: the very same request again, at once, without the speed field and the flag.
+        Assert.Equal(WithoutFast(rig.Api[1]), rig.Api[2].ToJsonString());
+        Assert.Empty(Betas(rig.Api[2]));
+        Assert.DoesNotContain(rig.Delays, d => d >= TimeSpan.FromSeconds(30));
+        // Said once, and the controller is told, which switches the setting off.
+        Assert.Equal([ApiBrain.FastRateLimited], rig.Announced);
+        Assert.Equal("Fast mode hit its rate limit; back to normal speed.", ApiBrain.FastRateLimited);
+        Assert.Equal(1, rig.FastDeclinedCalls);
+        Assert.False(rig.Settings.Fast);
+        Assert.Contains(rig.Logged, l => l.Contains("fast mode turned down (RateLimited)") && l.Contains("standard speed"));
+        // The conversation goes on as it was.
+        Assert.Equal(5, rig.Api[3]["messages"]!.AsArray().Count);
+        Assert.True(rig.Brain.IsRunning);
+        Assert.False(rig.Stopped.Task.IsCompleted);
+
+        // The failed try is in the transcript as an error, the answered one as a standard request.
+        var lines = TranscriptLines(rig.Dir);
+        Assert.Equal("RateLimited", lines[1]["error"]!.GetValue<string>());
+        Assert.Equal(["fast", "standard", "standard"], lines.Where(l => l["error"] is null).Select(l => l["speed"]!.GetValue<string>()));
+    }
+
+    [Fact]
+    public async Task Fast_mode_switched_on_again_after_a_refusal_is_tried_again()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Fast = true };
+        rig.Api
+            .Then(RateLimit())
+            .Then(() =>
+            {
+                Assert.False(rig.Settings.Fast); // the controller switched it off
+                rig.Settings = rig.Settings with { Fast = true }; // /fast on once more
+                return Reply("tool_use", Usage(), ToolUse("toolu_1", "get_state"));
+            })
+            .Then(Reply("tool_use", FastUsage(), ToolUse("toolu_2", "get_state")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(["fast", null, "fast", "fast"], Enumerable.Range(0, 4).Select(i => Speed(rig.Api[i])));
+        Assert.Equal([ApiBrain.FastRateLimited], rig.Announced);
+    }
+
+    [Fact]
+    public async Task A_refusal_holds_even_when_nobody_switches_the_setting_off()
+    {
+        // The arena and the dev host make the brain without a controller: the setting stays on.
+        using var rig = new Rig { ControllerSwitchesFastOff = false };
+        rig.Settings = rig.Settings with { Fast = true };
+        rig.Api
+            .Then(RateLimit())
+            .Then(Reply("tool_use", Usage(), ToolUse("toolu_1", "get_state")))
+            .Then(Reply("tool_use", Usage(), ToolUse("toolu_2", "get_state")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.True(rig.Settings.Fast);
+        Assert.Equal(["fast", null, null, null], Enumerable.Range(0, 4).Select(i => Speed(rig.Api[i])));
+        Assert.Equal([ApiBrain.FastRateLimited], rig.Announced); // once, not on every request
+        Assert.Equal(1, rig.FastDeclinedCalls);
+    }
+
+    [Fact]
+    public async Task A_rate_limit_at_standard_speed_after_the_fallback_is_retried_as_ever()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Fast = true };
+        rig.Api
+            .Then(RateLimit())
+            .Then(new ClaudeApiException(ClaudeErrorKind.RateLimited, 429, "rate_limit_error", "slow down", null, attempts: 5))
+            .Then(new ClaudeApiException(ClaudeErrorKind.RateLimited, 429, "rate_limit_error", "slow down", null, attempts: 5))
+            .Then(Reply("tool_use", Usage(), ToolUse("toolu_1", "get_state")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        // One fast try, then the same standard request until it goes through: no loop between the two.
+        Assert.Equal(["fast", null, null, null, null], Enumerable.Range(0, 5).Select(i => Speed(rig.Api[i])));
+        Assert.All(Enumerable.Range(1, 3), i => Assert.Equal(WithoutFast(rig.Api[0]), rig.Api[i].ToJsonString()));
+        Assert.Equal([30, 60], rig.Delays.Where(d => d >= TimeSpan.FromSeconds(30)).Select(d => (int)d.TotalSeconds));
+        Assert.Equal(2, rig.Announced.Length);
+        Assert.Equal(ApiBrain.FastRateLimited, rig.Announced[0]);
+        Assert.StartsWith(ApiBrain.RateLimited, rig.Announced[1]);
+        Assert.Equal(1, rig.FastDeclinedCalls);
+        Assert.True(rig.Brain.IsRunning);
+    }
+
+    [Fact]
+    public async Task Fast_mode_out_of_capacity_falls_back_the_same_way()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Fast = true };
+        rig.Api
+            .Then(new ClaudeApiException(ClaudeErrorKind.Overloaded, 529, "overloaded_error", "Overloaded", "req_529", attempts: 5))
+            .Then(Reply("tool_use", Usage(), ToolUse("toolu_1", "get_state")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(["fast", null, null], Enumerable.Range(0, 3).Select(i => Speed(rig.Api[i])));
+        Assert.Equal([ApiBrain.FastOverloaded], rig.Announced);
+        Assert.DoesNotContain(rig.Delays, d => d >= TimeSpan.FromSeconds(30));
+        Assert.False(rig.Settings.Fast);
+        Assert.True(rig.Brain.IsRunning);
+    }
+
+    [Theory]
+    [InlineData(400, "speed: Extra inputs are not permitted")]
+    [InlineData(400, "Unexpected value(s) `fast-mode-2026-02-01` for the `anthropic-beta` header. Please consult our documentation")]
+    [InlineData(400, "This model does not support fast mode")]
+    [InlineData(403, "Your organization does not have access to fast mode")]
+    public async Task A_refusal_that_names_fast_mode_falls_back_with_its_own_line(int status, string apiMessage)
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Fast = true };
+        var kind = status == 403 ? ClaudeErrorKind.Unauthorized : ClaudeErrorKind.InvalidRequest;
+        rig.Api
+            .Then(Reply("tool_use", FastUsage(), ToolUse("toolu_1", "get_state"))) // fast mode worked before
+            .Then(new ClaudeApiException(kind, status, "invalid_request_error", apiMessage, "req_1"))
+            .Then(Reply("tool_use", Usage(), ToolUse("toolu_2", "get_state")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(["fast", "fast", null, null], Enumerable.Range(0, 4).Select(i => Speed(rig.Api[i])));
+        Assert.Equal(WithoutFast(rig.Api[1]), rig.Api[2].ToJsonString());
+        Assert.Equal([ApiBrain.FastRefused], rig.Announced);
+        Assert.Equal(1, rig.FastDeclinedCalls);
+        Assert.False(rig.Settings.Fast);
+        Assert.Contains(rig.Logged, l => l.Contains("fast mode turned down") && l.Contains(apiMessage));
+        Assert.True(rig.Brain.IsRunning);
+        Assert.False(rig.Stopped.Task.IsCompleted);
+    }
+
+    [Theory]
+    [InlineData(400)]
+    [InlineData(403)]
+    [InlineData(404)]
+    public async Task The_first_fast_request_refused_without_a_reason_is_tried_once_at_standard_speed(int status)
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Fast = true };
+        var kind = status == 403 ? ClaudeErrorKind.Unauthorized : ClaudeErrorKind.InvalidRequest;
+        rig.Api
+            .Then(new ClaudeApiException(kind, status, "some_error", "Request not allowed", "req_1"))
+            .Then(Reply("tool_use", Usage(), ToolUse("toolu_1", "get_state")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(["fast", null, null], Enumerable.Range(0, 3).Select(i => Speed(rig.Api[i])));
+        Assert.Equal([ApiBrain.FastRefused], rig.Announced);
+        Assert.False(rig.Settings.Fast);
+        Assert.True(rig.Brain.IsRunning);
+    }
+
+    [Theory]
+    [InlineData(400, ClaudeErrorKind.InvalidRequest, BrainStopReason.Error)]
+    [InlineData(403, ClaudeErrorKind.Unauthorized, BrainStopReason.Unauthorized)]
+    public async Task A_request_refused_at_both_speeds_stops_the_brain_as_before(int status, ClaudeErrorKind kind, BrainStopReason expected)
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Fast = true };
+        rig.Api
+            .Then(new ClaudeApiException(kind, status, "some_error", "Request not allowed", "req_1"))
+            .Then(new ClaudeApiException(kind, status, "some_error", "Request not allowed", "req_2"));
+
+        rig.Brain.Start();
+        var (reason, _) = await rig.Stopped.Task.WaitAsync(Guard);
+
+        // One try at each speed, never a third.
+        Assert.Equal(expected, reason);
+        Assert.Equal(2, rig.Api.Count);
+        Assert.Equal(["fast", null], Enumerable.Range(0, 2).Select(i => Speed(rig.Api[i])));
+    }
+
+    [Theory]
+    [InlineData(400, ClaudeErrorKind.InvalidRequest, "tools.0: bad schema", BrainStopReason.Error)]
+    [InlineData(401, ClaudeErrorKind.Unauthorized, "invalid x-api-key", BrainStopReason.Unauthorized)]
+    [InlineData(403, ClaudeErrorKind.Unauthorized, "Request not allowed", BrainStopReason.Unauthorized)]
+    [InlineData(400, ClaudeErrorKind.OutOfCredit, "Your credit balance is too low", BrainStopReason.OutOfCredit)]
+    [InlineData(429, ClaudeErrorKind.SpendLimit, "You have reached your specified API usage limits", BrainStopReason.SpendLimit)]
+    public async Task Other_failures_of_a_fast_request_are_not_taken_for_fast_mode(int status, ClaudeErrorKind kind, string apiMessage, BrainStopReason expected)
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Fast = true };
+        rig.Api
+            .Then(Reply("tool_use", FastUsage(), ToolUse("toolu_1", "get_state"))) // fast mode works
+            .Then(new ClaudeApiException(kind, status, "some_error", apiMessage, "req_1"));
+
+        rig.Brain.Start();
+        var (reason, _) = await rig.Stopped.Task.WaitAsync(Guard);
+
+        Assert.Equal(expected, reason);
+        Assert.Equal(2, rig.Api.Count);
+        Assert.DoesNotContain(ApiBrain.FastRefused, rig.Announced);
+        Assert.Equal(0, rig.FastDeclinedCalls);
+        Assert.True(rig.Settings.Fast);
+    }
+
+    [Fact]
+    public async Task A_prompt_too_long_for_a_fast_request_starts_a_fresh_conversation_and_stays_fast()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Fast = true };
+        rig.Api
+            .Then(Reply("tool_use", FastUsage(), ToolUse("toolu_1", "get_state")))
+            .Then(new ClaudeApiException(ClaudeErrorKind.InvalidRequest, 400, "invalid_request_error", "prompt is too long: 1000123 tokens > 1000000 maximum", "req_1"))
+            .Then(Reply("tool_use", FastUsage(), ToolUse("toolu_2", "get_state")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.StartsWith(ApiBrain.Refreshed, Text(Assert.Single(rig.Api[2]["messages"]!.AsArray())!));
+        Assert.Equal("fast", Speed(rig.Api[2]));
+        Assert.Empty(rig.Announced);
+        Assert.True(rig.Settings.Fast);
+    }
+
+    [Fact]
+    public async Task A_refused_effort_message_on_a_fast_request_is_still_the_effort_messages_refusal()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Effort = "medium", Fast = true };
+        rig.Host.Handler = ActsReturn(RoomSnap("combat", "Elite"), Snap("map", true), Snap("map", true));
+        rig.Api
+            .Then(Act("toolu_1"))
+            .Then(Act("toolu_2"))
+            .Then(new ClaudeApiException(ClaudeErrorKind.InvalidRequest, 400, "invalid_request_error", "messages.4.output_config: Extra inputs are not permitted", "req_1"))
+            .Then(Act("toolu_3"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        // A fresh conversation without effort messages, still in fast mode.
+        Assert.Equal([ApiBrain.PerMessageEffortRefused], rig.Announced);
+        Assert.StartsWith(ApiBrain.RoomEffortChanged, Text(Assert.Single(rig.Api[3]["messages"]!.AsArray())!));
+        Assert.Equal("fast", Speed(rig.Api[3]));
+        Assert.Equal(FastOnly, Betas(rig.Api[3]));
+        Assert.True(rig.Settings.Fast);
+        Assert.Equal(0, rig.FastDeclinedCalls);
+    }
+
+    [Fact]
+    public async Task Fast_mode_typed_while_a_request_is_retried_goes_into_the_next_try()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Fast = true };
+        rig.Api
+            .Then(Reply("tool_use", FastUsage(), ToolUse("toolu_1", "get_state")))
+            .Then(() =>
+            {
+                rig.Settings = rig.Settings with { Fast = false }; // /fast off while Claude can't be reached
+                throw new ClaudeApiException(ClaudeErrorKind.Network, null, null, "connection reset", null, attempts: 5);
+            })
+            .Then(() =>
+            {
+                rig.Settings = rig.Settings with { Fast = true }; // and on again
+                throw new ClaudeApiException(ClaudeErrorKind.Network, null, null, "connection reset", null, attempts: 5);
+            })
+            .Then(Reply("tool_use", FastUsage(), ToolUse("toolu_2", "get_state")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        // The same request each time, with only the speed following the setting.
+        Assert.Equal(["fast", "fast", null, "fast", "fast"], Enumerable.Range(0, 5).Select(i => Speed(rig.Api[i])));
+        Assert.Equal(WithoutFast(rig.Api[1]), rig.Api[2].ToJsonString());
+        Assert.Equal(WithoutFast(rig.Api[1]), WithoutFast(rig.Api[3]));
+        Assert.Equal(FastOnly, Betas(rig.Api[3]));
+        Assert.Equal(3, rig.Api[3]["messages"]!.AsArray().Count);
+        Assert.Equal([ApiBrain.Retrying], rig.Announced);
+        Assert.Equal(0, rig.FastDeclinedCalls);
+    }
+
+    [Fact]
+    public async Task A_fast_response_is_counted_at_the_fast_price()
+    {
+        using var rig = new Rig { UseTranscript = true };
+        rig.Settings = rig.Settings with { Fast = true };
+        var first = FastUsage(input: 3000, output: 400, cacheWrite: 20_000);
+        var second = FastUsage(input: 200, output: 100, cacheRead: 23_000);
+        rig.Api
+            .Then(Reply("tool_use", first, ToolUse("toolu_1", "get_state")))
+            .Then(Reply("tool_use", second, ToolUse("toolu_2", "get_state")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        // $8 input, $10 for 5 minute writes, $0.40 for reads and $40 output per million on Opus 5.5.
+        var expected = (3000 * 8m + 20_000 * 10m + 400 * 40m + 200 * 8m + 23_000 * 0.40m + 100 * 40m) / 1_000_000m;
+        Assert.Equal(expected, rig.Spend.RunTotal);
+        Assert.Equal(expected, rig.Spend.MonthTotal(rig.Now));
+        // Twice what the same tokens cost at standard speed.
+        var standard = ModelPrices.Cost("claude-opus-5-5", TokenUsage.FromJson(first)).Usd + ModelPrices.Cost("claude-opus-5-5", TokenUsage.FromJson(second)).Usd;
+        Assert.Equal(2 * standard, rig.Spend.RunTotal);
+        Assert.Equal(2, rig.Logged.Count(l => l.StartsWith("brain: claude-opus-5-5 fast in ")));
+        var lines = TranscriptLines(rig.Dir);
+        Assert.Equal(expected, lines.Sum(l => l["cost_usd"]!.GetValue<decimal>()));
+    }
+
+    [Theory]
+    [InlineData(true, "fast", true)] // asked fast, ran fast
+    [InlineData(true, "standard", false)] // asked fast, the response says standard: the standard price
+    [InlineData(true, null, true)] // asked fast, the response doesn't say: counted as asked, never at half price
+    [InlineData(false, "fast", true)] // not asked, but the response says fast: what it reports is what was billed
+    [InlineData(false, "standard", false)]
+    [InlineData(false, null, false)] // as before fast mode existed
+    public async Task The_price_follows_the_speed_the_response_reports(bool asked, string? reported, bool fastPrice)
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Fast = asked };
+        var usage = FastUsage(input: 1000, output: 500, cacheRead: 30_000, speed: reported);
+        rig.Api.Then(Reply("tool_use", usage, ToolUse("toolu_1", "get_state")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        var standard = (1000 * 4m + 30_000 * 0.20m + 500 * 20m) / 1_000_000m;
+        Assert.Equal(asked ? "fast" : null, Speed(rig.Api[0]));
+        Assert.Equal(fastPrice ? 2 * standard : standard, rig.Spend.RunTotal);
+        Assert.Equal(asked && reported == "standard", rig.Logged.Any(l => l.Contains("asked for fast mode but the response says speed standard")));
+    }
+
+    [Fact]
+    public async Task The_fight_log_lists_the_speeds_of_a_fights_requests()
+    {
+        using var rig = new Rig { UseFightLog = true };
+        var board = Snap("combat", true, version: 5);
+        board["state"] = JsonNode.Parse("""
+            {"run": {"act": 1, "floor": 3, "ascension": 0, "room": "Monster"}, "turn": 1, "round": 1,
+             "me": {"name": "The Ironclad", "hp": 75, "max_hp": 80},
+             "enemies": [{"i": 0, "name": "Jaw Worm", "hp": 40, "max_hp": 40, "intents": ["attack 11"]}],
+             "potions": [null, null, null]}
+            """);
+        var rewards = Snap("rewards", true, version: 6);
+        rewards["state"] = JsonNode.Parse("""{"run": {"act": 1, "floor": 3}, "player": {"hp": 70, "max_hp": 80}, "potions": [null, null, null]}""");
+        rig.Host.Handler = (name, _, _) => Task.FromResult(name == "act"
+            ? new ToolOutcome(new JsonObject { ["done"] = "end_turn", ["next"] = rewards.DeepClone() })
+            : Outcome(board.DeepClone()));
+        rig.Api
+            .Then(() =>
+            {
+                rig.Settings = rig.Settings with { Fast = true };
+                return Reply("tool_use", Usage(input: 3000, output: 400), ToolUse("toolu_1", "get_state"));
+            })
+            .Then(Reply("tool_use", FastUsage(input: 200, output: 100, cacheWrite: 3000), ToolUse("toolu_2", "act", new JsonObject { ["action_id"] = "end_turn" })));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        var line = JsonNode.Parse(Assert.Single(File.ReadAllLines(Path.Combine(rig.Dir, FightLog.FileName))))!;
+        Assert.Equal(["standard", "fast"], line["speed"]!.AsArray().Select(v => v!.GetValue<string>()));
+        Assert.Equal(["high"], line["effort"]!.AsArray().Select(v => v!.GetValue<string>()));
+        var spent = (3000 * 4m + 400 * 20m + 200 * 8m + 3000 * 10m + 100 * 40m) / 1_000_000m;
+        Assert.Equal(Math.Round(spent, 4), line["spent_usd"]!.GetValue<decimal>());
+    }
+
+    [Fact]
+    public async Task The_first_request_at_another_speed_is_estimated_like_a_fresh_conversation()
+    {
+        using var rig = new Rig();
+        var estimates = new List<decimal?>();
+        void Note() => estimates.Add(JsonNode.Parse(File.ReadAllText(rig.Spend.FilePath))!["in_flight"]?[rig.Spend.InstanceId]?["usd"]?.GetValue<decimal>());
+        // Another copy with a request in flight, so this one's estimates are written and count.
+        var bot = new SpendTracker(rig.Dir, instanceId: "bot-17773");
+        Assert.True(bot.TryBegin(100m, rig.Now, out _));
+        rig.Api
+            .Then(() => { Note(); return Reply("tool_use", Usage(), ToolUse("toolu_1", "get_state")); })
+            .Then(() =>
+            {
+                Note();
+                rig.Settings = rig.Settings with { Fast = true };
+                return Reply("tool_use", Usage(), ToolUse("toolu_2", "get_state"));
+            })
+            .Then(() => { Note(); return Reply("tool_use", FastUsage(), ToolUse("toolu_3", "get_state")); })
+            .Then(() => { Note(); return Reply("tool_use", FastUsage(), ToolUse("toolu_4", "get_state")); });
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        // The opening, a follow-up, the first fast request (the cache is written again), a fast follow-up.
+        Assert.Equal([SpendTracker.FreshEstimateUsd, SpendTracker.MinEstimateUsd, SpendTracker.FreshEstimateUsd, SpendTracker.MinEstimateUsd], estimates);
+    }
+
+    [Fact]
+    public async Task On_the_wire_a_fast_request_has_the_field_and_the_joined_header_and_falls_back_after_the_clients_retries()
+    {
+        var wire = new WireHandler();
+        var waits = new List<TimeSpan>();
+        var client = new ClaudeClient(Rig.FakeKey, wire, "http://localhost:9999/",
+            delay: (wait, _) => { waits.Add(wait); return Task.CompletedTask; }, random: () => 0);
+        using var rig = new Rig { Client = client };
+        rig.Settings = rig.Settings with { Effort = "medium", Fast = true };
+        rig.Host.Handler = ActsReturn(RoomSnap("combat", "Elite"), Snap("map", true), Snap("map", true));
+        var act = 0;
+        string Ok(string speed) => new JsonObject
+        {
+            ["id"] = "msg_1", ["type"] = "message", ["role"] = "assistant", ["model"] = "claude-opus-5-5",
+            ["content"] = new JsonArray(ToolUse($"toolu_{++act}", "act", new JsonObject { ["action_id"] = "map:0" })),
+            ["stop_reason"] = "tool_use",
+            ["usage"] = FastUsage(input: 1000, output: 100, speed: speed),
+        }.ToJsonString();
+        const string limited = """{"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed the rate limit for fast mode"}}""";
+        wire.Script(
+            (200, Ok("fast"), null), (200, Ok("fast"), null), (200, Ok("fast"), null),
+            // The fourth request: 429 on all five tries of the client, each asking for 2 s.
+            (429, limited, "2"), (429, limited, "2"), (429, limited, "2"), (429, limited, "2"), (429, limited, "2"),
+            (200, Ok("standard"), null));
+
+        rig.Brain.Start();
+        await WaitFor(() => wire.Sent.Count >= 10);
+
+        // Fast: the top-level field in the body, the flag in the header, the internal betas key never in the body.
+        var first = wire.Sent[0];
+        Assert.Equal("fast", JsonNode.Parse(first.Body)!["speed"]!.GetValue<string>());
+        Assert.Equal("fast-mode-2026-02-01", first.Betas);
+        Assert.DoesNotContain(ClaudeClient.BetasField, first.Body);
+        // With an effort message in the conversation the two flags are joined by a comma.
+        Assert.Contains("\"role\":\"system\"", wire.Sent[2].Body);
+        Assert.Equal("mid-conversation-output-config-2026-07-01,fast-mode-2026-02-01", wire.Sent[2].Betas);
+
+        // The 429s: the client waits the retry-after before each of its four retries, then the brain
+        // sends the same body at once without the speed field, and the header loses the fast flag.
+        Assert.Equal([TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2)], waits);
+        Assert.All(Enumerable.Range(3, 5), i => Assert.Equal("fast", JsonNode.Parse(wire.Sent[i].Body)!["speed"]!.GetValue<string>()));
+        var standard = wire.Sent[8];
+        Assert.Null(JsonNode.Parse(standard.Body)!["speed"]);
+        Assert.DoesNotContain("speed", standard.Body);
+        Assert.Equal("mid-conversation-output-config-2026-07-01", standard.Betas);
+        var fastBody = (JsonObject)JsonNode.Parse(wire.Sent[7].Body)!;
+        fastBody.Remove("speed");
+        Assert.Equal(fastBody.ToJsonString(), JsonNode.Parse(standard.Body)!.ToJsonString());
+        Assert.Equal([ApiBrain.FastRateLimited], rig.Announced);
+        Assert.False(rig.Settings.Fast);
+        // And on at standard speed.
+        Assert.Null(JsonNode.Parse(wire.Sent[9].Body)!["speed"]);
+        Assert.Equal("mid-conversation-output-config-2026-07-01", wire.Sent[9].Betas);
+        Assert.True(rig.Brain.IsRunning);
+        // Three fast responses at $8 and $40 per million, one standard at $4 and $20.
+        Assert.Equal((3 * (1000 * 8m + 100 * 40m) + 1000 * 4m + 100 * 20m) / 1_000_000m, rig.Spend.RunTotal);
+    }
+
     // ---- Helpers ----
 
     private static void AssertStrict(JsonObject schema)
@@ -3273,6 +3959,16 @@ file sealed class Rig : IDisposable
     public bool LogThrows { get; init; }
     public Func<string?>? PartyPlan { get; init; }
 
+    /// <summary>The API the brain calls instead of <see cref="Api"/>: a real client over a scripted transport.</summary>
+    public IClaudeApi? Client { get; init; }
+
+    /// <summary>What the controller does when the brain says the API turned fast mode down: it
+    /// switches the setting off. False leaves the setting on, as without a controller.</summary>
+    public bool ControllerSwitchesFastOff { get; init; } = true;
+
+    /// <summary>How often the brain said the API turned fast mode down.</summary>
+    public int FastDeclinedCalls;
+
     /// <summary>What the brain's blocked callback returns (the controller's co-op gate).</summary>
     public volatile string? BlockedReason;
     public DateTime Now { get; set; } = new(2026, 10, 10, 12, 0, 0, DateTimeKind.Utc);
@@ -3294,7 +3990,7 @@ file sealed class Rig : IDisposable
 
     private ApiBrain Build()
     {
-        var brain = new ApiBrain(Api, Tools ?? Host, Notes, Dir, () => Settings, Spend,
+        var brain = new ApiBrain(Client ?? Api, Tools ?? Host, Notes, Dir, () => Settings, Spend,
             character: () => Character,
             transcript: UseTranscript ? new Transcript(Dir, _logged.Enqueue, () => Now) : null,
             recentChat: () => Chat,
@@ -3317,7 +4013,12 @@ file sealed class Rig : IDisposable
             },
             blocked: () => BlockedReason,
             fights: UseFightLog ? new FightLog(Dir, _logged.Enqueue, () => Now) : null,
-            partyPlan: PartyPlan);
+            partyPlan: PartyPlan,
+            fastDeclined: () =>
+            {
+                Interlocked.Increment(ref FastDeclinedCalls);
+                if (ControllerSwitchesFastOff) Settings = Settings with { Fast = false };
+            });
         brain.Stopped += (reason, message) =>
         {
             StoppedWhileRunning = brain.IsRunning;
@@ -3408,5 +4109,51 @@ file sealed class FakeHost(FakeApi api) : IToolHost
     {
         _calls.Enqueue(new HostCall(name, (JsonObject)args.DeepClone(), api.Count));
         return Handler(name, args, ct);
+    }
+}
+
+/// <summary>A scripted HTTP transport for a real <see cref="ClaudeClient"/>: each request gets the
+/// next (status, body, retry-after) and is recorded with its body and anthropic-beta header. Once
+/// the script runs out, a request is recorded and then waits until it is cancelled.</summary>
+file sealed class WireHandler : HttpMessageHandler
+{
+    private readonly object _gate = new();
+    private readonly Queue<(int Status, string Body, string? RetryAfter)> _script = new();
+    private readonly List<(string Body, string? Betas)> _sent = [];
+
+    public IReadOnlyList<(string Body, string? Betas)> Sent
+    {
+        get { lock (_gate) return _sent.ToArray(); }
+    }
+
+    public void Script(params (int Status, string Body, string? RetryAfter)[] replies)
+    {
+        lock (_gate)
+            foreach (var reply in replies)
+                _script.Enqueue(reply);
+    }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        var body = request.Content is null ? "" : await request.Content.ReadAsStringAsync(ct);
+        var betas = request.Headers.TryGetValues("anthropic-beta", out var values) ? string.Join(",", values) : null;
+        (int Status, string Body, string? RetryAfter)? next;
+        lock (_gate)
+        {
+            _sent.Add((body, betas));
+            next = _script.Count > 0 ? _script.Dequeue() : null;
+        }
+        if (next is not { } reply)
+        {
+            await Task.Delay(Timeout.Infinite, ct);
+            throw new OperationCanceledException(ct);
+        }
+        var message = new HttpResponseMessage((System.Net.HttpStatusCode)reply.Status)
+        {
+            Content = new StringContent(reply.Body, System.Text.Encoding.UTF8, "application/json"),
+        };
+        if (reply.RetryAfter is not null)
+            message.Headers.TryAddWithoutValidation("retry-after", reply.RetryAfter);
+        return message;
     }
 }

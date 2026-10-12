@@ -139,6 +139,202 @@ public class ModelPricesTests
         Assert.Equal(pricedAs, cost.PricedAs);
     }
 
+    // ---- Fast mode ----
+
+    private static JsonObject FastUsage(string? speed = "fast")
+    {
+        var usage = Usage();
+        if (speed is not null)
+            usage["speed"] = speed;
+        return usage;
+    }
+
+    [Theory]
+    // in*8 + 5m*10 + 1h*16 + read*0.40 + out*40 (per million): twice the standard 0.488
+    [InlineData("claude-opus-5-5", "0.976")]
+    [InlineData("opus", "0.976")]
+    [InlineData("claude-opus-5-5-20261001", "0.976")]
+    // in*10 + 5m*12.5 + 1h*20 + read*1.00 + out*50
+    [InlineData("claude-opus-5", "1.24")]
+    [InlineData("claude-opus-5-20260601", "1.24")]
+    [InlineData("claude-opus-4-8", "1.24")]
+    [InlineData("claude-opus-4-8-20260801", "1.24")]
+    public void A_fast_response_is_priced_from_the_fast_table(string model, string expected)
+    {
+        var cost = ModelPrices.Cost(model, FastUsage());
+        Assert.Equal(decimal.Parse(expected, System.Globalization.CultureInfo.InvariantCulture), cost.Usd);
+        Assert.True(cost.Fast);
+        Assert.True(cost.KnownModel);
+        Assert.False(cost.LongPrompt);
+        Assert.StartsWith(cost.PricedAs, BrainSettings.ResolveModel(model));
+        Assert.True(ModelPrices.SupportsFast(model));
+    }
+
+    [Theory]
+    // Opus 5.5 at $8 input, $10 and $16 cache writes, $0.40 cache reads, $40 output.
+    [InlineData("claude-opus-5-5", "8", "10", "16", "0.40", "40")]
+    // Opus 5 and Opus 4.8 at $10, $12.50 and $20, $1.00, $50.
+    [InlineData("claude-opus-5", "10", "12.5", "20", "1.00", "50")]
+    [InlineData("claude-opus-4-8", "10", "12.5", "20", "1.00", "50")]
+    public void Each_token_class_of_a_fast_response_has_its_fast_rate(string model, string input, string write5m, string write1h, string read, string output)
+    {
+        static decimal D(string text) => decimal.Parse(text, System.Globalization.CultureInfo.InvariantCulture);
+        const long million = 1_000_000;
+        decimal Fast(TokenUsage usage) => ModelPrices.Cost(model, usage, fast: true).Usd;
+
+        Assert.Equal(D(input), Fast(new TokenUsage(Input: million, 0, 0, 0, 0)));
+        Assert.Equal(D(output), Fast(new TokenUsage(0, Output: million, 0, 0, 0)));
+        Assert.Equal(D(read), Fast(new TokenUsage(0, 0, CacheRead: million, 0, 0)));
+        Assert.Equal(D(write5m), Fast(new TokenUsage(0, 0, 0, CacheWrite5m: million, 0)));
+        Assert.Equal(D(write1h), Fast(new TokenUsage(0, 0, 0, 0, CacheWrite1h: million)));
+
+        // The price list: input and output as the pricing page gives them, and the prompt caching
+        // multipliers on top (1.25 and 2 times the input for writes; 0.1 for reads, 0.05 on Opus 5.5).
+        var price = ModelPrices.FastFor(model)!;
+        Assert.Equal(price.Input * 1.25m, price.CacheWrite5m);
+        Assert.Equal(price.Input * 2m, price.CacheWrite1h);
+        Assert.Equal(price.Input * (model == "claude-opus-5-5" ? 0.05m : 0.1m), price.CacheRead);
+        Assert.Equal(price.Input * 5m, price.Output);
+        Assert.Null(price.LongPromptThreshold);
+
+        // The same from a usage object that says it ran fast, one class at a time.
+        Assert.Equal(D(input) / 1000, ModelPrices.Cost(model, new JsonObject { ["input_tokens"] = 1000, ["speed"] = "fast" }).Usd);
+        Assert.Equal(D(output) / 1000, ModelPrices.Cost(model, new JsonObject { ["output_tokens"] = 1000, ["speed"] = "fast" }).Usd);
+        Assert.Equal(D(read) / 1000, ModelPrices.Cost(model, new JsonObject { ["cache_read_input_tokens"] = 1000, ["speed"] = "fast" }).Usd);
+        Assert.Equal(D(write5m) / 1000, ModelPrices.Cost(model, new JsonObject { ["cache_creation_input_tokens"] = 1000, ["speed"] = "fast" }).Usd);
+        Assert.Equal(D(write1h) / 1000, ModelPrices.Cost(model, new JsonObject
+        {
+            ["cache_creation_input_tokens"] = 1000,
+            ["cache_creation"] = new JsonObject { ["ephemeral_1h_input_tokens"] = 1000 },
+            ["speed"] = "fast",
+        }).Usd);
+    }
+
+    [Fact]
+    public void Fast_is_twice_the_standard_rate_of_every_token_class()
+    {
+        // Opus 5.5 is in both tables; Opus 5 and 4.8 are $5, $6.25, $10, $0.50 and $25 at standard speed.
+        var standard = new Dictionary<string, ModelPrice>
+        {
+            ["claude-opus-5-5"] = ModelPrices.Table["claude-opus-5-5"],
+            ["claude-opus-5"] = new(Input: 5m, CacheWrite5m: 6.25m, CacheWrite1h: 10m, CacheRead: 0.50m, Output: 25m),
+            ["claude-opus-4-8"] = new(Input: 5m, CacheWrite5m: 6.25m, CacheWrite1h: 10m, CacheRead: 0.50m, Output: 25m),
+        };
+        Assert.Equal(standard.Keys.Order(), ModelPrices.FastTable.Keys.Order());
+        foreach (var (model, price) in standard)
+        {
+            var fast = ModelPrices.FastTable[model];
+            Assert.Equal(2 * price.Input, fast.Input);
+            Assert.Equal(2 * price.CacheWrite5m, fast.CacheWrite5m);
+            Assert.Equal(2 * price.CacheWrite1h, fast.CacheWrite1h);
+            Assert.Equal(2 * price.CacheRead, fast.CacheRead);
+            Assert.Equal(2 * price.Output, fast.Output);
+        }
+        Assert.Equal(2m, ModelPrices.FastMultiplier);
+        Assert.Equal("fast-mode-2026-02-01", ModelPrices.FastModeBeta);
+    }
+
+    [Theory]
+    [InlineData("standard")]
+    [InlineData(null)]
+    [InlineData("")]
+    public void A_response_that_does_not_say_fast_is_priced_as_ever(string? speed)
+    {
+        foreach (var (model, expected) in new[] { ("claude-opus-5-5", 0.488m), ("claude-sonnet-5-5", 0.244m), ("claude-haiku-5-5", 0.0124m), ("claude-fable-5-1", 1.21m), ("claude-opus-5", 1.24m) })
+        {
+            var cost = ModelPrices.Cost(model, FastUsage(speed));
+            Assert.Equal(expected, cost.Usd);
+            Assert.False(cost.Fast);
+            Assert.Equal(ModelPrices.Cost(model, Usage()), cost);
+            Assert.Equal(ModelPrices.Cost(model, TokenUsage.FromJson(Usage())), cost);
+        }
+        Assert.False(ModelPrices.IsFast(FastUsage(speed)));
+        Assert.False(ModelPrices.IsFast(null));
+        Assert.True(ModelPrices.IsFast(FastUsage("fast")));
+        Assert.True(ModelPrices.IsFast(FastUsage("FAST")));
+        Assert.Equal(speed is "standard" ? "standard" : null, ModelPrices.SpeedOf(FastUsage(speed)));
+    }
+
+    [Fact]
+    public void The_standard_table_is_what_it_was_before_fast_mode()
+    {
+        // The arena's real-brain mode reads this table: fast mode adds a table of its own and changes no row here.
+        var rows = ModelPrices.Table.OrderBy(r => r.Key, StringComparer.Ordinal)
+            .Select(r => FormattableString.Invariant($"{r.Key} {r.Value.Input} {r.Value.CacheWrite5m} {r.Value.CacheWrite1h} {r.Value.CacheRead} {r.Value.Output} {r.Value.LongPromptThreshold} {r.Value.LongPromptMultiplier}"));
+        Assert.Equal(
+        [
+            "claude-fable-5 10 12.5 20 1.00 50  1",
+            "claude-fable-5-1 10 12.5 20 0.25 50  1",
+            "claude-haiku-5-5 0.10 0.125 0.20 0.01 0.50 100000 5",
+            "claude-mythos-5 10 12.5 20 1.00 50  1",
+            "claude-opus-5-5 4 5 8 0.20 20  1",
+            "claude-sonnet-5-5 2 2.5 4 0.10 10  1",
+        ], rows);
+        Assert.False(ModelPrices.IsKnown("claude-opus-5"));
+        Assert.False(ModelPrices.IsKnown("claude-opus-4-8"));
+    }
+
+    [Fact]
+    public void A_fast_response_from_a_model_outside_the_fast_table_costs_twice_its_standard_price()
+    {
+        // The API refuses fast mode there, so this only keeps the estimate from coming out low.
+        Assert.Equal(2 * 0.244m, ModelPrices.Cost("claude-sonnet-5-5", FastUsage()).Usd);
+        Assert.Equal("claude-sonnet-5-5", ModelPrices.Cost("claude-sonnet-5-5", FastUsage()).PricedAs);
+        var unknown = ModelPrices.Cost("claude-opus-6", FastUsage());
+        Assert.Equal(2 * 1.24m, unknown.Usd);
+        Assert.False(unknown.KnownModel);
+        Assert.True(unknown.Fast);
+        // Haiku's long-prompt tier still applies first.
+        Assert.Equal(2 * 5 * (0.0124m + 0.0000001m), ModelPrices.Cost("claude-haiku-5-5", TokenUsage.FromJson(Usage(input: 10_001)), fast: true).Usd);
+        foreach (var model in new[] { "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1", "claude-fable-5", "claude-mythos-5", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-6", null, "" })
+        {
+            Assert.False(ModelPrices.SupportsFast(model));
+            Assert.Null(ModelPrices.FastFor(model));
+        }
+    }
+
+    [Fact]
+    public void A_response_is_priced_at_the_speed_it_reports_and_as_asked_only_when_it_reports_none()
+    {
+        ClaudeResponse Response(string? speed) => new(new JsonObject { ["model"] = "claude-opus-5-5", ["usage"] = FastUsage(speed) });
+
+        Assert.Equal("fast", Response("fast").Speed);
+        Assert.Equal("standard", Response("standard").Speed);
+        Assert.Null(Response(null).Speed);
+
+        Assert.Equal(0.976m, Response("fast").Cost("claude-opus-5-5").Usd);
+        Assert.Equal(0.976m, Response("fast").Cost("claude-opus-5-5", requestedFast: false).Usd);
+        Assert.Equal(0.488m, Response("standard").Cost("claude-opus-5-5", requestedFast: true).Usd);
+        Assert.Equal(0.488m, Response(null).Cost("claude-opus-5-5").Usd);
+        Assert.Equal(0.976m, Response(null).Cost("claude-opus-5-5", requestedFast: true).Usd);
+        // The response's own model decides the table row, as before.
+        Assert.Equal(1.24m, new ClaudeResponse(new JsonObject { ["model"] = "claude-opus-5", ["usage"] = FastUsage() }).Cost("claude-opus-5-5").Usd);
+    }
+
+    [Fact]
+    public void A_fast_cost_counts_toward_the_monthly_total_and_the_cap_at_its_fast_price()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "spiremind-fast-spend-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var now = new DateTime(2026, 10, 12, 12, 0, 0, DateTimeKind.Utc);
+            var spend = new SpendTracker(dir);
+            spend.Add(ModelPrices.Cost("claude-opus-5-5", FastUsage()).Usd, now);
+            spend.Add(ModelPrices.Cost("claude-opus-5-5", FastUsage("standard")).Usd, now);
+
+            Assert.Equal(0.976m + 0.488m, spend.MonthTotal(now));
+            Assert.Equal(0.976m + 0.488m, spend.RunTotal);
+            Assert.True(spend.OverCap(1.40m, now)); // two standard responses would be 0.976: under it
+            Assert.False(spend.TryBegin(1.40m, now, out var month));
+            Assert.Equal(1.464m, month);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); }
+            catch (IOException) { /* best effort */ }
+        }
+    }
+
     [Fact]
     public void Missing_usage_costs_nothing()
     {

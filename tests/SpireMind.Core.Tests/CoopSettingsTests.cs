@@ -299,6 +299,32 @@ public class CoopSettingsTests : IDisposable
         Assert.False(ReadJson(Bot).ContainsKey("boss_effort"));
     }
 
+    [Fact]
+    public void A_bot_copy_keeps_fast_mode_in_memory_only()
+    {
+        Write(Shared, "config.json", """{ "model": "opus" }""");
+        var chat = new ChatHub { BotName = "Silent" };
+        var controller = NewController(chat);
+        Assert.False(controller.Settings.Fast);
+
+        Assert.Equal("Fast mode on: answers come up to 2.5x faster at twice the price ($8 / $40 per million tokens on Opus 5.5). /fast off to go back.",
+            chat.PostFromHuman("Mark", "/fast on").Reply);
+        Assert.True(controller.Settings.Fast);
+        // Nothing was saved for it: the bot copy has no config.json of its own yet.
+        Assert.False(File.Exists(Path.Combine(Bot, "config.json")));
+
+        // A command that does save (and reads config.json again first) keeps it on and writes nothing about it.
+        Assert.DoesNotContain("Couldn't save", chat.PostFromHuman("Mark", "/effort boss max").Reply);
+        Assert.True(controller.Settings.Fast);
+        Assert.Equal(["model", "effort", "boss_effort", "autostart"], ReadJson(Bot).Select(p => p.Key));
+        Assert.DoesNotContain("fast", File.ReadAllText(Path.Combine(Bot, "config.json")), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("""{ "model": "opus" }""", File.ReadAllText(Path.Combine(Shared, "config.json")));
+
+        // A bot copy started now, or this one relaunched, begins at normal speed.
+        Assert.False(LoadBot().Fast);
+        Assert.False(NewController(new ChatHub { BotName = "Silent" }).Settings.Fast);
+    }
+
     private BrainController NewController(ChatHub chat) => new(
         loadSettings: () => LoadBot(),
         saveSettings: s => s.Save(),

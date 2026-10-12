@@ -15,8 +15,9 @@ namespace SpireMind.DevHost;
 /// notes folder (a fresh temp folder, so the live run journal is never touched) and the number
 /// of requests (<see cref="RequestCap"/>) differ from the game. It prints every request's
 /// model, stop reason, tool calls, usage and cost, then the totals, and passes when the brain
-/// stopped at the cap or because the fake fight was won, with no failed request. See
-/// docs/brain.md.
+/// stopped at the cap or because the fake fight was won, with no failed request. With
+/// <c>--fast</c> it asks for the API's fast mode as /fast on does in game, prints the speed each
+/// response reports, and passes only when every response ran fast. See docs/brain.md.
 /// </summary>
 public sealed partial class BrainSmoke
 {
@@ -99,11 +100,12 @@ public sealed partial class BrainSmoke
     public async Task<int> RunAsync(IClaudeApi api, CancellationToken stop)
     {
         var output = TextWriter.Synchronized(Output);
-        var settings = Settings with { Model = Options.Model };
+        // Fast mode is never in config.json; here it comes from --fast, for this run only.
+        var settings = Settings with { Model = Options.Model, Fast = Options.Fast };
         var spend = new SpendTracker(settings.ConfigDir, line => output.WriteLine($"spend: {line}"));
         var monthBefore = spend.MonthTotal(DateTime.UtcNow);
 
-        output.WriteLine($"Brain smoke test on the fake fight: {settings.Model}, effort {settings.Effort}, at most {Options.MaxRequests} requests.");
+        output.WriteLine($"Brain smoke test on the fake fight: {settings.Model}, effort {settings.Effort}{(settings.Fast ? ", fast mode (twice the price)" : "")}, at most {Options.MaxRequests} requests.");
         output.WriteLine($"Key {KeySource(settings)}. Prompt from {PromptFolder}.");
         output.WriteLine($"Notes and transcript go to {NotesFolder}, so the repo's runs/ and strategy/ aren't touched.");
         output.WriteLine(Invariant($"API spend this month so far: ${monthBefore:0.00##} of ${settings.MonthlyBudgetUsd:0.00}."));
@@ -193,6 +195,13 @@ public sealed partial class BrainSmoke
             output.WriteLine("No response came back.");
             passed = false;
         }
+        if (settings.Fast && report.Count > 0)
+        {
+            output.WriteLine(report.Fast == report.Count
+                ? $"Fast mode: all {report.Count} responses say they ran fast."
+                : $"Fast mode: only {report.Fast} of {report.Count} responses say they ran fast; the lines above say why the rest didn't.");
+            passed &= report.Fast == report.Count;
+        }
 
         report.Totals(spend.MonthTotal(DateTime.UtcNow));
         output.WriteLine(passed ? "PASSED" : "FAILED");
@@ -232,7 +241,7 @@ public sealed partial class BrainSmoke
     }
 
     // ApiBrain's own line for each response, which the report already covers.
-    [GeneratedRegex(@"^brain: \S+ in \d+ cached \d+ written \d+ out \d+ ")]
+    [GeneratedRegex(@"^brain: \S+(?: fast)? in \d+ cached \d+ written \d+ out \d+ ")]
     private static partial Regex PerRequestLine();
 
     /// <summary>Prints each response and failure, numbered by request, and adds up the totals.
@@ -247,17 +256,26 @@ public sealed partial class BrainSmoke
         /// <summary>Responses so far.</summary>
         public int Count => _answered.Count;
 
+        /// <summary>Responses so far whose usage says they ran in fast mode.</summary>
+        public int Fast { get; private set; }
+
         public void Response(JsonObject request, ClaudeResponse response)
         {
             var requested = request["model"] is JsonValue m && m.TryGetValue<string>(out var id) ? id : "";
             var usage = response.Usage;
-            var cost = response.Cost(requested).Usd;
+            // Priced as the brain prices it: at the speed the response reports, else as asked.
+            var asked = request["speed"] is JsonValue s && s.TryGetValue<string>(out var sent) && sent == ModelPrices.FastSpeed;
+            var cost = response.Cost(requested, asked);
             _answered.Add((++_requests, usage));
             _total += usage;
-            _cost += cost;
+            _cost += cost.Usd;
+            if (ModelPrices.IsFast(response.UsageJson))
+                Fast++;
+            // The speed shows only when fast mode is in play, so a plain run prints what it always did.
+            var speed = asked || cost.Fast ? $", speed {response.Speed ?? "not reported"}" : "";
 
             output.WriteLine(Invariant(
-                $"#{_requests} {response.Model ?? requested}, {response.StopReason ?? "no stop reason"}: {Tokens(usage)}, ${cost:0.0000}"));
+                $"#{_requests} {response.Model ?? requested}, {response.StopReason ?? "no stop reason"}{speed}: {Tokens(usage)}, ${cost.Usd:0.0000}"));
             foreach (var use in response.ToolUses)
                 output.WriteLine($"     {Shorten($"{use.Name} {use.Input.ToJsonString(Relaxed)}")}");
             if (response.Text.Trim() is { Length: > 0 } text)

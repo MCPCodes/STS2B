@@ -40,16 +40,18 @@ public sealed record DevHostOptions
         "Usage:\n" +
         "  scripts/dev-host.sh [port]\n" +
         "      Serve a fake one-fight game on the bridge (default port 17772), for Claude Code's /play.\n" +
-        "  scripts/dev-host.sh --brain [--model <name>] [--max-requests <n>]\n" +
+        "  scripts/dev-host.sh --brain [--model <name>] [--max-requests <n>] [--fast]\n" +
         "      Let the API brain play the fake fight with your API key, no game needed: a smoke test of the\n" +
         "      real API calls. --model takes opus, sonnet, haiku, fable or a full model id (default haiku,\n" +
-        "      for this run only). --max-requests caps the API calls (default 6, at most 50).\n" +
+        "      for this run only). --max-requests caps the API calls (default 6, at most 50). --fast asks for\n" +
+        "      the API's fast mode as /fast on does in game (twice the price; it needs --model opus), to see\n" +
+        "      whether your key has it before a game depends on it.\n" +
         "  scripts/dev-host.sh <port> --bot [--character <name>] [--net-id <n>] [--echo]\n" +
         "      A fake bot copy for trying co-op chat without the game; give it a bot port (17773 to 17775).\n" +
         "      It reports itself as a bot copy playing the character (Ironclad, Silent, Defect, Regent or\n" +
         "      Necrobinder; default Ironclad) with the NetId (default 1000 on 17773, 1001 on 17774 and so on),\n" +
-        "      and answers /start, /stop, /budget, /model and /effort with a stub line. With --echo it answers\n" +
-        "      each message for it with \"Heard you, <name>.\"\n" +
+        "      and answers /start, /stop, /budget, /model, /effort and /fast with a stub line. With --echo it\n" +
+        "      answers each message for it with \"Heard you, <name>.\"\n" +
         "  scripts/dev-host.sh [port] --relay [--bot-ports <list>]\n" +
         "      A fake human copy that relays its chat to the bot copies on localhost, as Mark's game does: type\n" +
         "      lines and commands (hello, /pause, /model Silent sonnet, /bots, /bot add Regent) and see what the\n" +
@@ -65,6 +67,9 @@ public sealed record DevHostOptions
     public string Model { get; init; } = BrainSettings.ResolveModel(DefaultModel);
 
     public int MaxRequests { get; init; } = DefaultMaxRequests;
+
+    /// <summary>--fast: the smoke test asks for the API's fast mode, as /fast on does in game.</summary>
+    public bool Fast { get; init; }
 
     /// <summary>--help or -h: print <see cref="Usage"/> and exit.</summary>
     public bool Help { get; init; }
@@ -97,8 +102,8 @@ public sealed record DevHostOptions
 
     /// <summary>
     /// Reads the arguments: an optional port first, then in any order at most one mode
-    /// (<c>--brain</c>, <c>--bot</c> or <c>--relay</c>), the brain's <c>--model &lt;name&gt;</c>
-    /// and <c>--max-requests &lt;n&gt;</c>, the bot's <c>--character &lt;name&gt;</c>,
+    /// (<c>--brain</c>, <c>--bot</c> or <c>--relay</c>), the brain's <c>--model &lt;name&gt;</c>,
+    /// <c>--max-requests &lt;n&gt;</c> and <c>--fast</c>, the bot's <c>--character &lt;name&gt;</c>,
     /// <c>--net-id &lt;n&gt;</c> and <c>--echo</c>, the relay's <c>--bot-ports &lt;list&gt;</c>,
     /// and <c>--help</c>. Throws <see cref="UsageException"/> for anything else, a missing or bad
     /// value, two modes, or an option without its mode.
@@ -108,6 +113,7 @@ public sealed record DevHostOptions
         var options = new DevHostOptions();
         string? model = null;
         int? maxRequests = null;
+        var fast = false;
         var port = false;
         string? character = null;
         ulong? netId = null;
@@ -130,6 +136,9 @@ public sealed record DevHostOptions
                     if (!int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var n) || n < 1 || n > MostRequests)
                         throw new UsageException($"--max-requests takes a whole number from 1 to {MostRequests}, not '{text}'.");
                     maxRequests = n;
+                    break;
+                case "--fast":
+                    fast = true;
                     break;
                 case "--bot":
                     options = options with { Bot = true };
@@ -178,6 +187,8 @@ public sealed record DevHostOptions
             throw new UsageException("--brain, --bot and --relay are different modes: use one of them.");
         if (!options.Brain && (model is not null || maxRequests is not null))
             throw new UsageException("--model and --max-requests only apply with --brain.");
+        if (!options.Brain && fast)
+            throw new UsageException("--fast only applies with --brain.");
         if (!options.Bot && (character is not null || netId is not null || echo))
             throw new UsageException("--character, --net-id and --echo only apply with --bot.");
         if (!options.Relay && botPorts is not null)
@@ -191,6 +202,10 @@ public sealed record DevHostOptions
         }
         if (maxRequests is { } max)
             options = options with { MaxRequests = max };
+        // A request that asks for fast mode is an error on any other model.
+        if (fast && !ModelPrices.SupportsFast(options.Model))
+            throw new UsageException($"--fast needs a model that takes fast mode (Opus 5.5, Opus 5 or Opus 4.8), not {options.Model}: add --model opus.");
+        options = options with { Fast = fast };
         return options;
     }
 

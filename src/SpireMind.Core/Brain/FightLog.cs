@@ -75,9 +75,10 @@ public sealed class FightLog
         }
     }
 
-    /// <summary>One response the brain got: its cost, the effort it was asked at, and whether
-    /// it hit max_tokens. Counted only while a fight is open.</summary>
-    public void Response(decimal usd, string? effort, bool cutOff)
+    /// <summary>One response the brain got: its cost, the effort it was asked at, whether
+    /// it hit max_tokens, and whether its request asked for the API's fast mode. Counted only
+    /// while a fight is open.</summary>
+    public void Response(decimal usd, string? effort, bool cutOff, bool fast = false)
     {
         lock (_gate)
         {
@@ -90,6 +91,9 @@ public sealed class FightLog
             var level = string.IsNullOrWhiteSpace(effort) ? "default" : effort;
             if (!fight.Efforts.Contains(level))
                 fight.Efforts.Add(level);
+            var speed = fast ? ModelPrices.FastSpeed : ModelPrices.StandardSpeed;
+            if (!fight.Speeds.Contains(speed))
+                fight.Speeds.Add(speed);
         }
     }
 
@@ -288,6 +292,7 @@ public sealed class FightLog
             ["potions_discarded"] = Strings(fight.PotionsDiscarded),
             ["potions_held"] = Strings(held),
             ["effort"] = Strings(fight.Efforts),
+            ["speed"] = Strings(fight.Speeds),
             ["requests"] = fight.Requests,
             ["refreshes"] = fight.Refreshes,
             ["conversations"] = fight.Conversations,
@@ -410,6 +415,7 @@ public sealed class FightLog
         public readonly List<string> PotionsDiscarded = [];
         public List<string> LastPotions = [];
         public readonly List<string> Efforts = [];
+        public readonly List<string> Speeds = [];
         public int Requests;
         public int Refreshes;
         public int Conversations;
