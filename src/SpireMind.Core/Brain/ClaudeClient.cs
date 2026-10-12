@@ -17,7 +17,8 @@ namespace SpireMind.Core.Brain;
 /// keep-alive keeps the quiet connection from being dropped along the way.
 ///
 /// Passing failures are retried, at most <see cref="MaxAttempts"/> tries in total: 429 after
-/// its retry-after (unless it is the Console spend limit), and 500, 502, 503, 504, 529 and
+/// its retry-after (unless it is the Console spend limit, or a request in fast mode is asked to
+/// wait longer than <see cref="MaxFastRetryAfter"/>), and 500, 502, 503, 504, 529 and
 /// network errors (including a request timing out) with exponential backoff from 1, 2, 4 and
 /// 8 seconds plus up to half again of jitter. Anything else, or the last failure, throws
 /// <see cref="ClaudeApiException"/> with a <see cref="ClaudeErrorKind"/>. Cancelling the
@@ -97,6 +98,13 @@ public sealed class ClaudeClient : IClaudeApi, IDisposable
     /// <summary>A 429 asking to wait longer than this isn't retried; the exception carries the wait.</summary>
     public TimeSpan MaxRetryAfter { get; init; } = TimeSpan.FromMinutes(5);
 
+    /// <summary>The same for a request that asks for the API's fast mode (a top-level
+    /// <c>"speed": "fast"</c>): fast mode has a rate limit of its own, and the caller would
+    /// rather send the request again at standard speed than wait long for it (ApiBrain does), so
+    /// only short waits are made here. With the five tries, a fast request waits two minutes at
+    /// most before its caller hears of the 429.</summary>
+    public TimeSpan MaxFastRetryAfter { get; init; } = TimeSpan.FromSeconds(30);
+
     /// <summary>Sent as the anthropic-beta header when not empty (compaction, context editing).</summary>
     public IReadOnlyList<string> Betas { get; init; } = [];
 
@@ -127,11 +135,13 @@ public sealed class ClaudeClient : IClaudeApi, IDisposable
             body = request.ToJsonString();
         }
         var timeout = TimeoutFor(request);
+        var fast = request["speed"] is JsonValue speed && speed.TryGetValue<string>(out var asks) && asks == ModelPrices.FastSpeed;
+        var longestWait = fast && MaxFastRetryAfter < MaxRetryAfter ? MaxFastRetryAfter : MaxRetryAfter;
 
         for (var attempt = 1; ; attempt++)
         {
             ct.ThrowIfCancellationRequested();
-            var (response, failure) = await AttemptAsync(body, betas, attempt, timeout, ct);
+            var (response, failure) = await AttemptAsync(body, betas, attempt, timeout, longestWait, ct);
             if (response is not null)
                 return response;
 
@@ -154,7 +164,7 @@ public sealed class ClaudeClient : IClaudeApi, IDisposable
     private sealed record Failure(ClaudeErrorKind Kind, int? Status, string? ErrorType, string Message,
         string? RequestId, bool Retryable, TimeSpan? RetryAfter = null, Exception? Inner = null);
 
-    private async Task<(ClaudeResponse? Response, Failure? Failure)> AttemptAsync(string body, IReadOnlyList<string> betas, int attempt, TimeSpan timeout, CancellationToken ct)
+    private async Task<(ClaudeResponse? Response, Failure? Failure)> AttemptAsync(string body, IReadOnlyList<string> betas, int attempt, TimeSpan timeout, TimeSpan longestWait, CancellationToken ct)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(timeout);
@@ -186,7 +196,7 @@ public sealed class ClaudeClient : IClaudeApi, IDisposable
                     "The response body wasn't a JSON object.", requestId, Retryable: true));
             }
 
-            return (null, Classify(status, reply.ReasonPhrase, text, requestId, RetryAfterOf(reply)));
+            return (null, Classify(status, reply.ReasonPhrase, text, requestId, RetryAfterOf(reply), longestWait));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -254,8 +264,9 @@ public sealed class ClaudeClient : IClaudeApi, IDisposable
         throw last ?? new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.HostNotFound);
     }
 
-    /// <summary>Maps an error response to a kind and decides whether it is worth another try.</summary>
-    private Failure Classify(int status, string? reason, string body, string? requestId, TimeSpan? retryAfter)
+    /// <summary>Maps an error response to a kind and decides whether it is worth another try: a
+    /// 429 is when it asks to wait no longer than <paramref name="longestWait"/>.</summary>
+    private Failure Classify(int status, string? reason, string body, string? requestId, TimeSpan? retryAfter, TimeSpan longestWait)
     {
         var json = TryParseObject(body);
         var error = json?["error"] as JsonObject;
@@ -281,7 +292,7 @@ public sealed class ClaudeClient : IClaudeApi, IDisposable
         {
             401 or 403 => Fail(ClaudeErrorKind.Unauthorized),
             400 or 404 or 413 => Fail(ClaudeErrorKind.InvalidRequest),
-            429 => Fail(ClaudeErrorKind.RateLimited, retryable: retryAfter is null || retryAfter <= MaxRetryAfter),
+            429 => Fail(ClaudeErrorKind.RateLimited, retryable: retryAfter is null || retryAfter <= longestWait),
             529 => Fail(ClaudeErrorKind.Overloaded, retryable: true),
             500 or 502 or 503 or 504 => Fail(ClaudeErrorKind.Server, retryable: true),
             >= 500 => Fail(ClaudeErrorKind.Server),

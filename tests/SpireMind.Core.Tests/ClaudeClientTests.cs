@@ -215,6 +215,55 @@ public class ClaudeClientTests
         Assert.Empty(rig.Delays);
     }
 
+    [Theory]
+    [InlineData("30", true)] // a short wait is made, in fast mode too
+    [InlineData("31", false)] // a longer one isn't: the caller sends the request again at standard speed instead
+    [InlineData("300", false)]
+    public async Task A_fast_mode_request_waits_only_a_short_retry_after(string retryAfter, bool retried)
+    {
+        var rig = new Rig();
+        rig.Handler.Script(_ => Reply(429, ErrorBody("rate_limit_error", "fast mode rate limit"), ("retry-after", retryAfter)), _ => Ok());
+        var request = Request();
+        request["speed"] = "fast";
+
+        if (retried)
+        {
+            await rig.Client().SendAsync(request, CancellationToken.None);
+            Assert.Equal([TimeSpan.FromSeconds(30)], rig.Delays);
+            Assert.Equal(2, rig.Handler.Requests.Count);
+        }
+        else
+        {
+            var ex = await Assert.ThrowsAsync<ClaudeApiException>(() => rig.Client().SendAsync(request, CancellationToken.None));
+            Assert.Equal(ClaudeErrorKind.RateLimited, ex.Kind);
+            Assert.Equal(1, ex.Attempts);
+            Assert.Empty(rig.Delays);
+            Assert.Single(rig.Handler.Requests);
+        }
+
+        // The same 429 on a request at standard speed is waited for as ever (up to five minutes).
+        var standard = new Rig();
+        standard.Handler.Script(_ => Reply(429, ErrorBody("rate_limit_error", "slow down"), ("retry-after", retryAfter)), _ => Ok());
+        await standard.Client().SendAsync(Request(), CancellationToken.None);
+        Assert.Equal([TimeSpan.FromSeconds(int.Parse(retryAfter))], standard.Delays);
+    }
+
+    [Fact]
+    public async Task A_fast_mode_request_waits_two_minutes_at_most_before_its_429_is_thrown()
+    {
+        var rig = new Rig();
+        rig.Handler.Script(Enumerable.Repeat<Func<HttpRequestMessage, HttpResponseMessage>>(
+            _ => Reply(429, ErrorBody("rate_limit_error", "fast mode rate limit"), ("retry-after", "30")), 5).ToArray());
+        var request = Request();
+        request["speed"] = "fast";
+
+        var ex = await Assert.ThrowsAsync<ClaudeApiException>(() => rig.Client().SendAsync(request, CancellationToken.None));
+
+        Assert.Equal(ClaudeErrorKind.RateLimited, ex.Kind);
+        Assert.Equal(5, ex.Attempts);
+        Assert.Equal(TimeSpan.FromMinutes(2), rig.Delays.Aggregate(TimeSpan.Zero, (sum, wait) => sum + wait));
+    }
+
     [Fact]
     public async Task Spend_limit_429_is_not_retried()
     {

@@ -2822,6 +2822,107 @@ public class ApiBrainTests
         Assert.Equal(expected, reason);
         Assert.Equal(2, rig.Api.Count);
         Assert.Equal(["fast", null], Enumerable.Range(0, 2).Select(i => Speed(rig.Api[i])));
+        // Nothing says fast mode was the reason, so it isn't blamed and stays as it was set.
+        Assert.DoesNotContain(ApiBrain.FastRefused, rig.Announced);
+        Assert.Single(rig.Announced);
+        Assert.Equal(0, rig.FastDeclinedCalls);
+        Assert.True(rig.Settings.Fast);
+        Assert.Contains(rig.Logged, l => l.Contains("the first fast mode request was refused") && l.Contains("to see whether fast mode is the reason"));
+    }
+
+    [Fact]
+    public async Task An_unnamed_refusal_is_blamed_on_fast_mode_only_once_the_standard_try_is_answered()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Fast = true };
+        rig.Api
+            .Then(new ClaudeApiException(ClaudeErrorKind.InvalidRequest, 400, "some_error", "Request not allowed", "req_1"))
+            .Then(() =>
+            {
+                // The try at standard speed can't reach Claude: nothing is said about fast mode yet.
+                Assert.DoesNotContain(ApiBrain.FastRefused, rig.Announced);
+                Assert.True(rig.Settings.Fast);
+                throw new ClaudeApiException(ClaudeErrorKind.Network, null, null, "connection reset", null, attempts: 5);
+            })
+            .Then(() =>
+            {
+                Assert.DoesNotContain(ApiBrain.FastRefused, rig.Announced);
+                return Reply("tool_use", Usage(), ToolUse("toolu_1", "get_state"));
+            })
+            .Then(Reply("tool_use", Usage(), ToolUse("toolu_2", "get_state")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        // The retry stays at standard speed although the setting is still on, and so does what follows.
+        Assert.Equal(["fast", null, null, null, null], Enumerable.Range(0, 5).Select(i => Speed(rig.Api[i])));
+        Assert.Equal(WithoutFast(rig.Api[0]), rig.Api[2].ToJsonString());
+        Assert.Equal([ApiBrain.Retrying, ApiBrain.FastRefused], rig.Announced);
+        Assert.Equal(1, rig.FastDeclinedCalls);
+        Assert.False(rig.Settings.Fast);
+        Assert.Contains(rig.Logged, l => l.Contains("went through at standard speed, so fast mode is what the API refused"));
+        Assert.True(rig.Brain.IsRunning);
+    }
+
+    [Fact]
+    public async Task An_unnamed_refusal_is_forgotten_when_fast_mode_is_switched_off_and_on_and_then_works()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Fast = true };
+        ClaudeApiException Unreachable() => new(ClaudeErrorKind.Network, null, null, "connection reset", null, attempts: 5);
+        rig.Api
+            .Then(new ClaudeApiException(ClaudeErrorKind.InvalidRequest, 400, "some_error", "Request not allowed", "req_1"))
+            .Then(() =>
+            {
+                rig.Settings = rig.Settings with { Fast = false }; // /fast off while the standard try can't reach Claude
+                throw Unreachable();
+            })
+            .Then(() =>
+            {
+                rig.Settings = rig.Settings with { Fast = true }; // and on again: a new try
+                throw Unreachable();
+            })
+            .Then(Reply("tool_use", FastUsage(), ToolUse("toolu_1", "get_state")));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        // The fast request that went through is not what switches fast mode off.
+        Assert.Equal(["fast", null, null, "fast", "fast"], Enumerable.Range(0, 5).Select(i => Speed(rig.Api[i])));
+        Assert.Equal([ApiBrain.Retrying], rig.Announced);
+        Assert.Equal(0, rig.FastDeclinedCalls);
+        Assert.True(rig.Settings.Fast);
+    }
+
+    [Fact]
+    public async Task A_first_fast_request_whose_effort_message_is_what_the_api_refuses_leaves_fast_mode_on()
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { Effort = "medium" };
+        rig.Host.Handler = ActsReturn(RoomSnap("combat", "Elite"), Snap("map", true), Snap("map", true));
+        var refusal = new ClaudeApiException(ClaudeErrorKind.InvalidRequest, 400, "invalid_request_error", "messages.4: Input should be a valid dictionary", "req_1");
+        rig.Api
+            .Then(Act("toolu_1"))
+            .Then(() =>
+            {
+                rig.Settings = rig.Settings with { Fast = true }; // /fast on, just as the room is left
+                return Act("toolu_2");
+            })
+            // The first fast request is also the first with the effort message, and the API refuses
+            // it at both speeds without saying which it minds: it was the effort message.
+            .Then(refusal)
+            .Then(refusal)
+            .Then(Reply("tool_use", FastUsage(), ToolUse("toolu_3", "act", new JsonObject { ["action_id"] = "map:0" })));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal([null, null, "fast", null, "fast", "fast"], Enumerable.Range(0, 6).Select(i => Speed(rig.Api[i])));
+        Assert.Equal([ApiBrain.PerMessageEffortRefused], rig.Announced);
+        Assert.StartsWith(ApiBrain.RoomEffortChanged, Text(Assert.Single(rig.Api[4]["messages"]!.AsArray())!));
+        Assert.Equal(FastOnly, Betas(rig.Api[4]));
+        Assert.True(rig.Settings.Fast);
+        Assert.Equal(0, rig.FastDeclinedCalls);
     }
 
     [Theory]
@@ -2956,6 +3057,10 @@ public class ApiBrainTests
     [InlineData(false, "fast", true)] // not asked, but the response says fast: what it reports is what was billed
     [InlineData(false, "standard", false)]
     [InlineData(false, null, false)] // as before fast mode existed
+    [InlineData(true, "priority", true)] // a word the mod doesn't know: counted as asked, never at half price
+    [InlineData(false, "priority", false)]
+    [InlineData(true, "Standard", false)]
+    [InlineData(false, "FAST", true)]
     public async Task The_price_follows_the_speed_the_response_reports(bool asked, string? reported, bool fastPrice)
     {
         using var rig = new Rig();
@@ -2969,7 +3074,7 @@ public class ApiBrainTests
         var standard = (1000 * 4m + 30_000 * 0.20m + 500 * 20m) / 1_000_000m;
         Assert.Equal(asked ? "fast" : null, Speed(rig.Api[0]));
         Assert.Equal(fastPrice ? 2 * standard : standard, rig.Spend.RunTotal);
-        Assert.Equal(asked && reported == "standard", rig.Logged.Any(l => l.Contains("asked for fast mode but the response says speed standard")));
+        Assert.Equal(asked && !fastPrice, rig.Logged.Any(l => l.Contains($"asked for fast mode but the response says speed {reported}")));
     }
 
     [Fact]

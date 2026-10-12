@@ -119,7 +119,8 @@ public sealed class ApiBrain : IPlayBrain
     public const string FastOverloaded = "Fast mode is out of capacity right now; back to normal speed.";
 
     /// <summary>Said instead of <see cref="FastRateLimited"/> when the API refused the speed field or
-    /// its beta flag (see <see cref="FastTurnedDown"/>).</summary>
+    /// its beta flag, or refused the first fast request without saying why and then answered the
+    /// same request at standard speed (see <see cref="FastTurnedDown"/>).</summary>
     public const string FastRefused = "Claude turned down fast mode (a research preview your API key may not have yet); back to normal speed. The details are in the log.";
 
     /// <summary>Ends every opening message.</summary>
@@ -204,6 +205,7 @@ public sealed class ApiBrain : IPlayBrain
     private bool _sentFast; // the last request the API answered asked for fast mode
     private bool _fastProven; // the API has answered a fast request since Start
     private bool _fastDeclined; // the API turned fast mode down and the setting stayed on: standard speed until it is switched off (and on again)
+    private string? _fastUnproven; // the chat line for a refusal of the first fast request that didn't name fast mode, until its try at standard speed is answered
     private bool _fastMismatchLogged; // a response to a fast request said it ran at standard speed (logged once)
     private int _endTurnsInRow;
     private int _cutOffsInRow;
@@ -555,6 +557,7 @@ public sealed class ApiBrain : IPlayBrain
             _sentFast = false;
             _fastProven = false;
             _fastDeclined = false;
+            _fastUnproven = null;
             _fastMismatchLogged = false;
 
             // Nothing is sent until a run is in progress or the human writes.
@@ -1213,22 +1216,25 @@ public sealed class ApiBrain : IPlayBrain
     /// Why the API's answer to a request that asked for fast mode means "not at this speed": the line
     /// for the chat, or null when the failure has nothing to do with fast mode (or the request didn't
     /// ask for it). The caller then sends the same request again without the speed field, once.
+    /// <paramref name="certain"/> says whether the answer itself points at fast mode; when it doesn't,
+    /// only the standard try can tell, and the caller blames fast mode only once that went through.
     /// <list type="bullet">
     /// <item>A 429 that outlasted the client's own retries (which honour retry-after): fast mode has
-    /// a rate limit of its own, separate from the model's standard one.</item>
-    /// <item>A 529 that outlasted them: fast mode has a capacity of its own too.</item>
-    /// <item>A request the API refuses as invalid (a 400, or a 404 or 413) whose words name the speed
-    /// field, fast mode or its beta flag. So does any such refusal of the first fast request since
-    /// Start that names no effort message (fast mode is a research preview a key may not have, and the
-    /// API's words for that aren't documented), like a refused effort message. A prompt the API calls
-    /// too long is never one of these.</item>
-    /// <item>A 403 the same way: one that names fast mode, or the first fast request's. A key the API
-    /// rejects outright fails the standard request too, and stops the brain as before; a 401 is
-    /// never taken for fast mode.</item>
+    /// a rate limit of its own, separate from the model's standard one. Certain.</item>
+    /// <item>A 529 that outlasted them: fast mode has a capacity of its own too. Certain.</item>
+    /// <item>A request the API refuses outright (a 400, 404 or 413, or a 403) whose words name the
+    /// speed field, fast mode or its beta flag. Certain.</item>
+    /// <item>Any such refusal of the first fast request since Start that names no effort message
+    /// (fast mode is a research preview a key may not have, and the API's words for that aren't
+    /// documented). Not certain: the request may be wrong at any speed, and a key the API rejects
+    /// outright fails the standard try too.</item>
     /// </list>
+    /// A prompt the API calls too long, a 401, and credit and spend limit errors are never taken for
+    /// fast mode.
     /// </summary>
-    private string? FastTurnedDown(JsonObject request, ClaudeApiException ex)
+    private string? FastTurnedDown(JsonObject request, ClaudeApiException ex, out bool certain)
     {
+        certain = true;
         if (!IsFast(request))
             return null;
         switch (ex.Kind)
@@ -1245,13 +1251,45 @@ public sealed class ApiBrain : IPlayBrain
                           || ex.ApiMessage.Contains("effort", StringComparison.OrdinalIgnoreCase);
         var first = !_fastProven && !effortNamed;
         var refused = (ex.Kind == ClaudeErrorKind.InvalidRequest && !ex.PromptTooLong) || ex.Status == 403;
+        certain = named;
         return refused && (named || first) ? FastRefused : null;
+    }
+
+    // The API turned fast mode down: said once in the chat, and the controller is told, which
+    // switches the setting off, so a /fast on from here on is a new try. Where nobody does (no
+    // controller), the brain keeps to standard speed itself.
+    private void DeclineFast(string said)
+    {
+        Announce(said);
+        try { _onFastDeclined?.Invoke(); }
+        catch (Exception callback) { Log($"brain: the fast mode callback threw {callback.GetType().Name}: {callback.Message}"); }
+        _fastDeclined = _settings().Fast;
     }
 
     // Sends the request, resending it after a growing pause while the API can't be reached.
     // Errors that need the human (credit, key, limits) and requests the API refuses stop the
     // brain. Null when the API says the prompt is too long, so the caller can start afresh.
     private async Task<ClaudeResponse?> SendAsync(JsonObject request, CancellationToken ct)
+    {
+        try
+        {
+            return await SendWithRetriesAsync(request, ct);
+        }
+        finally
+        {
+            // The first fast request was refused without a word about fast mode, and its try at
+            // standard speed didn't go through either (the request is wrong at any speed, the key
+            // is rejected, the settings changed): nothing says fast mode was the reason, so it
+            // isn't blamed and stays as it was set.
+            if (_fastUnproven is not null)
+            {
+                _fastUnproven = null;
+                _fastDeclined = false;
+            }
+        }
+    }
+
+    private async Task<ClaudeResponse?> SendWithRetriesAsync(JsonObject request, CancellationToken ct)
     {
         var pause = RetryFirstDelay;
         var announced = false;
@@ -1265,6 +1303,16 @@ public sealed class ApiBrain : IPlayBrain
                 var response = await _api.SendAsync(request, ct);
                 if (announced)
                     Log("brain: Claude is reachable again");
+                if (_fastUnproven is { } unproven)
+                {
+                    _fastUnproven = null;
+                    // Not when /fast was switched off and on again meanwhile and this answer is to a fast request.
+                    if (!IsFast(request))
+                    {
+                        Log("brain: the same request went through at standard speed, so fast mode is what the API refused");
+                        DeclineFast(unproven);
+                    }
+                }
                 return response;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -1274,20 +1322,26 @@ public sealed class ApiBrain : IPlayBrain
             catch (ClaudeApiException ex)
             {
                 TranscriptError(ex.Kind.ToString(), ex.Status);
-                if (FastTurnedDown(request, ex) is { } said)
+                if (FastTurnedDown(request, ex, out var certain) is { } said)
                 {
                     // The API won't run this request in fast mode: the same request again at once
-                    // without the speed field, so the turn isn't lost, and no more fast requests
-                    // until fast mode is switched on again. The request no longer asks for it, so
-                    // this can't come round twice.
-                    Log($"brain: fast mode turned down ({ex.Kind}): {ex.Message}; sending the request again at standard speed");
+                    // without the speed field, so the turn isn't lost. The request no longer asks
+                    // for it, so this can't come round twice.
                     DropFast(request);
-                    Announce(said);
-                    try { _onFastDeclined?.Invoke(); }
-                    catch (Exception callback) { Log($"brain: the fast mode callback threw {callback.GetType().Name}: {callback.Message}"); }
-                    // The controller has switched the setting off, and a /fast on from here on is a
-                    // new try. Where nobody did (no controller), the brain keeps to standard speed itself.
-                    _fastDeclined = _settings().Fast;
+                    if (certain)
+                    {
+                        // No more fast requests until fast mode is switched on again.
+                        Log($"brain: fast mode turned down ({ex.Kind}): {ex.Message}; sending the request again at standard speed");
+                        DeclineFast(said);
+                    }
+                    else
+                    {
+                        // The refusal doesn't say what is wrong. Standard speed for this request;
+                        // fast mode is blamed, and switched off, only once that try is answered.
+                        Log($"brain: the first fast mode request was refused ({ex.Kind}): {ex.Message}; sending it once at standard speed to see whether fast mode is the reason");
+                        _fastDeclined = true;
+                        _fastUnproven = said;
+                    }
                     continue;
                 }
                 switch (ex.Kind)

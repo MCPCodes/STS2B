@@ -75,10 +75,15 @@ public sealed class ClaudeResponse
     /// <summary>The cost of this response, priced as <see cref="Model"/> when the response names
     /// one, else as <paramref name="requestedModel"/>, and at the speed its usage reports
     /// (<see cref="Speed"/>): the fast-mode rates for "fast", the standard ones for "standard".
-    /// Only when the usage names no speed at all does <paramref name="requestedFast"/> decide,
-    /// so a fast request whose response leaves the field out is not counted at half its price.</summary>
-    public UsageCost Cost(string requestedModel, bool requestedFast = false) =>
-        ModelPrices.Cost(Model ?? requestedModel, Usage, Speed is null ? requestedFast : ModelPrices.IsFast(UsageJson));
+    /// Only when the usage names neither (no speed at all, or a word the mod doesn't know) does
+    /// <paramref name="requestedFast"/> decide, so a fast request whose response doesn't say it
+    /// ran at standard speed is never counted at half its price.</summary>
+    public UsageCost Cost(string requestedModel, bool requestedFast = false)
+    {
+        var fast = ModelPrices.IsFast(UsageJson)
+                   || (requestedFast && !string.Equals(Speed, ModelPrices.StandardSpeed, StringComparison.OrdinalIgnoreCase));
+        return ModelPrices.Cost(Model ?? requestedModel, Usage, fast);
+    }
 
     private static string? Str(JsonNode? node) => node is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
 }
