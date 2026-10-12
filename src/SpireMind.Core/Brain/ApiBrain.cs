@@ -56,6 +56,8 @@ public enum BrainStopReason
 /// A switch to a higher effort starts a fresh conversation at that effort; a switch to a lower one
 /// keeps the conversation and lowers it with an effort-only system message where the model takes one
 /// (see <see cref="SupportsPerMessageEffort"/>).</item>
+/// <item>Two switches, off by default, ask for a whole-turn plan at the start of each player turn in
+/// those rooms and raise the effort of that one request (see <see cref="TurnPlan"/>).</item>
 /// <item>Spend is added up from each response's usage and checked against the monthly cap
 /// before every request, together with the other copies' requests in flight in co-op
 /// (<see cref="SpendTracker.TryBegin"/>).</item>
@@ -99,6 +101,10 @@ public sealed class ApiBrain : IPlayBrain
 
     /// <summary>Said once in the game chat when the API turns down an effort-only system message.</summary>
     public const string PerMessageEffortRefused = "Claude turned down the in-conversation effort change, so leaving an elite or boss room starts a fresh conversation until the next /start. The details are in the log.";
+
+    /// <summary>Added after the first snapshot of each player turn in an elite or boss room while
+    /// <see cref="BrainSettings.TurnPlanNote"/> is on (see <see cref="TurnPlan"/>).</summary>
+    public const string PlanTheTurn = "(New turn. Before your first tool call, plan the whole turn: the enemies' damage this turn and over their next two turns (next_moves), when each enemy dies, and the order of every card and potion. Then play it.)";
 
     /// <summary>Ends every opening message.</summary>
     public const string CarryOn = "Carry on from here.";
@@ -165,12 +171,19 @@ public sealed class ApiBrain : IPlayBrain
     private long? _conversationBaseTokens;
     private string? _conversationModel;
     private string? _conversationEffort; // the top-level effort, fixed for the conversation so its cache holds
-    private string? _currentEffort; // the effort in effect: _conversationEffort, or the last effort message's
+    private string? _currentEffort; // the room's effort in effect: _conversationEffort, or the last room switch's message (a turn plan's raise aside)
     private string? _effortRoom; // the fight room the last request was built for
     private string? _fightRoom; // the elite or boss room the bot is in (RunScreens.FightRoom), or null
     private bool _effortMessages; // the conversation holds an effort-only system message
     private bool _effortMessageUnsent; // the newest one hasn't been in a request the API answered yet
-    private bool _perMessageEffortRefused; // the API refused one, so room switches start fresh conversations
+    private bool _perMessageEffortRefused; // the API refused one, so room switches start fresh conversations and turn plans don't raise
+    private string? _planTurn; // the turn and round ("3/3") of this fight's last new player turn (NoteTurn)
+    private bool _planPending; // that turn's first snapshot hasn't been in a request the API answered yet
+    private bool _planSent; // the last user message already carries the turn plan
+    private string? _planRaised; // the turn_plan_effort an effort message raised the conversation to, until it is lowered
+    private string? _planSkipLogged; // why the last raise was skipped, logged once
+    private string? _sentEffort; // the effort the last request was sent at
+    private bool _sentTurnPlan; // the last request carried a turn plan
     private int _endTurnsInRow;
     private int _cutOffsInRow;
     private int _refusalsInRow;
@@ -273,9 +286,10 @@ public sealed class ApiBrain : IPlayBrain
     /// True when <paramref name="model"/> takes an effort-only system message
     /// (<c>{"role": "system", "content": [], "output_config": {"effort": ...}}</c>, beta
     /// <see cref="PerMessageEffortBeta"/>), which changes effort from the next user turn with new input
-    /// on without touching the cached prefix or the thinking blocks. The brain uses it only to lower
-    /// effort (see <see cref="SwitchRoomEffort"/>); on other models that starts a fresh conversation
-    /// too (a top-level change would restart the messages cache anyway).
+    /// on without touching the cached prefix or the thinking blocks. The brain uses it to lower effort
+    /// (see <see cref="SwitchRoomEffort"/>); on other models that starts a fresh conversation too (a
+    /// top-level change would restart the messages cache anyway). With turn_plan_effort set, it also
+    /// raises effort for the first request of a player turn, on these models only (see <see cref="TurnPlan"/>).
     /// </summary>
     public static bool SupportsPerMessageEffort(string? model) =>
         model is not null && PerMessageEffortModels.Contains(model);
@@ -507,6 +521,9 @@ public sealed class ApiBrain : IPlayBrain
             _waitShown = null;
             _fightRoom = null;
             _perMessageEffortRefused = false;
+            _planTurn = null;
+            _planPending = false;
+            _planSkipLogged = null;
             _heldBack = false;
 
             // Nothing is sent until a run is in progress or the human writes.
@@ -570,7 +587,7 @@ public sealed class ApiBrain : IPlayBrain
         // Every way out below that doesn't reach _spend.Add cancels it.
         // A conversation's first request writes the whole prompt to the cache, so it is
         // estimated high for the other copies.
-        if (!_spend.TryBegin(cap, now, out var month, freshConversation: _messages.Count <= 1))
+        if (!_spend.TryBegin(cap, now, out var month, freshConversation: OpeningOnly()))
             throw new StopBrainException(BrainStopReason.MonthlyCap, month >= cap
                 ? Invariant($"Monthly API budget reached: ${month:0.00} of ${cap:0.00} spent this month, so the API brain stopped.")
                 : Invariant($"Monthly API budget nearly reached: ${month:0.00} of ${cap:0.00} spent this month, and the other copies' requests in flight would go over it, so the API brain stopped."));
@@ -585,7 +602,7 @@ public sealed class ApiBrain : IPlayBrain
             // Elite and boss rooms have an effort of their own (BrainSettings.EffortFor).
             var room = _fightRoom;
             var effort = EffortOf(settings, room);
-            if (_conversationModel is not null && _messages.Count > 1)
+            if (_conversationModel is not null && !OpeningOnly())
             {
                 if (_conversationModel != model || (_currentEffort != effort && room == _effortRoom))
                 {
@@ -598,7 +615,7 @@ public sealed class ApiBrain : IPlayBrain
                     SwitchRoomEffort(model, room, effort);
                 }
             }
-            if (_messages.Count <= 1)
+            if (OpeningOnly())
             {
                 // A conversation's first request fixes its top-level effort, a fight room's included.
                 _conversationEffort = effort;
@@ -606,7 +623,10 @@ public sealed class ApiBrain : IPlayBrain
             _conversationModel = model;
             _currentEffort = effort;
             _effortRoom = room;
-            request = BuildRequest(model, _conversationEffort, settings.MaxTokens ?? MaxTokensFor(effort));
+            // The first request of a player turn in an elite or boss room may be raised above the
+            // room's effort for that request alone; _currentEffort stays the room's.
+            _sentEffort = TurnPlan(settings, model, room, effort);
+            request = BuildRequest(model, _conversationEffort, settings.MaxTokens ?? MaxTokensFor(_sentEffort));
             sentAt = _clock();
             sent = await SendAsync(request, ct);
         }
@@ -615,15 +635,19 @@ public sealed class ApiBrain : IPlayBrain
             // /model or /effort while the request was being resent: the next step builds a new one.
             _spend.Cancel();
             Log("brain: the model or effort changed while retrying; sending a new request");
+            // A turn plan put in an opening message was made for the old settings, and the next
+            // step leaves an opening alone: build that over too.
+            if (_sentTurnPlan && OpeningOnly())
+                StartConversation(ModelChanged);
             return;
         }
         catch (EffortMessageRefusedException)
         {
-            // The API turned down the per-message effort beta: change effort the old way from now on.
-            // A refused request isn't billed.
+            // The API turned down the per-message effort beta: change effort the old way from now on,
+            // and raise no turn plan. A refused request isn't billed.
             _spend.Cancel();
             _perMessageEffortRefused = true;
-            Log("brain: the API refused the per-message effort change; starting a fresh conversation, and fresh ones for room effort changes from now on");
+            Log("brain: the API refused the per-message effort change; starting a fresh conversation, fresh ones for room effort changes and no turn plan raises from now on");
             Announce(PerMessageEffortRefused);
             StartConversation(RoomEffortChanged);
             return;
@@ -639,18 +663,21 @@ public sealed class ApiBrain : IPlayBrain
         {
             // The API said the prompt is over the context window.
             _spend.Cancel();
-            if (_messages.Count <= 1)
+            if (OpeningOnly())
                 throw new StopBrainException(BrainStopReason.Error, "The prompt alone is too long for the model, so the API brain stopped.");
             Log("brain: the prompt is too long; starting a fresh conversation");
             StartConversation(Refreshed);
             return;
         }
         var receivedAt = _clock();
+        // A turn plan this request carried has its answer; one it didn't send yet goes in the next.
+        _planPending = false;
+        _planSent = false;
 
         var billedModel = response.Model ?? model;
         var cost = response.Cost(model);
         _spend.Add(cost.Usd, receivedAt);
-        _fights?.Response(cost.Usd, _currentEffort, response.StopReason == "max_tokens");
+        _fights?.Response(cost.Usd, _sentEffort, response.StopReason == "max_tokens");
         var usage = response.Usage;
         Interlocked.Exchange(ref _lastPromptTokens, usage.PromptTokens);
         _conversationBaseTokens ??= usage.PromptTokens;
@@ -834,26 +861,120 @@ public sealed class ApiBrain : IPlayBrain
     private void SwitchRoomEffort(string model, string? room, string? effort)
     {
         var where = room is null ? $"left the {_effortRoom ?? "fight"} room" : $"entered the {room} room";
-        if (Lower(effort, _currentEffort) && SupportsPerMessageEffort(model) && !_perMessageEffortRefused
-            && _messages[^1]["role"]?.GetValue<string>() == "user" && _messages[^1]["content"] is JsonArray content)
+        if (Lower(effort, _currentEffort) && SupportsPerMessageEffort(model) && !_perMessageEffortRefused && LastUserContent() is not null)
         {
             Log($"brain: {where}; effort {_currentEffort} to {effort}, keeping the conversation");
-            content.Add(TextBlock(room is null
+            SetMessageEffort(effort!, room is null
                 ? $"(You left the {_effortRoom ?? "fight"} room, so the thinking effort is back to {effort}.)"
-                : $"({room} rooms are played at {effort} effort, so the thinking effort is now {effort}.)"));
+                : $"({room} rooms are played at {effort} effort, so the thinking effort is now {effort}.)");
+            _planRaised = null; // the room's effort replaces a turn plan's raise
+            return;
+        }
+        Log($"brain: {where}; effort {_currentEffort ?? "default"} to {effort ?? "default"}, starting a fresh conversation");
+        StartConversation(RoomEffortChanged);
+    }
+
+    /// <summary>
+    /// The turn plan switches, for arena measurement and off by default, applied to the request
+    /// about to be built. Returns the effort that request is sent at.
+    /// <list type="bullet">
+    /// <item>The request that carries the first actionable snapshot of a new player turn in an elite
+    /// or boss room (see <see cref="NoteTurn"/>) gets <see cref="PlanTheTurn"/> after its last block
+    /// when <see cref="BrainSettings.TurnPlanNote"/> is on.</item>
+    /// <item>When <see cref="BrainSettings.TurnPlanEffort"/> is higher than the room's effort, that
+    /// request also gets an effort-only system message raising it, put in like a room switch's (see
+    /// <see cref="SwitchRoomEffort"/>), with the plan note or a short note of its own so the user
+    /// turn counts as new input. A raise still in effect from the turn before simply stays.</item>
+    /// <item>The next request lowers effort back to the room's the same way. A room switch in
+    /// between takes its place, and a fresh conversation starts at the room's effort anyway.</item>
+    /// <item>No raise on a model without per-message effort, or once the API refused an effort
+    /// message: changing the top-level effort would start a fresh conversation every turn. Logged once.</item>
+    /// </list>
+    /// The room's effort (<c>_currentEffort</c>) is left alone, so the room logic never takes the
+    /// raise for an /effort change.
+    /// </summary>
+    private string? TurnPlan(BrainSettings settings, string model, string? room, string? effort)
+    {
+        // The same request again (the settings changed while it was retried, then changed back).
+        if (_planSent)
+            return _planRaised ?? effort;
+        _sentTurnPlan = false;
+        if (LastUserContent() is not { } content)
+            return _planRaised ?? effort;
+
+        var level = settings.TurnPlanEffort;
+        if (_planPending && room is not null && (settings.TurnPlanNote || level is not null))
+        {
+            var note = settings.TurnPlanNote ? PlanTheTurn : null;
+            var higher = level is not null && Lower(effort, level);
+            var raise = higher && SupportsPerMessageEffort(model) && !_perMessageEffortRefused;
+            if (higher && !raise)
+            {
+                var why = _perMessageEffortRefused ? "the API refused per-message effort" : $"{model} doesn't take per-message effort";
+                if (_planSkipLogged != why)
+                    Log($"brain: turn_plan_effort {level} skipped: {why}");
+                _planSkipLogged = why;
+            }
+
+            if (raise && _planRaised != level)
+            {
+                Log($"brain: new turn in the {room} room; effort {effort} to {level} for its plan");
+                SetMessageEffort(level!, note ?? $"(New turn: thinking effort is {level} while you plan it.)");
+                _planRaised = level;
+            }
+            else if (!raise && _planRaised is not null)
+            {
+                // turn_plan_effort went down or off while raised.
+                Log($"brain: new turn in the {room} room; effort {_planRaised} back to {effort}");
+                SetMessageEffort(effort!, note ?? $"(Thinking effort is back to {effort}.)");
+                _planRaised = null;
+            }
+            else if (note is not null)
+            {
+                content.Add(TextBlock(note));
+            }
+            _planSent = true;
+            _sentTurnPlan = note is not null || _planRaised is not null;
+            return _planRaised ?? effort;
+        }
+
+        if (_planRaised is not null)
+        {
+            Log($"brain: turn planned; effort {_planRaised} back to {effort}");
+            SetMessageEffort(effort!, $"(Turn planned; thinking effort back to {effort}.)");
+            _planRaised = null;
+        }
+        return effort;
+    }
+
+    // Puts an effort-only system message just before the last user message and a note at the end of
+    // that message, so it counts as new input and the change applies to this very reply. One still
+    // unsent there (a room switch in this step) is changed instead of adding a second.
+    private void SetMessageEffort(string effort, string note)
+    {
+        LastUserContent()!.Add(TextBlock(note));
+        if (_effortMessageUnsent && _messages.Count > 1 && Role(_messages[^2]) == "system")
+            _messages[^2]["output_config"] = new JsonObject { ["effort"] = effort };
+        else
             _messages.Insert(_messages.Count - 1, new JsonObject
             {
                 ["role"] = "system",
                 ["content"] = new JsonArray(),
                 ["output_config"] = new JsonObject { ["effort"] = effort },
             });
-            _effortMessages = true;
-            _effortMessageUnsent = true;
-            return;
-        }
-        Log($"brain: {where}; effort {_currentEffort ?? "default"} to {effort ?? "default"}, starting a fresh conversation");
-        StartConversation(RoomEffortChanged);
+        _effortMessages = true;
+        _effortMessageUnsent = true;
     }
+
+    // The content of the last message when it is a user message (always, between steps), else null.
+    private JsonArray? LastUserContent() =>
+        _messages.Count > 0 && Role(_messages[^1]) == "user" ? _messages[^1]["content"] as JsonArray : null;
+
+    // True while the conversation's first request hasn't been answered: only its opening message,
+    // with a turn plan's effort message before it aside.
+    private bool OpeningOnly() => _messages.Count(m => Role(m) != "system") <= 1;
+
+    private static string? Role(JsonNode? message) => Str(message?["role"]);
 
     // True when both are levels and effort is below than.
     private static bool Lower(string? effort, string? than)
@@ -931,6 +1052,9 @@ public sealed class ApiBrain : IPlayBrain
         _messages.Add(new JsonObject { ["role"] = "user", ["content"] = new JsonArray(TextBlock(text.ToString())) });
         _effortMessages = false;
         _effortMessageUnsent = false;
+        // A turn plan not answered yet goes in the opening instead; the top-level effort is the room's.
+        _planSent = false;
+        _planRaised = null;
         _unseenChat.Clear();
         _conversationBaseTokens = null;
         _refreshDeferred = false;
@@ -1232,7 +1356,9 @@ public sealed class ApiBrain : IPlayBrain
         copy.Remove("chat");
         _lastSnapshot = copy;
         _lastScreen = Str(copy["screen"]);
+        var roomBefore = _fightRoom;
         _fightRoom = RunScreens.FightRoom(_fightRoom, copy);
+        NoteTurn(copy, roomBefore);
         if (RunStateOf(copy) is { } inRun)
         {
             if (inRun && !_inRun)
@@ -1240,6 +1366,29 @@ public sealed class ApiBrain : IPlayBrain
             _inRun = inRun;
             lock (_gate) _lastSeenInRun = inRun;
         }
+    }
+
+    // Marks the first actionable combat snapshot of each player turn in an elite or boss room, told
+    // apart by its turn and round, for TurnPlan. A hand_select, a busy or waiting snapshot and a turn
+    // already marked don't count. The fight's end (its rewards, or leaving the room) starts over.
+    private void NoteTurn(JsonObject snapshot, string? roomBefore)
+    {
+        var screen = Str(snapshot["screen"]);
+        if (_fightRoom is null || _fightRoom != roomBefore || screen is "rewards" or "card_reward")
+        {
+            _planTurn = null;
+            _planPending = false;
+        }
+        if (_fightRoom is null || screen != "combat" || !IsTrue(snapshot["awaiting_decision"])
+            || snapshot["actions"] is not JsonArray { Count: > 0 } || snapshot["state"] is not JsonObject state
+            || state["turn"] is not JsonValue turn || turn.GetValueKind() != JsonValueKind.Number
+            || state["round"] is not JsonValue round || round.GetValueKind() != JsonValueKind.Number)
+            return;
+        var key = $"{turn.ToJsonString()}/{round.ToJsonString()}";
+        if (key == _planTurn)
+            return;
+        _planTurn = key;
+        _planPending = true;
     }
 
     // True when a result carries the planning session's news for the model: its turn to pitch (one it
@@ -1323,10 +1472,12 @@ public sealed class ApiBrain : IPlayBrain
             ["conversation"] = _conversation,
             ["turn"] = _turn,
             ["model"] = Str(request["model"]),
-            ["effort"] = _currentEffort,
+            ["effort"] = _sentEffort,
             ["sent_at"] = sentAt.ToString("O"),
             ["received_at"] = receivedAt.ToString("O"),
         };
+        if (_sentTurnPlan)
+            entry["turn_plan"] = true;
         if (_turn == 0)
         {
             entry["system_chars"] = _prompt.Text.Length;

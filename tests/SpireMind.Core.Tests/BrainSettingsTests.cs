@@ -235,6 +235,78 @@ public class BrainSettingsTests : IDisposable
     }
 
     [Fact]
+    public void Turn_plan_switches_are_off_by_default_and_round_trip_through_config_json()
+    {
+        var s = Load();
+        Assert.False(s.TurnPlanNote);
+        Assert.Null(s.TurnPlanEffort);
+        Assert.Contains("TurnPlanNote = False, TurnPlanEffort = off", s.ToString());
+
+        // Off, they are left out of the file.
+        s.Save();
+        var json = JsonNode.Parse(File.ReadAllText(s.ConfigPath))!.AsObject();
+        Assert.False(json.ContainsKey("turn_plan_note"));
+        Assert.False(json.ContainsKey("turn_plan_effort"));
+
+        var on = s with { TurnPlanNote = true, TurnPlanEffort = " XHigh " };
+        Assert.Equal("xhigh", on.TurnPlanEffort);
+        on.Save();
+        json = JsonNode.Parse(File.ReadAllText(s.ConfigPath))!.AsObject();
+        Assert.True(json["turn_plan_note"]!.GetValue<bool>());
+        Assert.Equal("xhigh", json["turn_plan_effort"]!.GetValue<string>());
+        var again = Load();
+        Assert.Empty(again.Warnings);
+        Assert.True(again.TurnPlanNote);
+        Assert.Equal("xhigh", again.TurnPlanEffort);
+        Assert.Contains("TurnPlanNote = True, TurnPlanEffort = xhigh", again.ToString());
+
+        (again with { TurnPlanNote = false, TurnPlanEffort = null }).Save();
+        json = JsonNode.Parse(File.ReadAllText(s.ConfigPath))!.AsObject();
+        Assert.False(json.ContainsKey("turn_plan_note"));
+        Assert.False(json.ContainsKey("turn_plan_effort"));
+        Assert.False(Load().TurnPlanNote);
+        Assert.Null(Load().TurnPlanEffort);
+    }
+
+    [Fact]
+    public void Turn_plan_switches_load_from_config_json()
+    {
+        WriteConfig("""{ "turn_plan_note": true, "turn_plan_effort": " Max " }""");
+        var s = Load();
+        Assert.Empty(s.Warnings);
+        Assert.True(s.TurnPlanNote);
+        Assert.Equal("max", s.TurnPlanEffort);
+
+        // JSON null is the same as leaving the key out.
+        WriteConfig("""{ "turn_plan_note": false, "turn_plan_effort": null }""");
+        s = Load();
+        Assert.Empty(s.Warnings);
+        Assert.False(s.TurnPlanNote);
+        Assert.Null(s.TurnPlanEffort);
+    }
+
+    [Fact]
+    public void Bad_turn_plan_values_leave_the_switches_off_with_a_warning()
+    {
+        WriteConfig("""{ "turn_plan_note": "yes", "turn_plan_effort": "extreme" }""");
+        var s = Load();
+        Assert.False(s.TurnPlanNote);
+        Assert.Null(s.TurnPlanEffort);
+        Assert.Equal(2, s.Warnings.Count);
+        Assert.Contains("turn_plan_note must be true or false; using false.", s.Warnings);
+        Assert.Contains("turn_plan_effort must be one of low, medium, high, xhigh, max or null; leaving it off.", s.Warnings);
+
+        WriteConfig("""{ "turn_plan_effort": 3 }""");
+        Assert.StartsWith("turn_plan_effort must be one of", Assert.Single(Load().Warnings));
+        WriteConfig("""{ "turn_plan_effort": "same" }""");
+        Assert.Null(Load().TurnPlanEffort);
+
+        Assert.Throws<ArgumentException>(() => s with { TurnPlanEffort = "extreme" });
+        Assert.Throws<ArgumentException>(() => s with { TurnPlanEffort = "same" });
+        Assert.Throws<ArgumentException>(() => s with { TurnPlanEffort = "" });
+    }
+
+    [Fact]
     public void A_fight_room_holds_through_its_own_screens_until_the_bot_leaves()
     {
         static JsonObject Snap(string screen, string? room = null, bool inState = false)
