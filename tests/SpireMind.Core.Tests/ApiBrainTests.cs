@@ -1242,6 +1242,34 @@ public class ApiBrainTests
         Assert.Equal(2, AllPlanNotes(rig.Api[3]));
     }
 
+    [Theory]
+    [InlineData("Elite", "rewards,map")] // won, then the next elite
+    [InlineData("Elite", "map")] // fled (a Smoke Bomb): no rewards, then the next elite
+    [InlineData("Boss", "rewards")] // a second boss in the same room, after the first one's rewards
+    public async Task A_later_fight_gets_the_note_on_its_first_turn_again(string room, string between)
+    {
+        using var rig = new Rig();
+        rig.Settings = rig.Settings with { TurnPlanNote = true }; // effort high, as in elite and boss rooms: no room switch
+        // The first fight is won on turn 1, round 1, where the next one starts too.
+        var screens = between.Split(',');
+        rig.Host.Handler = ActsReturn([
+            TurnSnap(room, 1, 1),
+            .. screens.Select(s => Snap(s, true)),
+            TurnSnap(room, 1, 1),
+            TurnSnap(room, 1, 1)]);
+        var acts = screens.Length + 3;
+        for (var i = 1; i <= acts; i++)
+            rig.Api.Then(Act($"toolu_{i}"));
+
+        rig.Brain.Start();
+        await rig.Api.Exhausted.Task.WaitAsync(Guard);
+
+        Assert.Equal(acts + 1, rig.Api.Count);
+        int[] expected = [0, 1, .. screens.Select(_ => 0), 1, 0];
+        Assert.Equal(expected, Enumerable.Range(0, acts + 1).Select(i => PlanNotes(rig.Api[i])));
+        Assert.DoesNotContain("system", Roles(rig.Api[acts]));
+    }
+
     [Fact]
     public async Task No_turn_plan_in_a_hallway_fight_an_event_fight_or_off_combat()
     {
