@@ -210,3 +210,5 @@ Switches for the arena's real-brain mode (both off by default, set through `Brai
 - The plain arm needs no code: `elite_effort` / `boss_effort` at `xhigh` or `max`.
 
 Suggested arms on the same positions, once Mark okays API credit (asked 2026-10-12 ~00:10 UTC, after his 23:10 "subscription only" pick, given that Claude Code's "high" doesn't match the game): game default (high); `boss_effort`/`elite_effort` max; `turn_plan_effort` max; `turn_plan_note` on. Report tokens out per turn next to wins, since a raised setting costs real-play money too.
+
+**Mark, 2026-10-12 00:16 UTC (decision card): "Full set, ~$50".** The 8 positions, five runs each, on the mod's own brain (real-brain mode, API credit) at today's setting and one level higher, about $40 to $60. This replaces the subscription-only rule for this set only. The turn-plan arms run only if they fit that budget; anything more asks Mark first.
