@@ -461,7 +461,8 @@ public class GuestArgsTests
 
     [Theory]
     [InlineData("Timeout", "Nobody answered")]
-    [InlineData("HandshakeTimeout", "Nobody answered")]
+    [InlineData("HandshakeTimeout", "answered, but the join did not finish")]
+    [InlineData("NoInternet", "Nobody answered")]
     [InlineData("ModMismatch", "BetterSpire2")]
     [InlineData("VersionMismatch", "version")]
     [InlineData("LobbyFull", "four players")]

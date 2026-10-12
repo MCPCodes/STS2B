@@ -100,7 +100,7 @@ Your log: `~/Library/Application Support/SlayTheSpire2/logs/godot.log`. The bot'
 
 "Client 2000 connected" with no join request after it, and the friend back on their Join screen with a popup: their game refused yours over the version or the mods. Their popup says which.
 
-"Client 2000 connected" and ten seconds later `Disconnecting player 2000 because they did not respond to the initial game join handshake`: the two games reached each other and then could not read each other's messages. That is a mod on one side only that adds network messages, most likely another BaseLib. The friend sees "Connection timed out." all the same, and their SpireMind line says "Nobody answered", which is wrong in this one case; their log has `guest: the game reports: HandshakeTimeout`, not `Timeout`.
+"Client 2000 connected" and ten seconds later `Disconnecting player 2000 because they did not respond to the initial game join handshake`: the two games reached each other and then could not read each other's messages. That is a mod on one side only that adds network messages, most likely another BaseLib. The friend sees "Connection timed out." all the same, but their SpireMind line says that your game answered and the join did not finish, and their log has `guest: the game reports: HandshakeTimeout`, not `Timeout`.
 
 Nothing at all about 2000 in your log while the friend's popup says "Connection timed out.": nothing reached your lobby. That is the network, the address or the Local Network switch.
 
@@ -132,7 +132,7 @@ Ask what their screen shows. Their README has the same list.
 | "Disconnected" popup with no `SpireMind guest:` line | The mod is not loaded, the launch options did not reach the game, or only the extra line failed | They point at "Running Modded" on their main menu: is SpireMind listed? If not: folder `mods/SpireMind/SpireMind.dll`, the mod ticked in Mod Settings. If it is: the whole launch line again, restart |
 | Popup titled SpireMind with a list | A mistake in the launch line | It says which part |
 | "Connection timed out." with "Nobody answered" (Timeout, after 10 s) | Nothing reached your lobby | Are you in character select? `Failed to create host!` in your log means UDP 33771 was taken: quit every copy and start again. Address still right? `ping`. Local Network switch on both Macs. VPN off. Another network |
-| "Connection timed out." while your log shows "Client 2000 connected" (HandshakeTimeout) | The games reached each other and could not read each other: a mod with network messages on one side only, most likely another BaseLib | Compare BaseLib. Extra mods off |
+| "Connection timed out." with "answered, but the join did not finish", and your log shows "Client 2000 connected" (HandshakeTimeout) | The games reached each other and could not read each other: a mod with network messages on one side only, most likely another BaseLib | Compare BaseLib. Extra mods off |
 | "Mod mismatch!" and a list (ModMismatch) | BetterSpire2 versions differ, or they have a gameplay mod you lack. "We have mods that host does not" names theirs, "Host has mods that we do not" names yours | Step 6 above |
 | "...running a version of STS2 that does not match yours." (VersionMismatch) | Game build differs, or the sets of cards and relics differ (a mod on one side, or another BaseLib). Their log tells them apart: `Version mismatch. Host: X Ours: Y` or `ModelDb hash mismatch` | Same Steam branch on both. Compare BaseLib. Extra mods off |
 | "Loading..." on their Join screen and nothing more | The join stalled after connecting. Not expected in a new lobby, where your game gives up after 10 s; possible in a lobby from a save | They press Back. Compare BaseLib. Extra mods off |
@@ -211,4 +211,4 @@ The mod's DLL is processor-neutral, like BaseLib's and BetterSpire2's, so the sa
 - `scripts/coop-guest-trial.sh`. It has never been run, not even with `--dry-run`.
 - A guest who leaves without the goodbye arriving, and what your game then does at the next room.
 - The planning sessions with a second person in the run.
-- The popups' sentences in this page and in the friend's README are the game's English texts for v0.107.1, read from its files. Which of them a real failure shows has not been seen. One is known to mislead: when your game drops the friend for not finishing the join (HandshakeTimeout), the SpireMind line still says "Nobody answered".
+- The popups' sentences in this page and in the friend's README are the game's English texts for v0.107.1, read from its files. Which of them a real failure shows has not been seen.

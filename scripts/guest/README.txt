@@ -158,9 +158,14 @@ A popup titled "SpireMind" that lists problems
     - A test: open the Terminal app and type  ping -c 3 @PING_ADDRESS@
       If no line starts with "64 bytes from", your Mac cannot reach @HOST@'s
       at all, and the cause is the network or the address, not the game.
-    - Ask @HOST@ whether his game saw you connect. If it did, the network is
-      fine and the two games could not understand each other: your mods are
-      not the same as his. See step 1.
+    - Ask @HOST@ whether his game saw you connect. If it did, the next entry
+      is yours.
+
+"Connection timed out."  (the SpireMind line says @HOST@'s game answered, "but
+the join did not finish")
+    The network is fine: @HOST@'s game saw you connect. The two games could not
+    understand each other, and after ten seconds his game let go of you. Your
+    mods are not the same as his. See step 1.
 
 "Mod mismatch!" and a list of mods
     "We have mods that host does not" names yours. "Host has mods that we do

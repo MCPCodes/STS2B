@@ -31,8 +31,13 @@ public static class GuestAdvice
         var Host = char.ToUpperInvariant(host[0]) + host[1..];
         return reason switch
         {
-            "Timeout" or "HandshakeTimeout" or "NoInternet" =>
+            "Timeout" or "NoInternet" =>
                 $"Nobody answered. Is {host} in the co-op character select? Are both computers on the same Wi-Fi? Is the address still right? Then Back and Join.",
+            // The host's lobby drops a player who connected and then did not ask to join within
+            // ten seconds. The network is fine then: the two games did not read each other's
+            // messages, which is what a mod with network messages on one side only does.
+            "HandshakeTimeout" =>
+                $"{Host}'s game answered, but the join did not finish. Most likely your mods are not the same as {host}'s: compare BaseLib and BetterSpire2, and switch off every other mod. Then Back and Join.",
             "ModMismatch" =>
                 $"Your gameplay mods differ from {host}'s: BetterSpire2 must be the same version on both computers, and no other gameplay mod may be on.",
             "VersionMismatch" =>
