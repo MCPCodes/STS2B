@@ -61,6 +61,10 @@ public enum BrainStopReason
 /// <item>Spend is added up from each response's usage and checked against the monthly cap
 /// before every request, together with the other copies' requests in flight in co-op
 /// (<see cref="SpendTracker.TryBegin"/>).</item>
+/// <item>While <see cref="BrainSettings.Fast"/> is on and the model takes it, every request asks
+/// for the API's fast mode (<c>"speed": "fast"</c> and its beta flag). A switch needs no fresh
+/// conversation, and when the API says no the same request goes again at standard speed (see
+/// <see cref="FastTurnedDown"/>).</item>
 /// </list>
 /// Start, stop and the status properties are safe to call from any thread; everything else
 /// runs on the loop's task. See docs/brain.md.
@@ -106,6 +110,19 @@ public sealed class ApiBrain : IPlayBrain
     /// <see cref="BrainSettings.TurnPlanNote"/> is on (see <see cref="TurnPlan"/>).</summary>
     public const string PlanTheTurn = "(New turn. Before your first tool call, plan the whole turn: the enemies' damage this turn and over their next two turns (next_moves), when each enemy dies, and the order of every card and potion. Then play it.)";
 
+    /// <summary>Said once in the game chat when a fast-mode request was still rate limited (429) after
+    /// the client's own retries, and the brain sent it again at standard speed and switched fast mode off.</summary>
+    public const string FastRateLimited = "Fast mode hit its rate limit; back to normal speed.";
+
+    /// <summary>Said instead of <see cref="FastRateLimited"/> when the fast-mode request was still
+    /// answered 529 after the client's retries: fast mode has a capacity of its own.</summary>
+    public const string FastOverloaded = "Fast mode is out of capacity right now; back to normal speed.";
+
+    /// <summary>Said instead of <see cref="FastRateLimited"/> when the API refused the speed field or
+    /// its beta flag, or refused the first fast request without saying why and then answered the
+    /// same request at standard speed (see <see cref="FastTurnedDown"/>).</summary>
+    public const string FastRefused = "Claude turned down fast mode (a research preview your API key may not have yet); back to normal speed. The details are in the log.";
+
     /// <summary>Ends every opening message.</summary>
     public const string CarryOn = "Carry on from here.";
 
@@ -149,6 +166,7 @@ public sealed class ApiBrain : IPlayBrain
     private readonly Func<string?>? _blocked;
     private readonly FightLog? _fights;
     private readonly Func<string?>? _partyPlan;
+    private readonly Action? _onFastDeclined;
 
     private readonly object _gate = new();
     private CancellationTokenSource? _cts;
@@ -184,6 +202,11 @@ public sealed class ApiBrain : IPlayBrain
     private string? _planSkipLogged; // why the last raise was skipped, logged once
     private string? _sentEffort; // the effort the last request was sent at
     private bool _sentTurnPlan; // the last request carried a turn plan
+    private bool _sentFast; // the last request the API answered asked for fast mode
+    private bool _fastProven; // the API has answered a fast request since Start
+    private bool _fastDeclined; // the API turned fast mode down and the setting stayed on: standard speed until it is switched off (and on again)
+    private string? _fastUnproven; // the chat line for a refusal of the first fast request that didn't name fast mode, until its try at standard speed is answered
+    private bool _fastMismatchLogged; // a response to a fast request said it ran at standard speed (logged once)
     private int _endTurnsInRow;
     private int _cutOffsInRow;
     private int _refusalsInRow;
@@ -225,6 +248,10 @@ public sealed class ApiBrain : IPlayBrain
     /// and its own requests. It never throws.</param>
     /// <param name="partyPlan">The party plan from co-op planning sessions (PartyBot.PlanText), or
     /// null; a fresh conversation carries it after the run journal. One that throws counts as null.</param>
+    /// <param name="fastDeclined">Called when the API turned fast mode down and the brain went on at
+    /// standard speed (<see cref="BrainController.FastDeclined"/> switches the setting off, so /fast
+    /// says what is true). The brain has already said why in the chat. Without it, or when the
+    /// setting stays on, the brain itself keeps to standard speed until /fast is switched off and on again.</param>
     public ApiBrain(
         IClaudeApi api,
         IToolHost tools,
@@ -242,7 +269,8 @@ public sealed class ApiBrain : IPlayBrain
         Func<TimeSpan, CancellationToken, Task>? delay = null,
         Func<string?>? blocked = null,
         FightLog? fights = null,
-        Func<string?>? partyPlan = null)
+        Func<string?>? partyPlan = null,
+        Action? fastDeclined = null)
     {
         _api = api;
         _host = tools;
@@ -261,6 +289,7 @@ public sealed class ApiBrain : IPlayBrain
         _blocked = blocked;
         _fights = fights;
         _partyPlan = partyPlan;
+        _onFastDeclined = fastDeclined;
     }
 
     /// <summary>
@@ -525,6 +554,11 @@ public sealed class ApiBrain : IPlayBrain
             _planPending = false;
             _planSkipLogged = null;
             _heldBack = false;
+            _sentFast = false;
+            _fastProven = false;
+            _fastDeclined = false;
+            _fastUnproven = null;
+            _fastMismatchLogged = false;
 
             // Nothing is sent until a run is in progress or the human writes.
             await IdleUntilPlayAsync(ct);
@@ -583,11 +617,14 @@ public sealed class ApiBrain : IPlayBrain
         var settings = _settings();
         var now = _clock();
         var cap = settings.MonthlyBudgetUsd;
+        // /fast: asked for on every request while it is on and the model takes it.
+        var fast = FastFor(settings);
         // Records this request as in flight, so other copies count it against the same cap.
         // Every way out below that doesn't reach _spend.Add cancels it.
         // A conversation's first request writes the whole prompt to the cache, so it is
-        // estimated high for the other copies.
-        if (!_spend.TryBegin(cap, now, out var month, freshConversation: OpeningOnly()))
+        // estimated high for the other copies. So does the first request at another speed:
+        // requests at different speeds don't share cached prefixes.
+        if (!_spend.TryBegin(cap, now, out var month, freshConversation: OpeningOnly() || fast != _sentFast))
             throw new StopBrainException(BrainStopReason.MonthlyCap, month >= cap
                 ? Invariant($"Monthly API budget reached: ${month:0.00} of ${cap:0.00} spent this month, so the API brain stopped.")
                 : Invariant($"Monthly API budget nearly reached: ${month:0.00} of ${cap:0.00} spent this month, and the other copies' requests in flight would go over it, so the API brain stopped."));
@@ -626,7 +663,7 @@ public sealed class ApiBrain : IPlayBrain
             // The first request of a player turn in an elite or boss room may be raised above the
             // room's effort for that request alone; _currentEffort stays the room's.
             _sentEffort = TurnPlan(settings, model, room, effort);
-            request = BuildRequest(model, _conversationEffort, settings.MaxTokens ?? MaxTokensFor(_sentEffort));
+            request = BuildRequest(model, _conversationEffort, settings.MaxTokens ?? MaxTokensFor(_sentEffort), fast);
             sentAt = _clock();
             sent = await SendAsync(request, ct);
         }
@@ -672,16 +709,27 @@ public sealed class ApiBrain : IPlayBrain
         var receivedAt = _clock();
 
         var billedModel = response.Model ?? model;
-        var cost = response.Cost(model);
+        // The request as it was answered: without the speed field when the API turned fast mode
+        // down and it went again at standard speed. The price follows what the response says it
+        // ran at (usage.speed), not what was asked.
+        _sentFast = IsFast(request);
+        if (_sentFast)
+            _fastProven = true;
+        var cost = response.Cost(model, _sentFast);
+        if (_sentFast && !cost.Fast && !_fastMismatchLogged)
+        {
+            _fastMismatchLogged = true;
+            Log($"brain: a request asked for fast mode but the response says speed {response.Speed ?? "?"}; priced at the standard rate");
+        }
         _spend.Add(cost.Usd, receivedAt);
-        _fights?.Response(cost.Usd, _sentEffort, response.StopReason == "max_tokens");
+        _fights?.Response(cost.Usd, _sentEffort, response.StopReason == "max_tokens", _sentFast);
         var usage = response.Usage;
         Interlocked.Exchange(ref _lastPromptTokens, usage.PromptTokens);
         _conversationBaseTokens ??= usage.PromptTokens;
 
         var toolUses = response.ToolUses;
         var stopReason = response.StopReason;
-        Log(Invariant($"brain: {billedModel} in {usage.Input} cached {usage.CacheRead} written {usage.CacheWrite} out {usage.Output} ${cost.Usd:0.0000} {stopReason ?? "?"}") +
+        Log(Invariant($"brain: {billedModel}{(cost.Fast ? " fast" : "")} in {usage.Input} cached {usage.CacheRead} written {usage.CacheWrite} out {usage.Output} ${cost.Usd:0.0000} {stopReason ?? "?"}") +
             (toolUses.Count > 0 ? $" tools: {string.Join(" ", toolUses.Select(t => t.Name))}" : ""));
         WriteTranscript(request, response, cost.Usd, sentAt, receivedAt);
         _turn++;
@@ -1089,7 +1137,7 @@ public sealed class ApiBrain : IPlayBrain
         return (character is not null && character != _promptCharacter) || _multiplayer() != _promptMultiplayer;
     }
 
-    private JsonObject BuildRequest(string model, string? effort, int maxTokens)
+    private JsonObject BuildRequest(string model, string? effort, int maxTokens, bool fast)
     {
         var messages = new JsonArray();
         foreach (var message in _messages)
@@ -1118,13 +1166,130 @@ public sealed class ApiBrain : IPlayBrain
             request["thinking"] = new JsonObject { ["type"] = "adaptive", ["display"] = "summarized" };
         if (_effortMessages)
             request[ClaudeClient.BetasField] = new JsonArray(PerMessageEffortBeta);
+        // Fast mode: the speed field and its beta flag, joined with the betas above in the header.
+        // Off, nothing is added, so the request is exactly what it was before fast mode existed.
+        if (fast)
+            AddFast(request);
         return request;
+    }
+
+    // True when the next request should ask for fast mode: /fast is on, the model takes it (on any
+    // other a request with the speed field is an error), and the API hasn't turned it down while the
+    // setting stayed on (SendAsync). Seeing it off forgets that, so the next /fast on tries again.
+    private bool FastFor(BrainSettings settings)
+    {
+        if (!settings.Fast)
+        {
+            _fastDeclined = false;
+            return false;
+        }
+        return !_fastDeclined && ModelPrices.SupportsFast(settings.Model);
+    }
+
+    private static bool IsFast(JsonObject request) => Str(request["speed"]) == ModelPrices.FastSpeed;
+
+    // Puts fast mode into a request the brain built: the top-level speed field, and the beta flag
+    // after whatever betas the request already names.
+    private static void AddFast(JsonObject request)
+    {
+        request["speed"] = ModelPrices.FastSpeed;
+        if (request[ClaudeClient.BetasField] is not JsonArray betas)
+            request[ClaudeClient.BetasField] = betas = new JsonArray();
+        if (!betas.Any(b => Str(b) == ModelPrices.FastModeBeta))
+            betas.Add(ModelPrices.FastModeBeta);
+    }
+
+    // Takes it out again, leaving the request as it would have been built without it.
+    private static void DropFast(JsonObject request)
+    {
+        request.Remove("speed");
+        if (request[ClaudeClient.BetasField] is not JsonArray betas)
+            return;
+        for (var i = betas.Count - 1; i >= 0; i--)
+            if (Str(betas[i]) == ModelPrices.FastModeBeta)
+                betas.RemoveAt(i);
+        if (betas.Count == 0)
+            request.Remove(ClaudeClient.BetasField);
+    }
+
+    /// <summary>
+    /// Why the API's answer to a request that asked for fast mode means "not at this speed": the line
+    /// for the chat, or null when the failure has nothing to do with fast mode (or the request didn't
+    /// ask for it). The caller then sends the same request again without the speed field, once.
+    /// <paramref name="certain"/> says whether the answer itself points at fast mode; when it doesn't,
+    /// only the standard try can tell, and the caller blames fast mode only once that went through.
+    /// <list type="bullet">
+    /// <item>A 429 that outlasted the client's own retries (which honour retry-after): fast mode has
+    /// a rate limit of its own, separate from the model's standard one. Certain.</item>
+    /// <item>A 529 that outlasted them: fast mode has a capacity of its own too. Certain.</item>
+    /// <item>A request the API refuses outright (a 400, 404 or 413, or a 403) whose words name the
+    /// speed field, fast mode or its beta flag. Certain.</item>
+    /// <item>Any such refusal of the first fast request since Start that names no effort message
+    /// (fast mode is a research preview a key may not have, and the API's words for that aren't
+    /// documented). Not certain: the request may be wrong at any speed, and a key the API rejects
+    /// outright fails the standard try too.</item>
+    /// </list>
+    /// A prompt the API calls too long, a 401, and credit and spend limit errors are never taken for
+    /// fast mode.
+    /// </summary>
+    private string? FastTurnedDown(JsonObject request, ClaudeApiException ex, out bool certain)
+    {
+        certain = true;
+        if (!IsFast(request))
+            return null;
+        switch (ex.Kind)
+        {
+            case ClaudeErrorKind.RateLimited:
+                return FastRateLimited;
+            case ClaudeErrorKind.Overloaded:
+                return FastOverloaded;
+        }
+
+        var named = ex.ApiMessage.Contains("speed", StringComparison.OrdinalIgnoreCase)
+                    || ex.ApiMessage.Contains("fast", StringComparison.OrdinalIgnoreCase);
+        var effortNamed = ex.ApiMessage.Contains("output_config", StringComparison.OrdinalIgnoreCase)
+                          || ex.ApiMessage.Contains("effort", StringComparison.OrdinalIgnoreCase);
+        var first = !_fastProven && !effortNamed;
+        var refused = (ex.Kind == ClaudeErrorKind.InvalidRequest && !ex.PromptTooLong) || ex.Status == 403;
+        certain = named;
+        return refused && (named || first) ? FastRefused : null;
+    }
+
+    // The API turned fast mode down: said once in the chat, and the controller is told, which
+    // switches the setting off, so a /fast on from here on is a new try. Where nobody does (no
+    // controller), the brain keeps to standard speed itself.
+    private void DeclineFast(string said)
+    {
+        Announce(said);
+        try { _onFastDeclined?.Invoke(); }
+        catch (Exception callback) { Log($"brain: the fast mode callback threw {callback.GetType().Name}: {callback.Message}"); }
+        _fastDeclined = _settings().Fast;
     }
 
     // Sends the request, resending it after a growing pause while the API can't be reached.
     // Errors that need the human (credit, key, limits) and requests the API refuses stop the
     // brain. Null when the API says the prompt is too long, so the caller can start afresh.
     private async Task<ClaudeResponse?> SendAsync(JsonObject request, CancellationToken ct)
+    {
+        try
+        {
+            return await SendWithRetriesAsync(request, ct);
+        }
+        finally
+        {
+            // The first fast request was refused without a word about fast mode, and its try at
+            // standard speed didn't go through either (the request is wrong at any speed, the key
+            // is rejected, the settings changed): nothing says fast mode was the reason, so it
+            // isn't blamed and stays as it was set.
+            if (_fastUnproven is not null)
+            {
+                _fastUnproven = null;
+                _fastDeclined = false;
+            }
+        }
+    }
+
+    private async Task<ClaudeResponse?> SendWithRetriesAsync(JsonObject request, CancellationToken ct)
     {
         var pause = RetryFirstDelay;
         var announced = false;
@@ -1138,6 +1303,16 @@ public sealed class ApiBrain : IPlayBrain
                 var response = await _api.SendAsync(request, ct);
                 if (announced)
                     Log("brain: Claude is reachable again");
+                if (_fastUnproven is { } unproven)
+                {
+                    _fastUnproven = null;
+                    // Not when /fast was switched off and on again meanwhile and this answer is to a fast request.
+                    if (!IsFast(request))
+                    {
+                        Log("brain: the same request went through at standard speed, so fast mode is what the API refused");
+                        DeclineFast(unproven);
+                    }
+                }
                 return response;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -1147,6 +1322,28 @@ public sealed class ApiBrain : IPlayBrain
             catch (ClaudeApiException ex)
             {
                 TranscriptError(ex.Kind.ToString(), ex.Status);
+                if (FastTurnedDown(request, ex, out var certain) is { } said)
+                {
+                    // The API won't run this request in fast mode: the same request again at once
+                    // without the speed field, so the turn isn't lost. The request no longer asks
+                    // for it, so this can't come round twice.
+                    DropFast(request);
+                    if (certain)
+                    {
+                        // No more fast requests until fast mode is switched on again.
+                        Log($"brain: fast mode turned down ({ex.Kind}): {ex.Message}; sending the request again at standard speed");
+                        DeclineFast(said);
+                    }
+                    else
+                    {
+                        // The refusal doesn't say what is wrong. Standard speed for this request;
+                        // fast mode is blamed, and switched off, only once that try is answered.
+                        Log($"brain: the first fast mode request was refused ({ex.Kind}): {ex.Message}; sending it once at standard speed to see whether fast mode is the reason");
+                        _fastDeclined = true;
+                        _fastUnproven = said;
+                    }
+                    continue;
+                }
                 switch (ex.Kind)
                 {
                     case ClaudeErrorKind.Unauthorized:
@@ -1201,6 +1398,14 @@ public sealed class ApiBrain : IPlayBrain
             if (BrainSettings.ResolveModel(now.Model) != _conversationModel
                 || EffortOf(now, _effortRoom) != _currentEffort)
                 throw new SettingsChangedException();
+            // /fast meanwhile: the same request at the other speed, with nothing else rebuilt.
+            var fast = FastFor(now);
+            if (fast != IsFast(request))
+            {
+                Log($"brain: fast mode switched {(fast ? "on" : "off")} while retrying; resending at {(fast ? "fast" : "standard")} speed");
+                if (fast) AddFast(request);
+                else DropFast(request);
+            }
         }
 
         // The exception's summary ("The API credit has run out.") is the line for the chat.
@@ -1474,6 +1679,7 @@ public sealed class ApiBrain : IPlayBrain
             ["turn"] = _turn,
             ["model"] = Str(request["model"]),
             ["effort"] = _sentEffort,
+            ["speed"] = _sentFast ? ModelPrices.FastSpeed : ModelPrices.StandardSpeed,
             ["sent_at"] = sentAt.ToString("O"),
             ["received_at"] = receivedAt.ToString("O"),
         };

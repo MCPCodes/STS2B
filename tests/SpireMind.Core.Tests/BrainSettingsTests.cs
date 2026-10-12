@@ -472,6 +472,52 @@ public class BrainSettingsTests : IDisposable
     }
 
     [Fact]
+    public void Fast_mode_is_off_by_default_and_never_read_from_or_written_to_config_json()
+    {
+        Assert.False(new BrainSettings().Fast);
+        Assert.False(Load().Fast);
+
+        // Saving with it on writes nothing about it, so the next start is at normal speed.
+        var on = Load() with { Fast = true, Model = "opus", Autostart = true };
+        Assert.True(on.Fast);
+        on.Save();
+        var text = File.ReadAllText(on.ConfigPath);
+        Assert.DoesNotContain("fast", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("speed", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(["model", "effort", "monthly_budget_usd", "autostart"], JsonNode.Parse(text)!.AsObject().Select(p => p.Key));
+        var again = Load();
+        Assert.False(again.Fast);
+        Assert.True(again.Autostart);
+        Assert.Empty(again.Warnings);
+    }
+
+    [Theory]
+    [InlineData("true")]
+    [InlineData("\"on\"")]
+    [InlineData("1")]
+    [InlineData("false")]
+    public void A_fast_key_typed_into_config_json_is_ignored_with_a_warning(string value)
+    {
+        WriteConfig($$"""{ "model": "opus", "fast": {{value}} }""");
+
+        var s = Load();
+
+        Assert.False(s.Fast);
+        Assert.Equal("'fast' in config.json is ignored: fast mode is off whenever the game starts; type /fast on in the chat.", Assert.Single(s.Warnings));
+        // Saving leaves the hand-typed key where it is, as with any key the mod doesn't use, and it still means nothing.
+        (s with { Fast = true }).Save();
+        Assert.Equal(value, JsonNode.Parse(File.ReadAllText(s.ConfigPath))!["fast"]!.ToJsonString());
+        Assert.False(Load().Fast);
+    }
+
+    [Fact]
+    public void Fast_mode_shows_in_to_string_only_while_on()
+    {
+        Assert.DoesNotContain("Fast", Load().ToString());
+        Assert.Contains("Effort = medium, Fast = True, ", (Load() with { Fast = true }).ToString());
+    }
+
+    [Fact]
     public void The_key_never_shows_in_to_string()
     {
         WriteKey(FileKey);

@@ -87,7 +87,7 @@ public sealed partial class BrainController
         bool subscription;
         lock (_gate)
         {
-            _settings = settings;
+            _settings = settings = WithFastAsNow(settings);
             subscription = _kind == BrainKind.Subscription;
         }
         Log($"brain: {name} effort set to {value ?? BrainSettings.DefaultWord} by {from}");

@@ -222,6 +222,30 @@ public class FightLogTests : IDisposable
     }
 
     [Fact]
+    public void Speeds_are_listed_in_the_order_used_next_to_the_efforts()
+    {
+        _fights.Observe(Board(1, 70, room: "Elite"));
+        _fights.Response(0.2m, "high", cutOff: false);
+        _fights.Response(0.4m, "high", cutOff: false, fast: true);
+        _fights.Response(0.4m, "high", cutOff: false, fast: true);
+        _fights.Response(0.2m, "high", cutOff: false, fast: false);
+        _fights.Observe(Rewards(60));
+        // A fight played at normal speed says so too.
+        _fights.Observe(Board(1, 60, floor: 6));
+        _fights.Response(0.2m, "medium", cutOff: false);
+        _fights.Observe(Rewards(55, floor: 6));
+
+        var lines = Lines();
+        Assert.Equal(["standard", "fast"], Names(lines[0]["speed"]));
+        Assert.Equal(["high"], Names(lines[0]["effort"]));
+        Assert.Equal(1.2m, lines[0]["spent_usd"]!.GetValue<decimal>());
+        Assert.Equal(["standard"], Names(lines[1]["speed"]));
+        // The speed stands right after the effort.
+        var keys = lines[0].AsObject().Select(p => p.Key).ToList();
+        Assert.Equal(keys.IndexOf("effort") + 1, keys.IndexOf("speed"));
+    }
+
+    [Fact]
     public void A_card_choice_mid_fight_and_screens_that_say_nothing_keep_the_fight_open()
     {
         _fights.Observe(Board(1, 70));

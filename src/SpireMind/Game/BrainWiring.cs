@@ -5,7 +5,7 @@ namespace SpireMind.Game;
 /// <summary>
 /// Builds the in-game brain at mod load (docs/brain.md): the settings and folders, the spend
 /// tracker and transcript, and a <see cref="BrainController"/> that picks between the API brain
-/// and the subscription fallback and owns /start, /stop, /budget, /model and /effort. It also
+/// and the subscription fallback and owns /start, /stop, /budget, /model, /effort and /fast. It also
 /// hooks game exit, so a Claude Code child never outlives the game. In co-op the
 /// <see cref="InstanceRole"/> decides who plays: a bot copy starts its brain by itself, and the
 /// human copy's brain stays off in a co-op run or lobby (solo play is as before, also while bot
@@ -114,7 +114,9 @@ internal static class BrainWiring
                         blocked: blocked,
                         fights: fights,
                         // A bot copy's party plan from the co-op planning sessions, for fresh conversations.
-                        partyPlan: () => tools.Party?.PlanText);
+                        partyPlan: () => tools.Party?.PlanText,
+                        // The API turned fast mode down: /fast then says it is off.
+                        fastDeclined: () => controller!.FastDeclined());
                 },
                 createSubscription: settings =>
                 {

@@ -72,6 +72,7 @@ Then, in game, open the chat (T) and type:
 - `/budget`: what the API has cost this month and this run, the model, and what is playing.
 - `/model`: shows the model; `/model opus`, `sonnet`, `haiku` or `fable` switches it.
 - `/effort`: shows the thinking effort, and the effort in elite and boss rooms; `/effort low`, `medium`, `high`, `xhigh` or `max` sets the normal one. Elite and boss rooms use high by default (or the normal effort when that is higher), since it wins more of the hard fights; `/effort elite medium` or `/effort boss max` sets a fight's own, `same` makes it follow the normal effort and `default` puts it back.
+- `/fast`: shows whether the API's fast mode is on; `/fast on` makes the bot's answers come up to 2.5 times faster at twice the price ($8 input and $40 output per million tokens on Opus 5.5), and `/fast off` goes back. It works on Opus 5.5, Opus 5 and Opus 4.8, is off every time the game starts, and switches itself off with a line in the chat if the API turns it down. Each switch, on or off, also writes the prompt to the cache again once (up to about 50 cents a bot on Opus 5.5), so leave it on for a stretch rather than flipping it. Fast mode is a research preview, so a key may not have it: `scripts/dev-host.sh --brain --model opus --fast --max-requests 3` tells you without the game.
 - `/pause` holds the bot so you can play a bit by hand, and `/resume` hands control back.
 
 Without a key, or once the API credit, the Console spend limit or the mod's own monthly cap (`monthly_budget_usd` in `~/.config/spiremind/config.json`, $200 by default) runs out, it plays on your Claude subscription instead, as long as Claude Code is installed and signed in (run `claude` once in Terminal and log in). The chat says when it switches, and the next run tries the API again.
@@ -88,7 +89,7 @@ The bot plays as its character and answers in that character's voice, taken from
 - Commands take effect at once in the mod, without waiting for the model:
   - `/pause` stops the bot so you can play by hand. Chat keeps working.
   - `/resume` hands control back.
-  - `/start`, `/stop`, `/budget`, `/model` and `/effort` drive the in-game brain (above).
+  - `/start`, `/stop`, `/budget`, `/model`, `/effort` and `/fast` drive the in-game brain (above).
   - `/help` lists the commands.
 - `SPIREMIND_CHAT_KEY` picks another hotkey (a Godot `Key` name such as `Y`; Enter and Escape fall back to T). A key the game uses itself (a bound hotkey, F2, the dev console keys, V in co-op) will not open the chat; the log says so. `SPIREMIND_HUMAN_NAME` sets the name on your lines; it defaults to your OS user name, capitalised. Set them in the game's Steam launch options, e.g. `SPIREMIND_HUMAN_NAME=Mark %command%`.
 
@@ -114,7 +115,7 @@ You host a local co-op lobby in your own copy of the game, and each bot is a sec
   - `/bot stop [name]` asks one bot to leave and quit, or every bot without a name. A bot goes by its nameplate on your screen ("Ironclad 2" for a second Ironclad), else its character.
   - `/party [on|off]` sets whether bots hear each other's lines.
   - `/plan` starts a planning session now, `/plan skip` ends one, `/plan show` shows the party plan, and `/plan on` or `/plan off` turns the automatic sessions on or off.
-  - `/start`, `/stop`, `/pause`, `/resume`, `/budget`, `/model` and `/effort` go to every bot, each answer labelled with the bot's name; put a name first to send to one bot (`/model Silent sonnet`, "Ironclad 2, block this turn").
+  - `/start`, `/stop`, `/pause`, `/resume`, `/budget`, `/model`, `/effort` and `/fast` go to every bot, each answer labelled with the bot's name; put a name first to send to one bot (`/model Silent sonnet`, "Ironclad 2, block this turn"). `/fast on` isn't saved, so a bot added later needs it typed again.
 - Planning sessions: at the start of each act (while the Ancient's offer is up), around the middle and before the boss, the bots hold their picks for a minute or two and agree on lanes, so two decks don't chase the same cards. Say what you're building in the chat while one runs. The plan is saved in `runs/party/plan.md`, and each bot checks its part before every card, relic and shop pick. `docs/brain.md` (Planning sessions) has the details.
 - In a fight a bot notices when you act during its turn: if you give it Block or kill its target, it stops and plans the rest of its turn again instead of finishing a stale plan.
 - Your copy keeps port 17772 and never plays your hand in a co-op lobby or run; outside co-op it plays as in solo, even with a bot copy still running. A copy that runs with Steam is always your copy, even with `--sts2bot=1` on its command line.

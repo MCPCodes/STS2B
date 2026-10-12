@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using SpireMind.Core;
+using SpireMind.Core.Brain;
 using SpireMind.Core.Coop;
 using Xunit;
 
@@ -949,6 +950,68 @@ public sealed class CoopRelayTests : IDisposable
     }
 
     [Fact]
+    public async Task Fast_mode_typed_in_marks_window_reaches_every_running_bot_copy()
+    {
+        var silent = StartBot("Silent", 1000);
+        var defect = StartBot("Defect", 1001);
+        var silentBrain = Controller(silent);
+        var defectBrain = Controller(defect);
+        var (relay, mark, _) = StartRelay(Options(BridgeTests.FreePort(), silent.Port, defect.Port, BridgeTests.FreePort()));
+        await Until(() => relay.Peers.Count(p => p.Live) == 2, "both bots to link");
+        const string on = "Fast mode on: answers come up to 2.5x faster at twice the price ($8 / $40 per million tokens on Opus 5.5). /fast off to go back.";
+
+        // Typed in Mark's window it goes to the bots, each answering under its name, and isn't run here.
+        Assert.Equal("", mark.PostFromHuman("Mark", "/fast on").Reply ?? "");
+        await Until(() => Has(mark, "Silent: " + on) && Has(mark, "Defect: " + on), "both bots' replies");
+        Assert.True(silentBrain.Settings.Fast);
+        Assert.True(defectBrain.Settings.Fast);
+
+        // /fast alone asks every bot, and a name first sends it to one.
+        mark.PostFromHuman("Mark", "/fast Silent off");
+        await Until(() => Has(mark, "Silent: Fast mode off: back to normal speed and price."), "Silent's reply");
+        Assert.False(silentBrain.Settings.Fast);
+        Assert.True(defectBrain.Settings.Fast);
+        mark.PostFromHuman("Mark", "/fast");
+        await Until(() => mark.LinesSince(0).Any(l => l.Text.StartsWith("Silent: Fast mode is off.")) && mark.LinesSince(0).Any(l => l.Text.StartsWith("Defect: Fast mode is on:")),
+            "both bots' status");
+
+        // A bot's own line about it (the API turned fast mode down) shows in Mark's chat under its name.
+        defect.Chat.Announce("Fast mode hit its rate limit; back to normal speed.");
+        await Until(() => Has(mark, "Defect: Fast mode hit its rate limit; back to normal speed."), "the bot's line");
+
+        // A bot copy that joins later was never told: it starts at normal speed until /fast on is typed again.
+        var regent = StartBot("Regent", 1002);
+        var regentBrain = Controller(regent);
+        relay.Dispose();
+        var (later, mark2, _) = StartRelay(Options(BridgeTests.FreePort(), silent.Port, defect.Port, regent.Port));
+        await Until(() => later.Peers.Count(p => p.Live) == 3, "three bots to link");
+        await Settle();
+        Assert.False(regentBrain.Settings.Fast);
+        Assert.True(defectBrain.Settings.Fast);
+        mark2.PostFromHuman("Mark", "/fast on");
+        await Until(() => Has(mark2, "Regent: " + on) && Has(mark2, "Silent: " + on) && Has(mark2, "Defect: Fast mode is on already."), "the three replies");
+        Assert.True(regentBrain.Settings.Fast && silentBrain.Settings.Fast && defectBrain.Settings.Fast);
+    }
+
+    /// <summary>The real brain commands on a fake bot copy's chat (no brain ever starts), with settings in memory.</summary>
+    private BrainController Controller(Bot bot)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "spiremind-relay-brain-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        _cleanup.Add(new Closer(() => Directory.Delete(dir, recursive: true)));
+        var controller = new BrainController(
+            loadSettings: () => new BrainSettings { ConfigDir = dir },
+            saveSettings: _ => { },
+            createApi: _ => throw new InvalidOperationException("no brain in this test"),
+            createSubscription: _ => throw new InvalidOperationException("no brain in this test"),
+            currentScreen: _ => Task.FromResult<string?>("menu"),
+            spend: new SpendTracker(dir),
+            chat: bot.Chat);
+        _cleanup.Add(new Closer(controller.Shutdown));
+        return controller;
+    }
+
+    [Fact]
     public void Defaults_match_the_bot_ports()
     {
         var options = new CoopRelayOptions { OwnPort = 17772 };
@@ -957,6 +1020,7 @@ public sealed class CoopRelayTests : IDisposable
         Assert.Equal(3, options.MaxBots);
         Assert.True(options.PartyChat);
         Assert.Equal("SPIREMIND_BOT_PORTS", CoopRelayOptions.PortsEnvVar);
-        Assert.Equal(["start", "stop", "pause", "resume", "budget", "model", "effort"], CoopRelay.ForwardedCommands);
+        Assert.Equal(["start", "stop", "pause", "resume", "budget", "model", "effort", "fast"], CoopRelay.ForwardedCommands);
+        Assert.Contains("/model, /effort and /fast go to every bot", CoopRelay.CoopHelpNote);
     }
 }

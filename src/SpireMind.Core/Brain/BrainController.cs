@@ -8,8 +8,8 @@ public enum BrainKind { None, Api, Subscription }
 
 /// <summary>
 /// Picks the brain that plays and runs it: the API brain on Mark's API credit first, his Claude
-/// subscription as the fallback. It owns the chat commands /start, /stop, /budget, /model and
-/// /effort, and a poll loop that follows the game from run to run. See docs/brain.md.
+/// subscription as the fallback. It owns the chat commands /start, /stop, /budget, /model,
+/// /effort and /fast, and a poll loop that follows the game from run to run. See docs/brain.md.
 /// <list type="bullet">
 /// <item>The API brain plays when the settings have a key, this month's spend is under
 /// monthly_budget_usd and the API hasn't failed during this run. It may start at the menu,
@@ -171,7 +171,7 @@ public sealed partial class BrainController
     public bool ForceAutostart { get; init; }
 
     /// <summary>The current settings. Brains read them through a Func before every request, so
-    /// /model and /effort apply at once.</summary>
+    /// /model, /effort and /fast apply at once.</summary>
     public BrainSettings Settings
     {
         get { lock (_gate) return _settings; }
@@ -271,6 +271,7 @@ public sealed partial class BrainController
         _chat.AddCommand("budget", "", "shows the API spend and what's playing", BudgetCommand);
         _chat.AddCommand("model", $"[{string.Join("|", BrainSettings.ModelAliases.Keys)}]", "shows or switches the model", ModelCommand);
         _chat.AddCommand("effort", EffortUsage, "shows or sets the thinking effort", EffortCommand);
+        _chat.AddCommand("fast", FastUsage, FastHelp, FastCommand);
     }
 
     private string StartCommand(string from, string args)
@@ -288,7 +289,7 @@ public sealed partial class BrainController
         }
         var settings = Reload(Settings, keepAutostart: false) with { Autostart = true };
         var saved = Save(settings);
-        lock (_gate) _settings = settings;
+        lock (_gate) _settings = settings = WithFastAsNow(settings);
         Log($"brain: /start by {from}");
         var reply = StartChosen(settings, fromCommand: true);
         EnsurePolling();
@@ -304,7 +305,7 @@ public sealed partial class BrainController
         lock (_gate)
         {
             wasOn = _settings.Autostart;
-            _settings = settings;
+            _settings = WithFastAsNow(settings);
             brain = _brain;
             _brain = null;
             _kind = BrainKind.None;
@@ -354,7 +355,7 @@ public sealed partial class BrainController
         // A bot copy counts into the same spend.json as every other copy, under one cap.
         var thisMonth = settings.IsInstance ? "this month across every copy" : "this month";
         return $"API spend: {Money(month)} of {Budget(settings.MonthlyBudgetUsd)} {thisMonth}, {Money(run)} this run in {requests}. " +
-               $"{ModelName(settings.Model)}, {settings.Effort} effort{FightEffortNote(settings)}.\n{playing}";
+               $"{ModelName(settings.Model)}, {settings.Effort} effort{FightEffortNote(settings)}{FastNote(settings)}.\n{playing}";
     }
 
     private string ModelCommand(string from, string args)
@@ -369,18 +370,26 @@ public sealed partial class BrainController
             return $"The model is {ModelName(id)} already.";
 
         var settings = Reload(current, keepAutostart: true) with { Model = id };
+        // A request that asks for fast mode is an error on a model that doesn't take it, so a
+        // switch to one turns fast mode off.
+        var fastOff = settings.Fast && !ModelPrices.SupportsFast(id);
+        if (fastOff)
+            settings = settings with { Fast = false };
         var saved = Save(settings);
         bool subscription;
         lock (_gate)
         {
-            _settings = settings;
+            _settings = settings = WithFastAsNow(settings);
             subscription = _kind == BrainKind.Subscription;
         }
-        Log($"brain: model set to {id} by {from}");
+        Log($"brain: model set to {id} by {from}{(fastOff ? "; fast mode switched off, since it doesn't take it" : "")}");
+        var fast = fastOff ? $" Fast mode is off now: it works on {FastModels} only."
+            : settings.Fast ? $" Fast mode stays on ({FastPrice(id)} per million tokens)."
+            : "";
         // Claude Code gets --model when a session starts, so a session already running keeps its model.
         return subscription
-            ? $"Model set to {ModelName(id)}. Claude Code keeps its current model until its next session.{saved}"
-            : $"Model set to {ModelName(id)}. It applies from the next request.{saved}";
+            ? $"Model set to {ModelName(id)}. Claude Code keeps its current model until its next session.{fast}{saved}"
+            : $"Model set to {ModelName(id)}. It applies from the next request.{fast}{saved}";
     }
 
     private string EffortCommand(string from, string args)
@@ -401,7 +410,7 @@ public sealed partial class BrainController
         bool subscription;
         lock (_gate)
         {
-            _settings = settings;
+            _settings = settings = WithFastAsNow(settings);
             subscription = _kind == BrainKind.Subscription;
         }
         Log($"brain: effort set to {effort} by {from}");
@@ -917,7 +926,7 @@ public sealed partial class BrainController
 
     private static string PlayingLine(string bot, BrainKind kind, string? reason, BrainSettings settings, decimal spent) =>
         kind == BrainKind.Api
-            ? $"{bot} is playing on your API credit ({ModelName(settings.Model)}, {settings.Effort} effort, " +
+            ? $"{bot} is playing on your API credit ({ModelName(settings.Model)}, {settings.Effort} effort{FastNote(settings)}, " +
               $"{Money(spent)} of {Budget(settings.MonthlyBudgetUsd)} spent this month). /stop to take over."
             : $"{bot} is playing on your Claude subscription, since {reason}. /stop to take over.";
 
@@ -925,13 +934,21 @@ public sealed partial class BrainController
         $"Couldn't start the brain ({problem ?? "unknown problem"}). The details are in the log.";
 
     // config.json and the key read again. keepAutostart keeps the flag the controller holds,
-    // since only /start and /stop change it while the game runs. The current settings when the
-    // read fails.
+    // since only /start and /stop change it while the game runs. Fast mode is never in the file:
+    // it stays what the controller holds (off at mod load), unless the file now names a model that
+    // doesn't take it, which switches it off with a line in the chat. The current settings when
+    // the read fails. Never called under the controller's lock.
     private BrainSettings Reload(BrainSettings current, bool keepAutostart)
     {
         try
         {
-            var loaded = _loadSettings();
+            var loaded = _loadSettings() with { Fast = current.Fast };
+            if (loaded.Fast && !ModelPrices.SupportsFast(loaded.Model))
+            {
+                loaded = loaded with { Fast = false };
+                Log($"brain: fast mode switched off, since {BrainSettings.ConfigFileName} now names {loaded.Model}, which doesn't take it");
+                Announce($"Fast mode is off now: it works on {FastModels} only, and the model is now {ModelName(loaded.Model)}.");
+            }
             return keepAutostart ? loaded with { Autostart = current.Autostart } : loaded;
         }
         catch (Exception ex)
